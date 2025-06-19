@@ -1,0 +1,55 @@
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt
+from pydantic import ValidationError
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.schemas import token as token_schema
+from app.db.session import SessionLocal
+from app import crud
+from app.models.user import User
+
+
+# This tells FastAPI which URL to use to get the token.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login/access-token")
+
+
+def get_db():
+    """
+    Dependency that provides a database session for each request.
+    This is the function that was missing.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_current_user(
+    db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)
+) -> User:
+    """
+    Dependency function to decode a JWT token and get the current user from the database.
+    """
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        token_data = token_schema.TokenData(email=payload.get("sub"))
+        if token_data.email is None:
+            raise HTTPException(status_code=403, detail="Could not validate credentials")
+    except (jwt.JWTError, ValidationError):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user = crud.user.get_user_by_email(db, email=token_data.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return user
+
