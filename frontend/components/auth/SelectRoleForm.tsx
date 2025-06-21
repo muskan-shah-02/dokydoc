@@ -1,49 +1,67 @@
-// components/auth/SelectRoleForm.tsx
+// frontend/components/auth/SelectRoleForm.tsx
+
 "use client";
 
 import { useState } from "react";
-// We need to create AccessDenied.tsx as well for this to work
-import { AccessDenied } from "./AccessDenied";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 
-const roles = ["CXO", "Developer", "BA", "Product Manager"];
+// The component only needs the user's roles now
+interface SelectRoleFormProps {
+  userRoles: string[];
+}
 
-// Make sure the "export" keyword is here
-export function SelectRoleForm() {
-  const [showAccessDenied, setShowAccessDenied] = useState(false);
+export function SelectRoleForm({ userRoles }: SelectRoleFormProps) {
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
+  const router = useRouter();
 
-  const handleNext = () => {
-    if (!selectedRole) return;
+  const availableRoles = ["CXO", "BA", "Developer", "Product Manager"];
 
-    if (selectedRole === "CXO") {
-      setShowAccessDenied(true);
+  const handleRoleSelect = () => {
+    if (!selectedRole) {
+      alert("Please select a role.");
+      return;
+    }
+    // --- ADD THESE THREE LINES FOR DEBUGGING ---
+    console.log("------ Role Check ------");
+    console.log("Role Selected in UI:", selectedRole);
+    console.log("Roles Assigned to User (from backend):", userRoles);
+    // -----------------------------------------
+    // Check if the selected role is valid for the current user
+    if (userRoles.includes(selectedRole)) {
+      console.log(`Access granted for role: ${selectedRole}`);
+      router.push("/dashboard");
     } else {
-      alert(`Access granted for ${selectedRole}!`);
+      // If access is denied, redirect to the separate page
+      console.log(
+        `Access denied for role: ${selectedRole}. User roles: [${userRoles.join(
+          ", "
+        )}]`
+      );
+      router.push("/access-denied");
     }
   };
 
-  if (showAccessDenied) {
-    return <AccessDenied onBack={() => setShowAccessDenied(false)} />;
-  }
-
   return (
-    <div className="w-full max-w-sm space-y-8 p-4 text-center">
-      <h1 className="text-3xl font-bold">Roles</h1>
-      <div className="space-y-4">
-        {roles.map((role) => (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        {availableRoles.map((role) => (
           <Button
             key={role}
             variant={selectedRole === role ? "default" : "outline"}
-            className="w-full justify-start p-6 text-left"
             onClick={() => setSelectedRole(role)}
+            className="w-full"
           >
             {role}
           </Button>
         ))}
       </div>
-      <Button onClick={handleNext} className="w-full" disabled={!selectedRole}>
-        Next
+      <Button
+        onClick={handleRoleSelect}
+        disabled={!selectedRole}
+        className="w-full"
+      >
+        Continue
       </Button>
     </div>
   );

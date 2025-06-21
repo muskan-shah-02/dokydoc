@@ -1,4 +1,4 @@
-// components/auth/AccessDenied.tsx
+// frontend/components/auth/AccessDenied.tsx
 "use client";
 
 import { Button } from "@/components/ui/button";

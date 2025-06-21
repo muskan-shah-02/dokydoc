@@ -1,10 +1,8 @@
-// app/page.tsx
+// frontend/app/page.tsx
 
-// This directive must be at the top
 "use client";
 
 import { useState } from "react";
-// ADD THIS LINE: Import the router for navigation
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -14,10 +12,12 @@ import { Label } from "@/components/ui/label";
 export default function Page() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  // ADD THIS LINE: Initialize the router
+  const [error, setError] = useState<string | null>(null); // State to hold error messages
   const router = useRouter();
 
   const handleLogin = async () => {
+    setError(null); // Clear previous errors on a new attempt
+
     try {
       const response = await fetch(
         "http://localhost:8000/api/login/access-token",
@@ -35,17 +35,19 @@ export default function Page() {
 
       if (response.ok) {
         const data = await response.json();
-        // Assuming the token is in data.access_token
-        // You would typically store this token in local storage or a cookie
-        console.log("Login successful, token:", data.access_token);
+        localStorage.setItem("accessToken", data.access_token);
         router.push("/select-role");
       } else {
-        // Handle login error
-        console.error("Login failed");
-        // You might want to show an error message to the user
+        // --- THIS IS THE UPDATED ERROR HANDLING ---
+        // Read the detailed error message from the backend's response
+        const errorData = await response.json();
+        const errorMessage = errorData.detail || "An unknown error occurred.";
+        console.error("Login failed:", errorMessage);
+        setError(errorMessage); // Set the error message to be displayed in the UI
       }
-    } catch (error) {
-      console.error("An error occurred during login:", error);
+    } catch (err) {
+      console.error("A network error occurred:", err);
+      setError("Unable to connect to the server. Please try again later.");
     }
   };
 
@@ -92,8 +94,14 @@ export default function Page() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
-            {/* The onClick handler for this button will now trigger the navigation */}
-            <Button type="submit" className="w-full" onClick={handleLogin}>
+
+            {/* --- ADD THIS TO DISPLAY THE ERROR MESSAGE --- */}
+            {error && (
+              <p className="text-sm font-medium text-red-500">{error}</p>
+            )}
+            {/* --------------------------------------------- */}
+
+            <Button type="button" onClick={handleLogin} className="w-full">
               Log In
             </Button>
           </div>
