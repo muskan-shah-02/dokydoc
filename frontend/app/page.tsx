@@ -17,10 +17,36 @@ export default function Page() {
   // ADD THIS LINE: Initialize the router
   const router = useRouter();
 
-  const handleLogin = () => {
-    console.log("Login attempt with:", email, password);
-    // ADD THIS LINE: This command tells the app to navigate to the /select-role page
-    router.push("/select-role");
+  const handleLogin = async () => {
+    try {
+      const response = await fetch(
+        "http://localhost:8000/api/login/access-token",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            username: email,
+            password: password,
+          }),
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        // Assuming the token is in data.access_token
+        // You would typically store this token in local storage or a cookie
+        console.log("Login successful, token:", data.access_token);
+        router.push("/select-role");
+      } else {
+        // Handle login error
+        console.error("Login failed");
+        // You might want to show an error message to the user
+      }
+    } catch (error) {
+      console.error("An error occurred during login:", error);
+    }
   };
 
   return (
