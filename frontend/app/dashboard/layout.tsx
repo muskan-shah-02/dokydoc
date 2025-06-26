@@ -12,7 +12,8 @@ import React, {
   ElementType,
   useEffect,
 } from "react";
-// import { usePathname } from 'next/navigation'; // Removed for better compatibility
+// import Link from 'next/link'; // Removed for compatibility
+// import { usePathname } from 'next/navigation'; // Removed for compatibility
 import {
   LayoutDashboard,
   FileText,
@@ -41,10 +42,9 @@ const formatRoleForDisplay = (slug: string): string => {
 const SidebarContext = createContext({ isCollapsed: false });
 
 // --- DokyDoc Logo Component ---
-// This now uses the embedded SVG for the best quality.
 const DokyDocLogo = ({ isCollapsed }: { isCollapsed: boolean }) => (
   <a
-    href="/dashboard"
+    href="/select-role"
     className={`flex items-center h-16 bg-white border-b border-gray-200 ${
       isCollapsed ? "justify-center" : "px-6"
     }`}
@@ -78,17 +78,24 @@ const DokyDocLogo = ({ isCollapsed }: { isCollapsed: boolean }) => (
 interface SidebarItemProps {
   icon: ElementType;
   text: string;
-  active?: boolean;
+  active: boolean;
   alert?: boolean;
+  href: string;
 }
 
 // --- Sidebar Item ---
-const SidebarItem = ({ icon: Icon, text, active, alert }: SidebarItemProps) => {
+const SidebarItem = ({
+  icon: Icon,
+  text,
+  active,
+  alert,
+  href,
+}: SidebarItemProps) => {
   const { isCollapsed } = useContext(SidebarContext);
   return (
     <li>
       <a
-        href="#"
+        href={href}
         className={`relative flex items-center py-3 px-4 my-1 font-medium rounded-lg cursor-pointer transition-colors group ${
           active
             ? "bg-gradient-to-tr from-blue-200 to-blue-100 text-blue-800"
@@ -114,27 +121,52 @@ const SidebarItem = ({ icon: Icon, text, active, alert }: SidebarItemProps) => {
 // --- Sidebar Component ---
 const Sidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [displayRole, setDisplayRole] = useState("N/A");
+  const [pathname, setPathname] = useState("");
 
   useEffect(() => {
-    // Get role from URL on the client side
-    const roleSlug = window.location.pathname.split("/").pop() || "";
-    setDisplayRole(formatRoleForDisplay(roleSlug));
+    // This check ensures window is defined, making it safe for SSR environments
+    if (typeof window !== "undefined") {
+      setPathname(window.location.pathname);
+    }
   }, []);
 
-  const menuItems: SidebarItemProps[] = useMemo(
+  const roleSlug = pathname.split("/")[2] || "";
+  const displayRole = formatRoleForDisplay(roleSlug);
+
+  const menuItems: Omit<SidebarItemProps, "active">[] = useMemo(
     () => [
-      { icon: LayoutDashboard, text: "Dashboard", active: true },
-      { icon: FileText, text: "Documents" },
-      { icon: GitBranch, text: "Code" },
-      { icon: GitBranch, text: "Visual Architecture", alert: true },
-      { icon: CheckSquare, text: "Validation Panel" },
-      { icon: History, text: "Sync Timeline" },
-      { icon: Download, text: "Export" },
-      { icon: ShieldCheck, text: "Audit Trail" },
-      { icon: Cog, text: "Settings & More" },
+      {
+        icon: LayoutDashboard,
+        text: "Dashboard",
+        href: `/dashboard/${roleSlug}`,
+      },
+      { icon: FileText, text: "Documents", href: "/dashboard/documents" },
+      { icon: GitBranch, text: "Code", href: "/dashboard/code" },
+      {
+        icon: GitBranch,
+        text: "Visual Architecture",
+        href: "/dashboard/visual-architecture",
+        alert: true,
+      },
+      {
+        icon: CheckSquare,
+        text: "Validation Panel",
+        href: "/dashboard/validation-panel",
+      },
+      {
+        icon: History,
+        text: "Sync Timeline",
+        href: "/dashboard/sync-timeline",
+      },
+      { icon: Download, text: "Export", href: "/dashboard/export" },
+      {
+        icon: ShieldCheck,
+        text: "Audit Trail",
+        href: "/dashboard/audit-trail",
+      },
+      { icon: Cog, text: "Settings & More", href: "/dashboard/settings" },
     ],
-    []
+    [roleSlug]
   );
 
   return (
@@ -145,11 +177,14 @@ const Sidebar = () => {
         }`}
       >
         <nav className="h-full flex flex-col bg-white border-r border-gray-200 shadow-sm">
-          {/* Passing the isCollapsed state to the logo component */}
           <DokyDocLogo isCollapsed={isCollapsed} />
           <ul className="flex-1 px-4 mt-4">
             {menuItems.map((item) => (
-              <SidebarItem key={item.text} {...item} />
+              <SidebarItem
+                key={item.text}
+                {...item}
+                active={pathname === item.href}
+              />
             ))}
           </ul>
           <div className="border-t border-gray-200 p-4">
@@ -196,8 +231,10 @@ const TopBar = () => {
   const [displayRole, setDisplayRole] = useState("N/A");
 
   useEffect(() => {
-    const roleSlug = window.location.pathname.split("/").pop() || "";
-    setDisplayRole(formatRoleForDisplay(roleSlug));
+    if (typeof window !== "undefined") {
+      const roleSlug = window.location.pathname.split("/")[2] || "";
+      setDisplayRole(formatRoleForDisplay(roleSlug));
+    }
   }, []);
 
   return (
