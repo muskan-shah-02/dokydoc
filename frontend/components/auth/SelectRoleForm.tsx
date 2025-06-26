@@ -1,44 +1,38 @@
-// frontend/components/auth/SelectRoleForm.tsx
-
+/*
+  This is the updated code for your EXISTING file at:
+  frontend/components/auth/SelectRoleForm.tsx
+*/
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+// import { useRouter } from "next/navigation"; // Removed for compatibility
 import { Button } from "@/components/ui/button";
 
-// The component only needs the user's roles now
 interface SelectRoleFormProps {
   userRoles: string[];
 }
 
 export function SelectRoleForm({ userRoles }: SelectRoleFormProps) {
-  const [selectedRole, setSelectedRole] = useState<string | null>(null);
-  const router = useRouter();
+  const [selectedRole, setSelectedRole] = useState<string>("");
+  // const router = useRouter(); // Replaced with window.location.href
 
   const availableRoles = ["CXO", "BA", "Developer", "Product Manager"];
 
   const handleRoleSelect = () => {
     if (!selectedRole) {
-      alert("Please select a role.");
+      alert("Please select a role to continue.");
       return;
     }
-    // --- ADD THESE THREE LINES FOR DEBUGGING ---
-    console.log("------ Role Check ------");
-    console.log("Role Selected in UI:", selectedRole);
-    console.log("Roles Assigned to User (from backend):", userRoles);
-    // -----------------------------------------
-    // Check if the selected role is valid for the current user
+
+    // Convert the selected role into a URL-friendly slug
+    // e.g., "Product Manager" becomes "product-manager"
+    const roleSlug = selectedRole.toLowerCase().replace(/ /g, "-");
+
     if (userRoles.includes(selectedRole)) {
-      console.log(`Access granted for role: ${selectedRole}`);
-      router.push("/dashboard");
+      // Navigate using standard browser location method
+      window.location.href = `/dashboard/${roleSlug}`;
     } else {
-      // If access is denied, redirect to the separate page
-      console.log(
-        `Access denied for role: ${selectedRole}. User roles: [${userRoles.join(
-          ", "
-        )}]`
-      );
-      router.push("/access-denied");
+      window.location.href = "/access-denied";
     }
   };
 
@@ -56,12 +50,8 @@ export function SelectRoleForm({ userRoles }: SelectRoleFormProps) {
           </Button>
         ))}
       </div>
-      <Button
-        onClick={handleRoleSelect}
-        disabled={!selectedRole}
-        className="w-full"
-      >
-        Continue
+      <Button onClick={handleRoleSelect} className="w-full">
+        Continue as {selectedRole || "..."}
       </Button>
     </div>
   );

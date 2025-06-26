@@ -1,34 +1,48 @@
+# This is the corrected content for your file at:
+# backend/docker-compose.yml
+
+# The 'version' attribute is obsolete and has been removed as per the warning.
 services:
-  # The FastAPI application service
+  # FastAPI application
   app:
-    build: .
     container_name: dokydoc_app
+
+    # build from the current directory (where Dockerfile lives)
+    build:
+      context: . # <-- CHANGED FROM ./backend TO .
+      dockerfile: Dockerfile
+
+    # expose your port
     ports:
       - "8000:8000"
+
+    # mount the current directory into /app
     volumes:
-      # Mount the entire project directory for live-reloading
-      - .:/app
+      - .:/app # <-- CHANGED FROM ./backend:/app TO .:/app
+
     environment:
       - DATABASE_URL=postgresql://postgres:mysecretpassword@db:5432/dokydoc
-      # This explicitly tells Python where to look for modules.
       - PYTHONPATH=/app
+
     depends_on:
       - db
-    # The command to run the application
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
-  # The PostgreSQL database service
+    # Note: Using uvicorn directly instead of the 'command' block
+    # can sometimes be more stable in compose files.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Postgres
   db:
     image: postgres:15-alpine
     container_name: dokydoc_db
-    volumes:
-      - postgres_data:/var/lib/postgresql/data/
+    ports:
+      - "5432:5432"
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=mysecretpassword
       - POSTGRES_DB=dokydoc
-    ports:
-      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
 
 volumes:
   postgres_data:
