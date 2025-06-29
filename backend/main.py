@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from app.db.session import engine
 from app.db.base_class import Base
-from app.api.endpoints import login, dashboard, documents
+from app.api.endpoints import login, dashboard, documents, code_components
+
 
 # This function will run when the application starts up
 def create_tables():
@@ -31,7 +32,7 @@ def on_startup():
 app.include_router(login.router, tags=["Login"], prefix="/api")
 app.include_router(dashboard.router, tags=["Dashboard"], prefix="/api/dashboard")
 app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])
-
+app.include_router(code_components.router, prefix="/api/v1/code-components", tags=["code_components"])
 
 @app.get("/")
 def read_root():
