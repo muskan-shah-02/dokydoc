@@ -30,6 +30,7 @@ from app.db.base_class import Base
 from app.models.user import User
 from app.models.document import Document 
 from app.models.code_component import CodeComponent
+from app.models.document_code_link import DocumentCodeLink
 
 target_metadata = Base.metadata
 # --- END OF MODEL IMPORTS ---
