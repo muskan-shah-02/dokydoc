@@ -1,8 +1,6 @@
 /*
-  This is the updated content for your file at:
+  This is the complete and corrected content for your file at:
   frontend/app/dashboard/documents/page.tsx
-
-  This version adds the UI for linking documents to code components.
 */
 "use client";
 
@@ -10,6 +8,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import {
   Table,
   TableBody,
@@ -28,11 +27,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
-  Upload,
   FileText,
   PlusCircle,
   AlertCircle,
-  Link,
+  Link as LinkIcon,
   Unlink,
 } from "lucide-react";
 
@@ -43,7 +41,8 @@ interface Document {
   document_type: string;
   version: string;
   created_at: string;
-  // We will add the link count dynamically
+  status: string;
+  progress: number;
   link_count?: number;
 }
 
@@ -54,155 +53,8 @@ interface CodeComponent {
   version: string;
 }
 
-// --- Manage Links Dialog Component ---
-const ManageLinksDialog = ({
-  document,
-  onLinksChanged,
-}: {
-  document: Document;
-  onLinksChanged: () => void;
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [allCodeComponents, setAllCodeComponents] = useState<CodeComponent[]>(
-    []
-  );
-  const [linkedComponentIds, setLinkedComponentIds] = useState<Set<number>>(
-    new Set()
-  );
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const token = localStorage.getItem("accessToken");
-
-  const fetchAllData = useCallback(async () => {
-    if (!isOpen || !token) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      // Fetch all available code components
-      const componentsRes = await fetch(
-        "http://localhost:8000/api/v1/code-components/",
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      if (!componentsRes.ok)
-        throw new Error("Failed to fetch code components.");
-      const allComps: CodeComponent[] = await componentsRes.json();
-      setAllCodeComponents(allComps);
-
-      // Fetch components already linked to this document
-      const linkedRes = await fetch(
-        `http://localhost:8000/api/v1/links/document/${document.id}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      if (!linkedRes.ok) throw new Error("Failed to fetch existing links.");
-      const linkedComps: CodeComponent[] = await linkedRes.json();
-      setLinkedComponentIds(new Set(linkedComps.map((c) => c.id)));
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isOpen, document.id, token]);
-
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
-
-  const handleLinkToggle = async (component: CodeComponent) => {
-    const isCurrentlyLinked = linkedComponentIds.has(component.id);
-    const endpoint = "http://localhost:8000/api/v1/links/";
-    const method = isCurrentlyLinked ? "DELETE" : "POST";
-
-    try {
-      const response = await fetch(endpoint, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          document_id: document.id,
-          code_component_id: component.id,
-        }),
-      });
-
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(
-          errData.detail || `Failed to ${isCurrentlyLinked ? "unlink" : "link"}`
-        );
-      }
-
-      // Refresh the data to show the change
-      await fetchAllData();
-      onLinksChanged(); // Also refresh the count on the main page
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  };
-
-  return (
-    <Dialog open={isOpen} onOpenChange={setIsOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Link className="mr-2 h-4 w-4" /> Manage Links (
-          {document.link_count || 0})
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Link Code to: {document.filename}</DialogTitle>
-          <DialogDescription>
-            Select code components to associate with this document.
-          </DialogDescription>
-        </DialogHeader>
-        {isLoading && <p>Loading...</p>}
-        {error && <p className="text-sm text-red-500">{error}</p>}
-        {!isLoading && !error && (
-          <div className="max-h-80 overflow-y-auto p-1">
-            <ul className="space-y-2">
-              {allCodeComponents.map((comp) => (
-                <li
-                  key={comp.id}
-                  className="flex items-center justify-between p-2 rounded-md hover:bg-gray-100"
-                >
-                  <div>
-                    <p className="font-semibold">{comp.name}</p>
-                    <p className="text-sm text-gray-500">
-                      {comp.component_type} - v{comp.version}
-                    </p>
-                  </div>
-                  <Button
-                    variant={
-                      linkedComponentIds.has(comp.id)
-                        ? "destructive"
-                        : "default"
-                    }
-                    size="sm"
-                    onClick={() => handleLinkToggle(comp)}
-                  >
-                    {linkedComponentIds.has(comp.id) ? (
-                      <Unlink className="h-4 w-4" />
-                    ) : (
-                      <Link className="h-4 w-4" />
-                    )}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-// --- Upload Dialog Component (No changes needed) ---
+// --- Upload Dialog Component ---
 const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
-  // ... (The existing code for this component remains the same)
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [version, setVersion] = useState("");
   const [documentType, setDocumentType] = useState("BRD");
@@ -308,6 +160,198 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
   );
 };
 
+// --- Manage Links Dialog Component ---
+const ManageLinksDialog = ({
+  document,
+  onLinksChanged,
+}: {
+  document: Document;
+  onLinksChanged: () => void;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [allCodeComponents, setAllCodeComponents] = useState<CodeComponent[]>(
+    []
+  );
+  const [linkedComponentIds, setLinkedComponentIds] = useState<Set<number>>(
+    new Set()
+  );
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const token = localStorage.getItem("accessToken");
+
+  const fetchAllData = useCallback(async () => {
+    if (!isOpen || !token) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const componentsRes = await fetch(
+        "http://localhost:8000/api/v1/code-components/",
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!componentsRes.ok)
+        throw new Error("Failed to fetch code components.");
+      const allComps: CodeComponent[] = await componentsRes.json();
+      setAllCodeComponents(allComps);
+
+      const linkedRes = await fetch(
+        `http://localhost:8000/api/v1/links/document/${document.id}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!linkedRes.ok) throw new Error("Failed to fetch existing links.");
+      const linkedComps: CodeComponent[] = await linkedRes.json();
+      setLinkedComponentIds(new Set(linkedComps.map((c) => c.id)));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isOpen, document.id, token]);
+
+  useEffect(() => {
+    fetchAllData();
+  }, [fetchAllData]);
+
+  const handleLinkToggle = async (component: CodeComponent) => {
+    const isCurrentlyLinked = linkedComponentIds.has(component.id);
+    const endpoint = "http://localhost:8000/api/v1/links/";
+    const method = isCurrentlyLinked ? "DELETE" : "POST";
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          document_id: document.id,
+          code_component_id: component.id,
+        }),
+      });
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(
+          errData.detail || `Failed to ${isCurrentlyLinked ? "unlink" : "link"}`
+        );
+      }
+      await fetchAllData();
+      onLinksChanged();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm">
+          <LinkIcon className="mr-2 h-4 w-4" /> Manage Links (
+          {document.link_count || 0})
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Link Code to: {document.filename}</DialogTitle>
+          <DialogDescription>
+            Select code components to associate with this document.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading && <p>Loading...</p>}
+        {error && <p className="text-sm text-red-500">{error}</p>}
+        {!isLoading && !error && (
+          <div className="max-h-80 overflow-y-auto p-1">
+            <ul className="space-y-2">
+              {allCodeComponents.map((comp) => (
+                <li
+                  key={comp.id}
+                  className="flex items-center justify-between p-2 rounded-md hover:bg-gray-100"
+                >
+                  <div>
+                    <p className="font-semibold">{comp.name}</p>
+                    <p className="text-sm text-gray-500">
+                      {comp.component_type} - v{comp.version}
+                    </p>
+                  </div>
+                  <Button
+                    variant={
+                      linkedComponentIds.has(comp.id)
+                        ? "destructive"
+                        : "default"
+                    }
+                    size="sm"
+                    onClick={() => handleLinkToggle(comp)}
+                  >
+                    {linkedComponentIds.has(comp.id) ? (
+                      <Unlink className="h-4 w-4" />
+                    ) : (
+                      <LinkIcon className="h-4 w-4" />
+                    )}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// --- Document Status Cell Component ---
+const DocumentStatusCell = ({
+  doc,
+  onUpdate,
+}: {
+  doc: Document;
+  onUpdate: (updatedDoc: Document) => void;
+}) => {
+  const [status, setStatus] = useState(doc.status);
+  const [progress, setProgress] = useState(doc.progress);
+
+  useEffect(() => {
+    if (status === "processing") {
+      const intervalId = setInterval(async () => {
+        const token = localStorage.getItem("accessToken");
+        try {
+          const response = await fetch(
+            `http://localhost:8000/api/v1/documents/${doc.id}/status`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (!response.ok) {
+            clearInterval(intervalId);
+            setStatus("failed");
+            return;
+          }
+          const data = await response.json();
+          setProgress(data.progress);
+          setStatus(data.status);
+          if (data.status === "completed" || data.status === "failed") {
+            clearInterval(intervalId);
+            onUpdate({ ...doc, status: data.status, progress: data.progress });
+          }
+        } catch (error) {
+          console.error("Polling error:", error);
+          clearInterval(intervalId);
+          setStatus("failed");
+        }
+      }, 2000);
+      return () => clearInterval(intervalId);
+    }
+  }, [status, doc.id, onUpdate, doc]);
+
+  if (status === "completed") {
+    return <span className="text-green-600 font-medium">Completed</span>;
+  }
+  if (status === "failed") {
+    return <span className="text-red-600 font-medium">Failed</span>;
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <Progress value={progress} className="w-24" />
+      <span className="text-sm text-gray-500">{progress}%</span>
+    </div>
+  );
+};
+
 // --- Main Documents Page Component ---
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -323,7 +367,6 @@ export default function DocumentsPage() {
       setIsLoading(false);
       return;
     }
-
     try {
       const response = await fetch("http://localhost:8000/api/v1/documents/", {
         headers: { Authorization: `Bearer ${token}` },
@@ -333,22 +376,22 @@ export default function DocumentsPage() {
         throw new Error(errData.detail || "Failed to fetch documents.");
       }
       const data: Document[] = await response.json();
-
-      // For each document, fetch its link count
       const documentsWithLinkCounts = await Promise.all(
         data.map(async (doc) => {
-          const linksResponse = await fetch(
-            `http://localhost:8000/api/v1/links/document/${doc.id}`,
-            {
-              headers: { Authorization: `Bearer ${token}` },
-            }
-          );
-          if (!linksResponse.ok) return { ...doc, link_count: 0 }; // Default to 0 on error
-          const linkedComponents: CodeComponent[] = await linksResponse.json();
-          return { ...doc, link_count: linkedComponents.length };
+          try {
+            const linksResponse = await fetch(
+              `http://localhost:8000/api/v1/links/document/${doc.id}`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (!linksResponse.ok) return { ...doc, link_count: 0 };
+            const linkedComponents: CodeComponent[] =
+              await linksResponse.json();
+            return { ...doc, link_count: linkedComponents.length };
+          } catch {
+            return { ...doc, link_count: 0 };
+          }
         })
       );
-
       setDocuments(documentsWithLinkCounts);
     } catch (err) {
       setError((err as Error).message);
@@ -361,6 +404,12 @@ export default function DocumentsPage() {
     fetchDocuments();
   }, [fetchDocuments]);
 
+  const handleDocumentUpdate = (updatedDoc: Document) => {
+    setDocuments((currentDocs) =>
+      currentDocs.map((d) => (d.id === updatedDoc.id ? updatedDoc : d))
+    );
+  };
+
   return (
     <div className="p-2 sm:p-4">
       <div className="flex items-center justify-between mb-6">
@@ -370,7 +419,7 @@ export default function DocumentsPage() {
         <UploadDialog onUploadSuccess={fetchDocuments} />
       </div>
 
-      {isLoading && <p>Loading documents...</p>}
+      {isLoading && <p className="text-center p-10">Loading documents...</p>}
       {error && (
         <div className="text-red-500 bg-red-100 p-4 rounded-lg flex items-center">
           <AlertCircle className="mr-2" /> Error: {error}
@@ -385,7 +434,7 @@ export default function DocumentsPage() {
                 <TableHead>Filename</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Version</TableHead>
-                <TableHead>Uploaded At</TableHead>
+                <TableHead>Status</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -393,14 +442,22 @@ export default function DocumentsPage() {
               {documents.length > 0 ? (
                 documents.map((doc) => (
                   <TableRow key={doc.id}>
-                    <TableCell className="font-medium flex items-center">
-                      <FileText className="h-4 w-4 mr-2 text-gray-500" />
-                      {doc.filename}
+                    <TableCell className="font-medium">
+                      <a
+                        href={`/dashboard/documents/${doc.id}`}
+                        className="flex items-center text-blue-600 hover:underline"
+                      >
+                        <FileText className="h-4 w-4 mr-2 text-gray-500" />
+                        {doc.filename}
+                      </a>
                     </TableCell>
                     <TableCell>{doc.document_type}</TableCell>
                     <TableCell>{doc.version}</TableCell>
                     <TableCell>
-                      {new Date(doc.created_at).toLocaleDateString()}
+                      <DocumentStatusCell
+                        doc={doc}
+                        onUpdate={handleDocumentUpdate}
+                      />
                     </TableCell>
                     <TableCell className="text-right">
                       <ManageLinksDialog
