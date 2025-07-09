@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     #-----Gemini API Settings-----
-    GEMINI_API_KEY: str = "AIzaSyD22VeU2AodTHfMtMO1YfbPisTrAiyjJgs"
+    GEMINI_API_KEY: str = "AIzaSyDnC62JSp0b0GKs3CHYivy9SM67F9NA22A"
 
     class Config:
         # Pydantic will automatically look for environment variables
