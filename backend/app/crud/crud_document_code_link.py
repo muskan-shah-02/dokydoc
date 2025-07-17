@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.crud.base import CRUDBase
 from app.models.document_code_link import DocumentCodeLink
-from app.schemas.document_code_link import DocumentCodeLinkCreate
+from app.schemas.document_code_link import DocumentCodeLinkCreate, DocumentCodeLinkUpdate
 
-class CRUDDocumentCodeLink(CRUDBase[DocumentCodeLink, DocumentCodeLinkCreate, None]):
+class CRUDDocumentCodeLink(CRUDBase[DocumentCodeLink, DocumentCodeLinkCreate, DocumentCodeLinkUpdate]):
     """
     CRUD functions for the DocumentCodeLink model.
     """
