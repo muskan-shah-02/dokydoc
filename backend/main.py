@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from app.db.session import engine
 from app.db.base_class import Base
-from app.api.endpoints import login, dashboard, documents, code_components, document_code_links, analysis_results
+from app.api.endpoints import login, dashboard, documents, code_components, document_code_links, analysis_results, validation
+
 
 
 # This function will run when the application starts up
@@ -35,6 +36,7 @@ app.include_router(documents.router, prefix="/api/v1/documents", tags=["document
 app.include_router(code_components.router, prefix="/api/v1/code-components", tags=["code_components"])
 app.include_router(document_code_links.router, prefix="/api/v1/links", tags=["links"])
 app.include_router(analysis_results.router, prefix="/api/v1/analysis", tags=["analysis"])
+app.include_router(validation.router, prefix="/api/v1/validation", tags=["validation"])
 
 @app.get("/")
 def read_root():
