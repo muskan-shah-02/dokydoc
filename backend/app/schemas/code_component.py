@@ -1,12 +1,12 @@
-# This is the content for your NEW file at:
+# This is the updated content for your file at:
 # backend/app/schemas/code_component.py
 
 from pydantic import BaseModel
+from typing import Optional, Dict, Any
 from datetime import datetime
-from typing import Optional
 
 # --- Base Schema ---
-# Contains fields common to creating and reading code components.
+# Defines the common properties shared across all related schemas.
 class CodeComponentBase(BaseModel):
     name: str
     component_type: str
@@ -14,26 +14,46 @@ class CodeComponentBase(BaseModel):
     version: str
 
 # --- Create Schema ---
-# This defines the data your API expects when a user registers a new code component.
+# Defines the properties required to create a new component.
+# This is what the API will expect in the request body on a POST.
 class CodeComponentCreate(CodeComponentBase):
     pass
 
 # --- Update Schema ---
-# Defines the fields that can be updated. All are optional.
+# Defines the properties that can be updated. All are optional.
+# This is what the API will expect in the request body on a PATCH/PUT.
 class CodeComponentUpdate(BaseModel):
     name: Optional[str] = None
     component_type: Optional[str] = None
     location: Optional[str] = None
     version: Optional[str] = None
+    summary: Optional[str] = None
+    structured_analysis: Optional[Dict[str, Any]] = None
+    analysis_status: Optional[str] = None
 
-# --- Main Schema for API Responses ---
-# This is the schema used when returning code component data from the API.
-class CodeComponent(CodeComponentBase):
+# --- InDBBase Schema (The one you asked about) ---
+# This is a critical addition. It represents all the fields for a component
+# as it exists in the database, including auto-generated fields like id, owner_id, etc.
+# It serves as a reusable base for any schema that reads from the DB.
+class CodeComponentInDBBase(CodeComponentBase):
     id: int
     owner_id: int
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    # The new analysis fields are included here
+    summary: Optional[str] = None
+    structured_analysis: Optional[Dict[str, Any]] = None
+    analysis_status: str
 
-    # Pydantic v2 uses `from_attributes` instead of `orm_mode`
     class Config:
-        from_attributes = True
+        # This vital setting allows Pydantic to read data directly from
+        # a SQLAlchemy ORM model instance.
+        orm_mode = True
+
+# --- Main API Response Schema ---
+# This is the final schema that will be used when returning data from the API.
+# It inherits everything from our InDBBase and represents a complete object.
+class CodeComponent(CodeComponentInDBBase):
+    pass
 
