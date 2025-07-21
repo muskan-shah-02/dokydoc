@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.crud.base import CRUDBase
 from app.models.code_component import CodeComponent
 from app.schemas.code_component import CodeComponentCreate, CodeComponentUpdate
+from app.models.document_code_link import DocumentCodeLink
 
 class CRUDCodeComponent(CRUDBase[CodeComponent, CodeComponentCreate, CodeComponentUpdate]):
     """
@@ -43,6 +44,22 @@ class CRUDCodeComponent(CRUDBase[CodeComponent, CodeComponentCreate, CodeCompone
             .limit(limit)
             .all()
         )
-
+    # --- NEW: Safe Deletion Method ---
+    def remove_with_links(self, db: Session, *, id: int) -> CodeComponent:
+        """
+        Safely deletes a code component and its associated links.
+        
+        This method first deletes all entries in the document_code_links table
+        that reference this component, satisfying the foreign key constraint.
+        Then, it deletes the component itself.
+        """
+        # Step 1: Delete all associated links
+        db.query(DocumentCodeLink).filter(DocumentCodeLink.code_component_id == id).delete()
+        
+        # Step 2: Delete the component itself using the base remove method
+        component = super().remove(db=db, id=id)
+        
+        db.commit()
+        return component
 # Create a single instance that we can import and use in our API endpoints.
 code_component = CRUDCodeComponent(CodeComponent)

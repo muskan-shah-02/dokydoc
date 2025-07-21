@@ -4,7 +4,7 @@
 from typing import List, Any
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
@@ -84,3 +84,24 @@ def read_code_component(
     
     logger.info(f"Successfully retrieved component {id} for user {current_user.email}")
     return component
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_code_component(
+    *,
+    db: Session = Depends(deps.get_db),
+    id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """
+    Delete a code component and its associated links.
+    """
+    logger.info(f"User {current_user.email} attempting to delete component {id}")
+    component = crud.code_component.get(db=db, id=id)
+    if not component:
+        raise HTTPException(status_code=404, detail="CodeComponent not found")
+    if component.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    # Use our new safe deletion method from the CRUD layer
+    crud.code_component.remove_with_links(db=db, id=id)
+    logger.info(f"Successfully deleted component {id}")
+    # No return value is needed, as the 204 status code implies success with no content.
