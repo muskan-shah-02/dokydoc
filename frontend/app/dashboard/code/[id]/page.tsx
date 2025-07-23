@@ -1,10 +1,10 @@
-// This is the new content for your file at:
+// This is the updated content for your file at:
 // frontend/app/dashboard/code/[id]/page.tsx
 
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -13,19 +13,31 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-// --- FIX: Import AlertCircle from lucide-react ---
+import { Button } from "@/components/ui/button";
 import {
-  Terminal,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Clock,
   CheckCircle,
   XCircle,
   Loader2,
-  Globe,
-  GitBranch,
   AlertCircle,
+  Trash2,
 } from "lucide-react";
 
-// The full interface for a single component, including the new analysis fields.
+// --- NEW: Import our specialized analysis view components ---
+import { RepositoryAnalysisView } from "@/components/analysis/RepositoryAnalysisView";
+import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
+
 interface CodeComponentDetail {
   id: number;
   name: string;
@@ -39,11 +51,13 @@ interface CodeComponentDetail {
 
 export default function CodeComponentDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const id = params.id;
 
   const [component, setComponent] = useState<CodeComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const getStatusIcon = (status: CodeComponentDetail["analysis_status"]) => {
     switch (status) {
@@ -58,9 +72,36 @@ export default function CodeComponentDetailPage() {
     }
   };
 
+  const handleDelete = async () => {
+    setIsDeleting(true);
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setError("Authentication token not found.");
+      setIsDeleting(false);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/v1/code-components/${id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to delete component.");
+      }
+      router.push("/dashboard/code");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   useEffect(() => {
     if (!id) return;
-
     const fetchComponentDetail = async () => {
       const token = localStorage.getItem("accessToken");
       if (!token) {
@@ -68,7 +109,6 @@ export default function CodeComponentDetailPage() {
         setLoading(false);
         return;
       }
-
       try {
         const res = await fetch(
           `http://localhost:8000/api/v1/code-components/${id}`,
@@ -76,7 +116,6 @@ export default function CodeComponentDetailPage() {
             headers: { Authorization: `Bearer ${token}` },
           }
         );
-
         if (!res.ok) {
           const errorData = await res.json();
           throw new Error(
@@ -93,9 +132,7 @@ export default function CodeComponentDetailPage() {
         setLoading(false);
       }
     };
-
     fetchComponentDetail();
-
     const interval = setInterval(() => {
       if (
         component &&
@@ -105,9 +142,61 @@ export default function CodeComponentDetailPage() {
         fetchComponentDetail();
       }
     }, 5000);
-
     return () => clearInterval(interval);
   }, [id, component?.analysis_status]);
+
+  // --- NEW: Component to intelligently render the correct analysis view ---
+  const AnalysisResult = () => {
+    if (
+      component?.analysis_status !== "completed" ||
+      !component?.structured_analysis
+    ) {
+      return (
+        <Card>
+          <CardHeader>
+            <CardTitle>Analysis In Progress</CardTitle>
+            <CardDescription>
+              The AI analysis for this component is not yet complete. The status
+              is currently: {component?.analysis_status}. This page will
+              automatically refresh when the analysis is done.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-center p-8">
+              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            </div>
+          </CardContent>
+        </Card>
+      );
+    }
+
+    switch (component.component_type) {
+      case "Repository":
+        return (
+          <RepositoryAnalysisView analysis={component.structured_analysis} />
+        );
+      case "File":
+      case "Class":
+      case "Function":
+        return (
+          <FileAnalysisView
+            analysis={component.structured_analysis}
+            fileName={component.name}
+          />
+        );
+      default:
+        return (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Unsupported Component Type</AlertTitle>
+            <AlertDescription>
+              A detailed view for component type "{component.component_type}"
+              has not been implemented yet.
+            </AlertDescription>
+          </Alert>
+        );
+    }
+  };
 
   if (loading) {
     return (
@@ -142,72 +231,55 @@ export default function CodeComponentDetailPage() {
             {component.component_type}
           </p>
         </div>
-        <div className="flex items-center space-x-2 p-2 bg-muted rounded-lg">
-          {getStatusIcon(component.analysis_status)}
-          <span className="font-semibold capitalize">
-            {component.analysis_status}
-          </span>
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2 p-2 bg-muted rounded-lg">
+            {getStatusIcon(component.analysis_status)}
+            <span className="font-semibold capitalize">
+              {component.analysis_status}
+            </span>
+          </div>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" size="icon">
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently delete the
+                  code component and all of its associated data.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleDelete} disabled={isDeleting}>
+                  {isDeleting && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Continue
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
-      </div>
-
-      <div className="grid md:grid-cols-3 gap-6">
-        <Card className="md:col-span-2">
-          <CardHeader>
-            <CardTitle>AI-Generated Summary</CardTitle>
-            <CardDescription>
-              A high-level overview of the code's purpose and functionality.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-muted-foreground italic">
-              {component.summary ||
-                "No summary available. Analysis may be pending or failed."}
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Component Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-sm">
-            <div className="flex items-center">
-              <Globe className="w-4 h-4 mr-3 text-muted-foreground" />
-              <span className="truncate" title={component.location}>
-                {component.location}
-              </span>
-            </div>
-            <div className="flex items-center">
-              <GitBranch className="w-4 h-4 mr-3 text-muted-foreground" />
-              <span className="font-mono">{component.version}</span>
-            </div>
-          </CardContent>
-        </Card>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Structured Analysis</CardTitle>
-          <CardDescription>
-            Detailed insights extracted from the source code by the AI.
-          </CardDescription>
+          <CardTitle>AI-Generated Summary</CardTitle>
         </CardHeader>
         <CardContent>
-          {component.structured_analysis ? (
-            <pre className="p-4 bg-secondary rounded-md overflow-x-auto text-sm">
-              {JSON.stringify(component.structured_analysis, null, 2)}
-            </pre>
-          ) : (
-            <Alert>
-              <Terminal className="h-4 w-4" />
-              <AlertTitle>No Structured Data</AlertTitle>
-              <AlertDescription>
-                Structured analysis data is not available for this component.
-                The analysis might be pending or may have failed.
-              </AlertDescription>
-            </Alert>
-          )}
+          <p className="text-muted-foreground italic">
+            {component.summary ||
+              "No summary available. Analysis may be pending or failed."}
+          </p>
         </CardContent>
       </Card>
+
+      {/* --- RENDER THE INTELLIGENT ANALYSIS COMPONENT --- */}
+      <AnalysisResult />
     </div>
   );
 }
