@@ -34,6 +34,7 @@ from app.models.document_code_link import DocumentCodeLink
 from app.models.analysis_result import AnalysisResult
 from app.models.mismatch import Mismatch 
 
+
 target_metadata = Base.metadata
 # --- END OF MODEL IMPORTS ---
 

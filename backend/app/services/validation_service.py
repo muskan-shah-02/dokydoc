@@ -1,90 +1,168 @@
-import logging
-from sqlalchemy.orm import Session
-from typing import List
+# This is the corrected content for your file at:
+# backend/app/services/validation_service.py
 
-from app import crud
-from app.schemas.mismatch import MismatchCreate
+import logging
+import asyncio
+from typing import List
+from contextlib import asynccontextmanager
+from sqlalchemy.orm import Session
+# --- Import `and_` for combining filters ---
+from sqlalchemy import and_
+
+from app import crud, models, schemas
+from app.db.session import SessionLocal
+from app.services.ai.gemini import call_gemini_for_validation, ValidationType, ValidationContext
+from app.models.document_code_link import DocumentCodeLink
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ValidationService:
-    """
-    A service to run validation checks for specific documents against their
-    linked code components.
-    """
+GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
-    def run_version_mismatch_check(self, db: Session, document_ids: List[int]):
+class ValidationService:
+    @staticmethod
+    @asynccontextmanager
+    async def get_db_session():
+        db: Session = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    async def run_validation_scan(user_id: int, document_ids: List[int]):
         """
-        Scans a specific list of documents and their linked code components
-        for version mismatches.
+        Runs a validation scan for a specific list of documents linked to a user's code.
         """
         if not document_ids:
-            logger.warning("Version mismatch scan requested but no document IDs were provided.")
+            logger.warning(f"No document IDs provided for user {user_id}")
             return
-
-        logger.info(f"Starting version mismatch scan for document IDs: {document_ids}...")
-        
-        # 1. Get the specific documents requested for the scan
-        documents_to_scan = crud.document.get_multi_by_ids(db=db, ids=document_ids)
-        
-        if not documents_to_scan:
-            logger.info("No valid documents found for the provided IDs.")
-            return
-
-        mismatches_found = 0
-        
-        # 2. Iterate through each selected document
-        for document in documents_to_scan:
-            logger.info(f"Processing document: '{document.filename}' (ID: {document.id}, Version: {document.version})")
             
-            # 3. For each document, get the LINK objects using the correct method
-            links = crud.document_code_link.get_multi_by_document(
-                db=db, document_id=document.id
-            )
-
-            if not links:
-                logger.info(f"Document '{document.filename}' has no linked code components. Skipping.")
-                continue
-
-            logger.info(f"Found {len(links)} links for document '{document.filename}'")
-
-            # 4. For each link, fetch the actual code component and compare versions
-            for link in links:
-                code_component = crud.code_component.get(db=db, id=link.code_component_id)
+        logger.info(f"Starting validation scan for user_id: {user_id} on documents: {document_ids}")
+        async with ValidationService.get_db_session() as db:
+            try:
+                # First, validate that all requested documents belong to the user
+                user_documents = db.query(models.Document).filter(
+                    and_(
+                        models.Document.owner_id == user_id,
+                        models.Document.id.in_(document_ids)
+                    )
+                ).all()
                 
-                if not code_component:
-                    logger.warning(f"Code component with ID {link.code_component_id} not found")
-                    continue
+                found_doc_ids = [doc.id for doc in user_documents]
+                if len(found_doc_ids) != len(document_ids):
+                    missing_docs = set(document_ids) - set(found_doc_ids)
+                    logger.warning(f"Some documents not found or not owned by user {user_id}: {missing_docs}")
+                
+                if not found_doc_ids:
+                    logger.warning(f"No valid documents found for user {user_id}")
+                    return
 
-                logger.info(f"Comparing versions - Document: '{document.version}' vs Code: '{code_component.version}' (Component: {code_component.name})")
+                # Fetch only the links related to the selected documents that belong to the user
+                links = db.query(models.DocumentCodeLink).join(models.Document).filter(
+                    and_(
+                        models.Document.owner_id == user_id,
+                        models.DocumentCodeLink.document_id.in_(found_doc_ids)
+                    )
+                ).all()
 
-                # 5. Compare the versions and create a mismatch if they are different
-                if document.version != code_component.version:
-                    mismatches_found += 1
-                    description = (
-                        f"Version mismatch! Document '{document.filename}' (v{document.version}) "
-                        f"vs. Code '{code_component.name}' (v{code_component.version})."
-                    )
-                    
-                    logger.warning(description)
-                    
-                    # 6. Create a new mismatch record in the database
-                    mismatch_in = MismatchCreate(
-                        mismatch_type="version_mismatch",
-                        description=description,
-                        document_id=document.id,
-                        code_component_id=code_component.id,
-                    )
-                    
-                    # Check if this exact mismatch already exists to avoid duplicates
-                    existing = crud.mismatch.get_by_details(db=db, obj_in=mismatch_in)
-                    if not existing:
-                        crud.mismatch.create(db=db, obj_in=mismatch_in)
+                logger.info(f"Found {len(links)} links to validate for the selected documents.")
+                if not links:
+                    logger.info(f"No document-code links found for documents {found_doc_ids} for user {user_id}")
+                    return
+
+                # Process validation tasks
+                tasks = [ValidationService.validate_single_link(link, user_id) for link in links]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Log any exceptions that occurred
+                successful_validations = 0
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Validation failed for link {links[i].id}: {result}")
                     else:
-                        logger.info(f"Mismatch already recorded for doc ID {document.id} and code ID {code_component.id}. Skipping.")
+                        successful_validations += 1
+                
+                logger.info(f"Validation completed: {successful_validations}/{len(links)} links processed successfully")
 
-        logger.info(f"Version mismatch scan finished. Found {mismatches_found} potential new mismatches.")
+            except Exception as e:
+                logger.error(f"Top-level error in validation scan for user {user_id}: {e}", exc_info=True)
+                raise  # Re-raise to let the API endpoint handle it
+            finally:
+                logger.info(f"Validation scan finished for user_id: {user_id}")
+    
+    @staticmethod
+    async def validate_single_link(link: DocumentCodeLink, user_id: int):
+        """
+        Validates a single document-code link using Gemini AI.
+        """
+        async with GEMINI_API_SEMAPHORE:
+            try:
+                async with ValidationService.get_db_session() as db:
+                    # Fetch the document and code component
+                    document = db.query(models.Document).filter(models.Document.id == link.document_id).first()
+                    code_component = db.query(models.CodeComponent).filter(models.CodeComponent.id == link.code_component_id).first()
+                    
+                    if not document or not code_component:
+                        logger.error(f"Missing document or code component for link {link.id}")
+                        return
+                    
+                    if not document.content:
+                        logger.warning(f"Document {document.id} has no content to validate")
+                        return
+                    
+                    logger.info(f"Validating link {link.id}: {document.filename} <-> {code_component.name}")
+                    
+                    # Create validation context
+                    context = ValidationContext(
+                        document_content=document.content,
+                        code_content=code_component.content,
+                        document_type=document.document_type,
+                        validation_type=ValidationType.CONSISTENCY_CHECK
+                    )
+                    
+                    # Call Gemini for validation
+                    validation_result = await call_gemini_for_validation(context)
+                    
+                    if validation_result and validation_result.has_mismatch:
+                        # Create mismatch record
+                        mismatch_data = {
+                            "document_id": document.id,
+                            "code_component_id": code_component.id,
+                            "mismatch_type": validation_result.mismatch_type,
+                            "description": validation_result.description,
+                            "severity": validation_result.severity,
+                            "confidence": validation_result.confidence,
+                            "details": {
+                                "expected": validation_result.expected_value,
+                                "actual": validation_result.actual_value,
+                                "evidence_document": validation_result.document_evidence,
+                                "evidence_code": validation_result.code_evidence,
+                                "suggested_action": validation_result.suggested_action
+                            },
+                            "status": "open"
+                        }
+                        
+                        # Save mismatch to database
+                        mismatch = crud.mismatch.create_with_owner(
+                            db=db, 
+                            obj_in=schemas.MismatchCreate(**mismatch_data), 
+                            owner_id=user_id
+                        )
+                        
+                        logger.info(f"Created mismatch {mismatch.id} for link {link.id}")
+                    else:
+                        logger.info(f"No mismatch found for link {link.id}")
+                        
+            except Exception as e:
+                logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
+                raise
 
-# Create a single instance that we can import and use elsewhere
+def run_validation_scan_sync(user_id: int, document_ids: List[int]):
+    """
+    Synchronous wrapper for the async validation scan.
+    """
+    logger.info(f"Initiating sync wrapper for validation scan for user_id: {user_id}")
+    asyncio.run(ValidationService.run_validation_scan(user_id, document_ids))
+
 validation_service = ValidationService()

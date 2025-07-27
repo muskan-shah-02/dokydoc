@@ -1,11 +1,13 @@
 # This is the updated content for your file at:
 # backend/app/services/ai/gemini.py
 
+import json
+import logging
+from typing import List, Dict, Optional
+from enum import Enum
+from dataclasses import dataclass
 import google.generativeai as genai
 from app.core.config import settings
-import logging
-import json
-import httpx
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -79,58 +81,100 @@ async def call_gemini_for_code_analysis(code_content: str) -> dict:
         logger.error(f"Error calling or parsing Gemini API response: {e}", exc_info=True)
         return {"summary": "AI analysis failed.", "structured_analysis": {"error": str(e)}}
 
-async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
-    """
-    Analyzes a GitHub repository based on its metadata using a detailed, expert prompt.
-    """
-    logger.info("Making a real call to the Gemini API for repository analysis...")
-    prompt = f"""
-    You are a technical lead reviewing a GitHub repository. Analyze the repository metadata and provide insights about the project.
+# --- NEW: Validation Framework ---
 
-    ANALYSIS REQUIREMENTS:
-    - Summary: Write 2-3 sentences about the project's purpose, its target users, and its main value proposition.
-    - Architecture: Infer the likely architecture patterns, tech stack decisions, and project structure from the metadata.
-    - Technology Assessment: Evaluate the choice of languages, key dependencies, and the overall technical approach.
-    - Project Insights: Comment on the development activity, complexity, and any maintenance considerations.
+class ValidationType(Enum):
+    API_ENDPOINT = "API_Endpoint_Missing"
+    PARAMETER_MISMATCH = "Parameter_Mismatch"
+    BUSINESS_LOGIC = "Business_Logic_Missing"
+    DATA_FLOW = "Data_Flow_Inconsistency"
+    SECURITY_REQUIREMENT = "Security_Requirement_Missing"
+    PERFORMANCE_CONSTRAINT = "Performance_Constraint_Missing"
+
+@dataclass
+class ValidationContext:
+    """Context for validation to make prompts more focused"""
+    focus_area: ValidationType
+    severity_threshold: str = "Medium"
+    max_mismatches: int = 8
+
+def _build_validation_instructions(focus_area: ValidationType) -> str:
+    """Builds a specific, focused validation instruction for the AI."""
+    if focus_area == ValidationType.API_ENDPOINT:
+        return "API ENDPOINTS: Compare documented API endpoints/functions with implemented methods. Check for missing endpoints, incorrect HTTP methods, and naming discrepancies."
+    if focus_area == ValidationType.PARAMETER_MISMATCH:
+        return "PARAMETERS: Validate function/endpoint parameters. Check for required vs. optional mismatches, data type inconsistencies, and missing parameters."
+    # Add other instruction mappings here...
+    return "General: Look for any clear contradictions between the document and the code."
+
+def _parse_and_validate_response(response_text: str) -> List[dict]:
+    """Parses and validates the AI's JSON response."""
+    try:
+        cleaned_text = response_text.strip().replace('```json', '').replace('```', '').strip()
+        result = json.loads(cleaned_text)
+        if not isinstance(result, list):
+            logger.warning("AI returned non-list response, wrapping in list.")
+            return [result] if result else []
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse AI response as JSON: {e}")
+        return []
+
+async def call_gemini_for_validation(
+    document_analysis: dict, 
+    code_analysis: dict,
+    context: ValidationContext
+) -> List[dict]:
+    """
+    Performs a single, focused validation check against the Gemini API.
+    """
+    logger.info(f"Starting Gemini validation for: {context.focus_area.value}")
+    validation_instructions = _build_validation_instructions(context.focus_area)
+
+    prompt = f"""
+    You are an expert software architect acting as a validation engine. Your task is to perform a focused semantic validation check.
+
+    CRITICAL INSTRUCTIONS:
+    1. Focus ONLY on the validation area specified.
+    2. Be precise and actionable. Only flag genuine, high-impact mismatches.
+    3. Consider semantic equivalence (e.g., 'getUser' is equivalent to 'fetchUser').
+
+    VALIDATION AREA:
+    {validation_instructions}
 
     RESPONSE FORMAT:
-    Return ONLY a valid JSON object matching this exact schema:
+    Return ONLY a valid JSON array of mismatch objects. Each object must follow this schema:
     {{
-        "summary": "A 2-3 sentence description of the project's purpose and value.",
-        "structured_analysis": {{
-            "primary_language": "The main programming language.",
-            "languages": {{
-                "primary": "Main language with percentage if available.",
-                "secondary": ["List", "of", "other", "languages", "used."]
-            }},
-            "architecture": {{
-                "type": "e.g., 'Monolithic Web App', 'Microservices Backend'",
-                "components": ["List", "of", "likely", "system", "components."],
-                "tech_stack": ["List", "of", "probable", "technologies."]
-            }},
-            "project_insights": {{
-                "complexity": "Low/Medium/High",
-                "target_users": "A description of who would use this project.",
-                "development_stage": "Early/Active/Mature",
-                "maintenance_notes": "Observations about ongoing maintenance."
-            }},
-            "technology_assessment": {{
-                "language_choice_rationale": "A brief explanation of why the language choice makes sense.",
-                "notable_dependencies": ["List", "of", "key", "dependencies", "if available."],
-                "scalability_considerations": "Brief thoughts on the project's scalability."
-            }}
+        "mismatch_type": "{context.focus_area.value}",
+        "description": "Clear, one-sentence description of the mismatch.",
+        "severity": "High/Medium/Low",
+        "confidence": "High/Medium/Low",
+        "details": {{
+            "expected": "What the document specifies.",
+            "actual": "What exists in the code (or 'Missing').",
+            "evidence_document": "A direct quote from the document.",
+            "evidence_code": "A direct quote or reference from the code.",
+            "suggested_action": "A brief, actionable recommendation."
         }}
     }}
+    If no mismatches are found for this specific validation area, return an empty array: [].
 
-    REPOSITORY METADATA:
-    {json.dumps(repo_metadata, indent=2)}
+    DOCUMENT ANALYSIS:
+    ```json
+    {json.dumps(document_analysis, indent=2)}
+    ```
+
+    CODE ANALYSIS:
+    ```json
+    {json.dumps(code_analysis, indent=2)}
+    ```
     """
     try:
         response = await model.generate_content_async(prompt)
-        cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        result = json.loads(cleaned_text)
-        logger.info("Successfully received and parsed repository analysis from Gemini API.")
+        result = _parse_and_validate_response(response.text)
+        logger.info(f"Validation for {context.focus_area.value} complete: {len(result)} mismatches found.")
         return result
     except Exception as e:
-        logger.error(f"Error calling or parsing Gemini API response for repo: {e}", exc_info=True)
-        return {"summary": "AI repository analysis failed.", "structured_analysis": {"error": str(e)}}
+        logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)
+        return []
+

@@ -6,8 +6,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
+    # volumes:
+    #   - ${PWD}:/app
     environment:
       - DATABASE_URL=postgresql://postgres:mysecretpassword@db:5432/dokydoc
       - PYTHONPATH=/app
