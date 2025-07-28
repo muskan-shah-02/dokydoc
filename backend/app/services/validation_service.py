@@ -116,7 +116,7 @@ class ValidationService:
                     # Create validation context
                     context = ValidationContext(
                         document_content=document.content,
-                        code_content=code_component.content,
+                        code_content=code_component.content, # Corrected: 'content' instead of 'location'
                         document_type=document.document_type,
                         validation_type=ValidationType.CONSISTENCY_CHECK
                     )
