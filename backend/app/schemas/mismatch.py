@@ -1,7 +1,7 @@
 # This is the updated content for your file at:
 # backend/app/schemas/mismatch.py
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any
 from datetime import datetime
 
@@ -9,8 +9,7 @@ from datetime import datetime
 from .document import Document
 from .code_component import CodeComponent
 
-# --- NEW: A strongly-typed schema for the 'details' object ---
-# This matches the rich output from our new Gemini prompt.
+# --- A strongly-typed schema for the 'details' object ---
 class MismatchDetails(BaseModel):
     expected: str
     actual: str
@@ -25,8 +24,8 @@ class MismatchBase(BaseModel):
     mismatch_type: str
     description: str
     severity: str
-    confidence: Optional[str] = None # NEW: Add confidence field
-    details: MismatchDetails # UPDATED: Use the strongly-typed details schema
+    confidence: Optional[str] = None
+    details: MismatchDetails # Use the strongly-typed details schema
     document_id: int
     code_component_id: int
 
@@ -41,7 +40,6 @@ class MismatchCreate(MismatchBase):
 class MismatchUpdate(BaseModel):
     """
     Properties to receive when updating a mismatch.
-    A user can update the status or add notes.
     """
     status: Optional[str] = None
     user_notes: Optional[str] = None
@@ -50,7 +48,6 @@ class MismatchUpdate(BaseModel):
 class MismatchInDBBase(MismatchBase):
     """
     Properties shared by models stored in the database.
-    Includes database-generated fields like id, owner_id, and timestamps.
     """
     id: int
     owner_id: int
@@ -59,17 +56,15 @@ class MismatchInDBBase(MismatchBase):
     updated_at: Optional[datetime] = None
     user_notes: Optional[str] = None
 
-    class Config:
-        # Pydantic v2 uses `from_attributes` instead of `orm_mode`
-        from_attributes = True
+    # UPDATED: Correct Pydantic v2 configuration
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
 
 
 class Mismatch(MismatchInDBBase):
     """
     The full Mismatch model to be returned by the API.
-    It includes the complete related Document and CodeComponent objects,
-    providing full context to the frontend in a single API call.
     """
     document: Document
     code_component: CodeComponent
-

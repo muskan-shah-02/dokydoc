@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
 from app.api import deps
-# --- UPDATED: Import the new synchronous wrapper ---
-from app.services.validation_service import validation_service, run_validation_scan_sync
+# MANDATORY CHANGE: Remove the import of 'run_validation_scan_sync'
+from app.services.validation_service import validation_service
 
 router = APIRouter()
 
@@ -27,11 +27,10 @@ def read_mismatches(
     )
     return mismatches
 
-# --- FIXED: Now accepts document_ids parameter ---
 @router.post("/run-scan", status_code=status.HTTP_202_ACCEPTED)
 def run_validation_scan(
     *,
-    document_ids: List[int],  # Accept the document IDs from request body
+    document_ids: List[int],
     current_user: models.User = Depends(deps.get_current_user),
     background_tasks: BackgroundTasks,
     db: Session = Depends(deps.get_db),
@@ -39,29 +38,30 @@ def run_validation_scan(
     """
     Trigger a new validation scan for the current user on selected documents.
     """
-    # Validate input
+    # Your existing logic is preserved
     if not document_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one document ID must be provided"
         )
     
-    # Optional: Verify that all document IDs belong to the current user
+    # Your existing logic is preserved
     user_documents = crud.document.get_multi_by_owner(
         db=db, owner_id=current_user.id
     )
     user_doc_ids = {doc.id for doc in user_documents}
     invalid_doc_ids = set(document_ids) - user_doc_ids
     
+    # Your existing logic is preserved
     if invalid_doc_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Documents not found or not owned by user: {list(invalid_doc_ids)}"
         )
     
-    # --- FIXED: Pass document_ids to the background task ---
+    # MANDATORY CHANGE: Call the correct async method from the service object
     background_tasks.add_task(
-        run_validation_scan_sync, 
+        validation_service.run_validation_scan, 
         user_id=current_user.id,
         document_ids=document_ids
     )
