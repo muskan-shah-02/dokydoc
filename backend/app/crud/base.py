@@ -2,6 +2,7 @@ from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.db.base_class import Base
+from fastapi.encoders import jsonable_encoder
 
 ModelType = TypeVar("ModelType", bound=Base) # type: ignore
 CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)
@@ -25,19 +26,32 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         db.refresh(db_obj)
         return db_obj
 
-    def update(self,db: Session,*,db_obj: ModelType, obj_in: Union[UpdateSchemaType, Dict[str, Any]]
+    def update(
+           self,
+        db: Session,
+        *,
+        db_obj: ModelType,
+        obj_in: Union[UpdateSchemaType, Dict[str, Any]]
     ) -> ModelType:
         """
-        Updates a database object.
+        --- THIS IS THE CORRECTED UPDATE METHOD ---
+        It directly updates the model attributes without using unsafe set operations,
+        making it safe to use with JSON/dict fields.
         """
-        obj_data = db_obj.as_dict()
+        # Use jsonable_encoder to handle complex types like datetimes
+        obj_data = jsonable_encoder(db_obj)
+        
         if isinstance(obj_in, dict):
             update_data = obj_in
         else:
-            update_data = obj_in.dict(exclude_unset=True)
+            # For Pydantic models, dump to a dict, excluding unset values
+            update_data = obj_in.model_dump(exclude_unset=True)
+        
+        # Iterate directly and set attributes
         for field in obj_data:
             if field in update_data:
                 setattr(db_obj, field, update_data[field])
+                
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)

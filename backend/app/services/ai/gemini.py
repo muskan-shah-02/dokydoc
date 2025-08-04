@@ -20,41 +20,96 @@ model = genai.GenerativeModel('gemini-1.5-flash-latest')
 # --- FUNCTION 1: CODE ANALYSIS (INTACT) ---
 async def call_gemini_for_code_analysis(code_content: str) -> dict:
     """
-    Analyzes a single file's content using a detailed, expert prompt.
+    Analyzes ANY file's content using a universal, adaptive prompt.
+    Works with any programming language, framework, or code pattern.
     """
-    logger.info("Making a real call to the Gemini API for structured code analysis...")
+    logger.info("Making a real call to the Gemini API for universal code analysis...")
     
     prompt = f"""
-    You are a senior software engineer conducting a professional code review.
-    Your task is to analyze the provided source code and return a structured JSON object.
+    You are an expert software architect analyzing source code. Your task is to understand and document ANY type of code file, regardless of language, framework, or architectural pattern.
 
-    ANALYSIS REQUIREMENTS:
-    1.  **Summary**: Write a concise, 2-3 sentence paragraph explaining the file's primary purpose and its role within a larger application.
-    2.  **Functions/Classes**: For each function or class, identify its name, its specific purpose, and list its key parameters or methods.
-    3.  **Dependencies**: List the main libraries or modules imported at the top of the file.
-    4.  **Code Quality**: Provide a brief assessment of the code's quality, noting any potential issues like missing error handling, performance bottlenecks, or good design patterns observed.
+    UNIVERSAL ANALYSIS APPROACH:
+    1. **Identify the Language/Framework**: Determine what programming language and frameworks are being used
+    2. **Understand the Purpose**: What does this file accomplish in the broader system?
+    3. **Extract All Meaningful Elements**: Find all significant code constructs, regardless of type
+    4. **Assess Quality & Patterns**: Evaluate code quality, patterns, and architectural decisions
+
+    ADAPTIVE COMPONENT DETECTION:
+    Scan for ANY of these code elements (language-agnostic):
+    - Functions/Methods (def, function, async def, const myFunc, public void, etc.)
+    - Classes/Objects (class, interface, struct, type, enum, etc.)
+    - Components (React components, Vue components, Angular components)
+    - Modules/Exports (export, module.exports, import/export statements)
+    - Constants/Variables (const, let, var, final, static, etc.)
+    - APIs/Endpoints (routes, controllers, handlers)
+    - Database Models/Schemas
+    - Configuration Objects
+    - Custom Types/Interfaces
+    - Hooks/Middleware
+    - Services/Utilities
+    
+    LANGUAGE-SPECIFIC ADAPTATIONS:
+    - **Python**: Functions, classes, decorators, async functions, dataclasses, enums
+    - **JavaScript/TypeScript**: Functions, classes, React components, hooks, interfaces, types
+    - **Java/C#**: Classes, methods, interfaces, enums, annotations
+    - **Go**: Functions, structs, interfaces, methods
+    - **Rust**: Functions, structs, enums, traits, impl blocks
+    - **PHP**: Classes, functions, traits, interfaces
+    - **Ruby**: Classes, modules, methods, constants
+    - **And ANY other language patterns you encounter**
 
     STRICT RESPONSE FORMAT:
-    You MUST return ONLY a valid JSON object. Do not include any explanatory text before or after the JSON.
-    The JSON object must match this exact schema:
+    Return ONLY valid JSON matching this schema:
     {{
-        "summary": "A 2-3 sentence description of the file's purpose and role.",
+        "summary": "2-3 sentences describing the file's purpose, language, and role in the system",
         "structured_analysis": {{
+            "language_info": {{
+                "primary_language": "Detected language (e.g., Python, JavaScript, TypeScript, Java)",
+                "framework": "Main framework if detected (e.g., React, FastAPI, Express, Spring)",
+                "file_type": "Type of file (e.g., Component, Service, Model, Configuration, Utility)"
+            }},
             "components": [
                 {{
-                    "name": "Function or Class Name",
-                    "type": "Function | Class",
-                    "purpose": "A one-sentence description of what it does.",
-                    "details": "e.g., Parameters: [param1, param2] or Key Methods: [method1, method2]"
+                    "name": "Exact name found in code",
+                    "type": "Function|AsyncFunction|Class|Interface|Component|Constant|Variable|Hook|Service|Route|Model|Type|Enum|Method|Module",
+                    "purpose": "What this component does - one clear sentence",
+                    "details": "Key parameters, return types, props, fields, or other relevant details",
+                    "line_info": "Approximate location or signature if complex"
                 }}
             ],
-            "dependencies": ["List of imported libraries"],
-            "quality_assessment": "A brief assessment of the code's quality."
+            "dependencies": [
+                "List of imports, requires, or external dependencies with actual names from the code"
+            ],
+            "exports": [
+                "What this file exports or makes available to other files"
+            ],
+            "patterns_and_architecture": {{
+                "design_patterns": ["Any design patterns observed (e.g., Factory, Observer, MVC)"],
+                "architectural_style": "Overall style (e.g., Functional, OOP, Component-based, Microservice)",
+                "key_concepts": ["Main programming concepts used (e.g., async/await, HOCs, dependency injection)"]
+            }},
+            "quality_assessment": "Brief assessment of code quality, structure, error handling, and best practices observed"
         }}
     }}
 
+    CRITICAL INSTRUCTIONS:
+    - ALWAYS populate the components array with actual elements found in the code
+    - If you find ANYTHING that looks like a meaningful code construct, include it
+    - Use the exact names from the code, not generic placeholders
+    - Be language-agnostic - adapt to whatever language/framework you encounter
+    - If it's a configuration file, document the key configurations
+    - If it's a test file, document the test cases and what they test
+    - If it's a data file, document the data structure and purpose
+    - Never return empty components array unless the file truly has no meaningful code elements
+
+    EXAMPLES OF WHAT TO CAPTURE:
+    - Python: `async def get_user(id: int)` → {{"name": "get_user", "type": "AsyncFunction", "details": "Parameters: id (int), fetches user data"}}
+    - React: `const UserCard = ({{ user }}) =>` → {{"name": "UserCard", "type": "Component", "details": "Props: user object, renders user information"}}
+    - Java: `public class UserService` → {{"name": "UserService", "type": "Class", "details": "Service class for user operations"}}
+    - Config: `API_BASE_URL = "https://api.example.com"` → {{"name": "API_BASE_URL", "type": "Constant", "details": "Base URL for API requests"}}
+
     CODE TO ANALYZE:
-    ```python
+    ```
     {code_content}
     ```
     """
@@ -63,14 +118,28 @@ async def call_gemini_for_code_analysis(code_content: str) -> dict:
         response = await model.generate_content_async(prompt)
         cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
         result = json.loads(cleaned_text)
-        logger.info("Successfully received and parsed structured code analysis from Gemini API.")
+        
+        # Validate that we got components
+        components = result.get("structured_analysis", {}).get("components", [])
+        if not components:
+            logger.warning("AI returned empty components array - this might indicate an issue with analysis")
+        else:
+            logger.info(f"Successfully analyzed code: found {len(components)} components")
+            
         return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        logger.error(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
+        return {
+            "summary": "AI analysis failed due to JSON parsing error.",
+            "structured_analysis": {"error": f"JSON Parse Error: {str(e)}"}
+        }
     except Exception as e:
         logger.error(f"Error calling or parsing Gemini API for code analysis: {e}", exc_info=True)
-        return {{
-            "summary": "AI analysis failed.",
-            "structured_analysis": {{"error": str(e)}}
-        }}
+        return {
+            "summary": "AI analysis failed due to unexpected error.",
+            "structured_analysis": {"error": str(e)}
+        }
 
 # --- FUNCTION 2: REPOSITORY ANALYSIS (INTACT) ---
 async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
@@ -196,3 +265,4 @@ async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
     except Exception as e:
         logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)
         return []
+    

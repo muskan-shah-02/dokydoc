@@ -110,7 +110,7 @@ class ValidationService:
                         return
                     
                     # 2. **CRITICAL CHANGE**: Check for pre-existing analysis instead of raw content
-                    if not document.analysis_results or not code_component.structured_analysis:
+                    if not document.analysis or not code_component.structured_analysis:
                         logger.warning(f"Skipping link {link.id}: Document or Code Component has not been analyzed yet.")
                         return
 
@@ -131,7 +131,7 @@ class ValidationService:
                     for check_type in validation_passes_to_run:
                         context = ValidationContext(
                             focus_area=check_type,
-                            document_analysis=document.analysis_results,
+                            document_analysis=document.analysis, # <-- FIX APPLIED HERE
                             code_analysis=code_component.structured_analysis,
                         )
                         ai_tasks.append(call_gemini_for_validation(context))
