@@ -95,51 +95,49 @@ class ValidationService:
     @staticmethod
     async def validate_single_link(link: DocumentCodeLink, user_id: int):
         """
-        --- THIS IS THE UPGRADED METHOD ---
-        It now performs a multi-pass validation using pre-analyzed structured data.
+        --- THIS IS THE FINAL, ARCHITECTURALLY CORRECT METHOD ---
         """
         async with GEMINI_API_SEMAPHORE:
             async with ValidationService.get_db_session() as db:
                 try:
-                    # 1. Fetch the linked components
                     document = db.query(models.Document).filter(models.Document.id == link.document_id).first()
                     code_component = db.query(models.CodeComponent).filter(models.CodeComponent.id == link.code_component_id).first()
 
                     if not document or not code_component:
                         logger.error(f"Missing document or code component for link {link.id}")
                         return
-                    
-                    # 2. **CRITICAL CHANGE**: Check for pre-existing analysis instead of raw content
-                    if not document.analysis or not code_component.structured_analysis:
-                        logger.warning(f"Skipping link {link.id}: Document or Code Component has not been analyzed yet.")
+
+                    doc_analysis_objects = crud.analysis_result.get_multi_by_document(db=db, document_id=document.id)
+
+                    if not doc_analysis_objects or not code_component.structured_analysis:
+                        logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")
                         return
+
+                    # --- THE FINAL FIX IS HERE ---
+                    # The column in the AnalysisResult model is named 'result'.
+                    document_analysis_data = [res.result for res in doc_analysis_objects]
 
                     logger.info(f"Processing link {link.id}: Doc '{document.name}' vs Code '{code_component.name}'")
                     
-                    # 3. **NEW**: Clear previous results for this link to ensure a fresh scan
                     crud.mismatch.remove_by_link_id(db=db, link_id=link.id)
 
-                    # 4. **NEW**: Define the validation checks to run for this link
                     validation_passes_to_run = [
                         ValidationType.API_ENDPOINT_MISSING,
                         ValidationType.BUSINESS_LOGIC_MISSING,
                         ValidationType.GENERAL_CONSISTENCY,
                     ]
 
-                    # 5. **NEW**: Build a list of concurrent AI tasks for each check
                     ai_tasks = []
                     for check_type in validation_passes_to_run:
                         context = ValidationContext(
                             focus_area=check_type,
-                            document_analysis=document.analysis, # <-- FIX APPLIED HERE
+                            document_analysis=document_analysis_data,
                             code_analysis=code_component.structured_analysis,
                         )
                         ai_tasks.append(call_gemini_for_validation(context))
 
-                    # 6. **NEW**: Run all AI validation passes concurrently
                     validation_results = await asyncio.gather(*ai_tasks)
 
-                    # 7. **NEW**: Process and store the aggregated results
                     for mismatches in validation_results:
                         if mismatches:
                             for mismatch_data in mismatches:

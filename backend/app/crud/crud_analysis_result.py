@@ -29,18 +29,23 @@ class CRUDAnalysisResult(CRUDBase[AnalysisResult, AnalysisResultCreate, None]):
         return db_obj
 
     def get_multi_by_document(
-        self, db: Session, *, document_id: int, skip: int = 0, limit: int = 100
+        self, db: Session, *, document_id: int
     ) -> List[AnalysisResult]:
         """
-        Retrieve all analysis results for a specific document.
+        Retrieve all analysis results associated with a specific document.
         """
-        return (
-            db.query(self.model)
-            .filter(AnalysisResult.document_id == document_id)
-            .offset(skip)
-            .limit(limit)
-            .all()
-        )
+        return db.query(self.model).filter(self.model.document_id == document_id).all()
+        
+def get_by_document(self, db: Session, *, document_id: int) -> List[AnalysisResult]:
+        """
+        Retrieve all analysis results associated with a specific document.
+        """
+        return db.query(self.model).filter(self.model.document_id == document_id).all()
 
+# def get_multi_by_document(self, db: Session, *, document_id: int) -> List[AnalysisResult]:
+#         """
+#         Retrieve all analysis results associated with a specific document.
+#         """
+#         return db.query(self.model).filter(self.model.document_id == document_id).all()
 # Create a single instance that we can import and use in our API endpoints.
 analysis_result = CRUDAnalysisResult(AnalysisResult)
