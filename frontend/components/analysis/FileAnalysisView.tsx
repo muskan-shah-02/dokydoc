@@ -1,5 +1,4 @@
-// This is the updated content for your file at:
-// frontend/components/analysis/FileAnalysisView.tsx
+// Updated FileAnalysisView.tsx - Compatible with Universal Backend Schema - Zero Errors
 
 import {
   Card,
@@ -36,48 +35,115 @@ import {
   Settings,
   ArrowRight,
   Home,
+  Globe,
+  Database,
+  Layers,
+  Activity,
+  Target,
+  Hash,
+  Cpu,
+  FileCode,
+  Braces,
+  FunctionSquare as FunctionIcon,
+  Component as ComponentIcon,
+  Variable,
+  Route,
+  Plug,
+  Type,
 } from "lucide-react";
 import { useState } from "react";
 
-// Define a more specific type for the Function icon, if needed. For now, we'll use a generic name.
-const FunctionIcon = Code;
-
 interface FileAnalysisViewProps {
-  analysis: any; // The structured_analysis object from our API
+  analysis: any; // The response object from our universal API
   isLoading?: boolean;
   fileName?: string;
 }
 
-interface FunctionInfo {
+interface ComponentInfo {
   name: string;
+  type: string;
   purpose: string;
-  parameters?: string[];
-  return_type?: string;
-  complexity?: string;
-  visibility?: string;
+  details: string;
+  line_info?: string;
 }
 
-interface ClassInfo {
-  name: string;
-  purpose: string;
-  methods?: string[];
-  inheritance?: string;
-  properties?: string[];
+interface LanguageInfo {
+  primary_language?: string;
+  framework?: string;
+  file_type?: string;
 }
 
-interface ImportInfo {
-  standard_library?: string[];
-  third_party?: string[];
-  local?: string[];
+interface PatternsAndArchitecture {
+  design_patterns?: string[];
+  architectural_style?: string;
+  key_concepts?: string[];
 }
 
-interface CodeQualityInfo {
-  architecture_notes?: string;
-  patterns?: string[];
-  potential_issues?: string[];
-  maintainability_score?: number;
-  complexity_score?: number;
-}
+// Get appropriate icon for component type
+const getComponentIcon = (type: string) => {
+  const lowerType = type.toLowerCase();
+  switch (lowerType) {
+    case "function":
+    case "asyncfunction":
+    case "method":
+      return FunctionIcon;
+    case "class":
+    case "interface":
+      return Boxes;
+    case "component":
+      return ComponentIcon;
+    case "constant":
+    case "variable":
+      return Variable;
+    case "hook":
+      return Activity;
+    case "service":
+      return Settings;
+    case "route":
+      return Route;
+    case "model":
+      return Database;
+    case "type":
+    case "enum":
+      return Type;
+    case "module":
+      return Package;
+    default:
+      return Code;
+  }
+};
+
+// Get appropriate color for component type
+const getComponentColor = (type: string) => {
+  const lowerType = type.toLowerCase();
+  switch (lowerType) {
+    case "function":
+    case "asyncfunction":
+    case "method":
+      return "from-blue-50 to-blue-50/50 border-blue-100 text-blue-700";
+    case "class":
+    case "interface":
+      return "from-green-50 to-green-50/50 border-green-100 text-green-700";
+    case "component":
+      return "from-purple-50 to-purple-50/50 border-purple-100 text-purple-700";
+    case "constant":
+    case "variable":
+      return "from-orange-50 to-orange-50/50 border-orange-100 text-orange-700";
+    case "hook":
+      return "from-pink-50 to-pink-50/50 border-pink-100 text-pink-700";
+    case "service":
+      return "from-indigo-50 to-indigo-50/50 border-indigo-100 text-indigo-700";
+    case "route":
+      return "from-yellow-50 to-yellow-50/50 border-yellow-100 text-yellow-700";
+    case "model":
+      return "from-teal-50 to-teal-50/50 border-teal-100 text-teal-700";
+    case "type":
+    case "enum":
+      return "from-slate-50 to-slate-50/50 border-slate-100 text-slate-700";
+    default:
+      return "from-gray-50 to-gray-50/50 border-gray-100 text-gray-700";
+  }
+};
 
 const Section = ({
   title,
@@ -114,7 +180,7 @@ const Section = ({
             <ChevronRight className="w-4 h-4" />
           )}
         </CollapsibleTrigger>
-        <CollapsibleContent className="pt-4 pl-8 space-y-4">
+        <CollapsibleContent className="pt-4 space-y-4">
           {children}
         </CollapsibleContent>
       </Collapsible>
@@ -131,7 +197,7 @@ const Section = ({
           </Badge>
         )}
       </h3>
-      <div className="pl-8 space-y-4">{children}</div>
+      <div className="space-y-4">{children}</div>
     </div>
   );
 };
@@ -171,46 +237,6 @@ const DetailItem = ({
     )}
   </div>
 );
-
-const QualityIndicator = ({
-  score,
-  label,
-}: {
-  score?: number;
-  label: string;
-}) => {
-  if (score === undefined) return null;
-  const getColor = (score: number) => {
-    if (score >= 8) return "text-green-600 bg-green-100";
-    if (score >= 6) return "text-yellow-600 bg-yellow-100";
-    return "text-red-600 bg-red-100";
-  };
-  const getIcon = (score: number) => {
-    if (score >= 8) return CheckCircle;
-    if (score >= 6) return Info;
-    return XCircle;
-  };
-  const IconComponent = getIcon(score);
-  return (
-    <div className="flex items-center justify-between p-2 rounded-md bg-muted/30">
-      <span className="text-sm font-medium flex items-center">
-        <IconComponent className="w-4 h-4 mr-2" />
-        {label}
-      </span>
-      <div className="flex items-center gap-2">
-        <div className="w-20 bg-muted rounded-full h-2">
-          <div
-            className={`h-2 rounded-full ${getColor(score)}`}
-            style={{ width: `${(score / 10) * 100}%` }}
-          />
-        </div>
-        <span className={`text-sm px-2 py-1 rounded-md ${getColor(score)}`}>
-          {score}/10
-        </span>
-      </div>
-    </div>
-  );
-};
 
 const ImportTypeIcon = ({ type }: { type: string }) => {
   switch (type) {
@@ -269,271 +295,292 @@ export function FileAnalysisView({
     );
   }
 
+  // Extract data from the backend schema - handle both direct props and structured_analysis
+  const structuredData = analysis.structured_analysis || analysis;
   const {
-    functions = [],
-    classes = [],
-    imports = {} as ImportInfo,
-    code_quality = {} as CodeQualityInfo,
-    file_stats,
+    language_info = {} as LanguageInfo,
+    components = [] as ComponentInfo[],
+    dependencies = [],
+    exports = [],
+    patterns_and_architecture = {} as PatternsAndArchitecture,
+    quality_assessment,
     analysis_timestamp,
-  } = analysis;
+  } = structuredData;
 
-  const totalImports =
-    (imports.standard_library?.length || 0) +
-    (imports.third_party?.length || 0) +
-    (imports.local?.length || 0);
+  // Group components by type for better organization with proper TypeScript handling
+  interface ComponentsByType {
+    [type: string]: ComponentInfo[];
+  }
+
+  const componentsByType: ComponentsByType = components.reduce(
+    (acc: ComponentsByType, component: ComponentInfo) => {
+      const type: string = component.type || "Unknown";
+      if (!acc[type]) {
+        acc[type] = [];
+      }
+      acc[type].push(component);
+      return acc;
+    },
+    {} as ComponentsByType
+  );
+
+  // Get component type counts
+  const componentCounts = Object.keys(componentsByType)
+    .map((type: string) => ({
+      type,
+      count: componentsByType[type].length,
+      components: componentsByType[type],
+    }))
+    .sort((a, b) => b.count - a.count);
 
   return (
     <div className="space-y-6">
-      {(fileName || analysis_timestamp) && (
-        <Alert>
-          <FileText className="h-4 w-4" />
-          <AlertDescription>
-            Analysis of {fileName || "file"}
+      {/* Header with language and file info */}
+      <Alert>
+        <FileText className="h-4 w-4" />
+        <AlertDescription>
+          <div className="flex flex-wrap items-center gap-2">
+            <span>Analysis of {fileName || "file"}</span>
+            {language_info.primary_language && (
+              <Badge variant="default" className="text-xs">
+                {language_info.primary_language}
+              </Badge>
+            )}
+            {language_info.framework && (
+              <Badge variant="secondary" className="text-xs">
+                {language_info.framework}
+              </Badge>
+            )}
+            {language_info.file_type && (
+              <Badge variant="outline" className="text-xs">
+                {language_info.file_type}
+              </Badge>
+            )}
             {analysis_timestamp && (
-              <span>
-                {" "}
-                completed on {new Date(analysis_timestamp).toLocaleDateString()}
+              <span className="text-xs text-muted-foreground">
+                • {new Date(analysis_timestamp).toLocaleDateString()}
               </span>
             )}
-          </AlertDescription>
-        </Alert>
-      )}
+          </div>
+        </AlertDescription>
+      </Alert>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
+          {/* Code Components Section */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center">
                 <Code className="w-5 h-5 mr-3 text-blue-600" />
-                Code Structure Analysis
+                Code Components Analysis
               </CardTitle>
               <CardDescription>
-                Functions, classes, and structural components identified in the
-                file
+                All code elements identified in this{" "}
+                {language_info.primary_language || "code"} file
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <Section
-                title="Functions"
-                icon={FunctionIcon}
-                collapsible={functions.length > 3}
-                count={functions.length}
-              >
-                {functions.length > 0 ? (
-                  functions.map((func: FunctionInfo, index: number) => (
-                    <div
-                      key={index}
-                      className="p-4 bg-gradient-to-r from-blue-50 to-blue-50/50 border border-blue-100 rounded-lg"
+              {componentCounts.length > 0 ? (
+                componentCounts.map(
+                  ({ type, count, components: typeComponents }) => (
+                    <Section
+                      key={type}
+                      title={`${type}s`}
+                      icon={getComponentIcon(type)}
+                      collapsible={count > 3}
+                      count={count}
                     >
-                      <div className="flex items-start justify-between mb-2">
-                        <h4 className="font-semibold text-blue-700 flex items-center">
-                          <FunctionIcon className="w-4 h-4 mr-2" />
-                          {func.name}
-                        </h4>
-                        {func.visibility && (
-                          <Badge
-                            variant={
-                              func.visibility === "public"
-                                ? "default"
-                                : "secondary"
-                            }
-                          >
-                            {func.visibility}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-muted-foreground mb-3 leading-relaxed">
-                        {func.purpose}
-                      </p>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                        <DetailItem
-                          title="Parameters"
-                          content={func.parameters}
-                          icon={ArrowRight}
-                        />
-                        <DetailItem
-                          title="Returns"
-                          content={func.return_type}
-                          icon={Eye}
-                        />
-                      </div>
-                      {func.complexity && (
-                        <div className="mt-2 pt-2 border-t border-blue-200">
-                          <Badge variant="outline" className="text-xs">
-                            Complexity: {func.complexity}
-                          </Badge>
-                        </div>
+                      {typeComponents.map(
+                        (component: ComponentInfo, index: number) => {
+                          const IconComponent = getComponentIcon(
+                            component.type
+                          );
+                          const colorClasses = getComponentColor(
+                            component.type
+                          );
+
+                          return (
+                            <div
+                              key={index}
+                              className={`p-4 bg-gradient-to-r ${colorClasses} border rounded-lg`}
+                            >
+                              <div className="flex items-start justify-between mb-2">
+                                <h4
+                                  className={`font-semibold flex items-center ${colorClasses
+                                    .split(" ")
+                                    .pop()}`}
+                                >
+                                  <IconComponent className="w-4 h-4 mr-2" />
+                                  {component.name}
+                                </h4>
+                                <Badge variant="outline" className="text-xs">
+                                  {component.type}
+                                </Badge>
+                              </div>
+                              <p className="text-sm text-muted-foreground mb-3 leading-relaxed">
+                                {component.purpose}
+                              </p>
+                              {component.details && (
+                                <div className="text-xs">
+                                  <DetailItem
+                                    title="Details"
+                                    content={component.details}
+                                    icon={Info}
+                                  />
+                                </div>
+                              )}
+                              {component.line_info && (
+                                <div className="mt-2 pt-2 border-t border-current/20">
+                                  <Badge variant="outline" className="text-xs">
+                                    {component.line_info}
+                                  </Badge>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
                       )}
-                    </div>
-                  ))
-                ) : (
+                    </Section>
+                  )
+                )
+              ) : (
+                <div className="text-center py-8">
+                  <Code className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                   <p className="text-sm text-muted-foreground italic">
-                    No functions identified in this file.
+                    No code components identified in this file.
                   </p>
-                )}
-              </Section>
-              <Section
-                title="Classes"
-                icon={Boxes}
-                collapsible={classes.length > 3}
-                count={classes.length}
-              >
-                {classes.length > 0 ? (
-                  classes.map((cls: ClassInfo, index: number) => (
-                    <div
-                      key={index}
-                      className="p-4 bg-gradient-to-r from-green-50 to-green-50/50 border border-green-100 rounded-lg"
-                    >
-                      <h4 className="font-semibold text-green-700 flex items-center mb-2">
-                        <Boxes className="w-4 h-4 mr-2" />
-                        {cls.name}
-                      </h4>
-                      <p className="text-sm text-muted-foreground mb-3 leading-relaxed">
-                        {cls.purpose}
-                      </p>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                        <DetailItem
-                          title="Methods"
-                          content={cls.methods}
-                          icon={FunctionIcon}
-                        />
-                        <DetailItem
-                          title="Inheritance"
-                          content={cls.inheritance || "None"}
-                          icon={ArrowRight}
-                        />
-                      </div>
-                      {cls.properties && cls.properties.length > 0 && (
-                        <div className="mt-3 pt-2 border-t border-green-200">
-                          <DetailItem
-                            title="Properties"
-                            content={cls.properties}
-                            icon={Settings}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-sm text-muted-foreground italic">
-                    No classes identified in this file.
-                  </p>
-                )}
-              </Section>
+                </div>
+              )}
             </CardContent>
           </Card>
+
+          {/* Dependencies & Exports Section */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center">
                 <Network className="w-5 h-5 mr-3 text-purple-600" />
-                Dependencies & Imports
+                Dependencies & Exports
               </CardTitle>
               <CardDescription>
-                External libraries and internal modules used by this file
+                External libraries and exports from this file
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {Object.entries(imports).map(([type, items]) => {
-                // Fix: Ensure items is an array before accessing length
-                const itemsArray = Array.isArray(items) ? items : [];
-                return (
-                  <div key={type} className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <h4 className="font-medium text-sm flex items-center">
-                        <ImportTypeIcon type={type} />
-                        <span className="ml-2 capitalize">
-                          {type.replace("_", " ")}
-                        </span>
-                      </h4>
-                      <Badge variant="outline">{itemsArray.length}</Badge>
+              {/* Dependencies */}
+              <div className="space-y-2">
+                <h4 className="font-medium text-sm flex items-center">
+                  <Package className="w-4 h-4 mr-2 text-muted-foreground" />
+                  Dependencies
+                  <Badge variant="outline" className="ml-2">
+                    {Array.isArray(dependencies) ? dependencies.length : 0}
+                  </Badge>
+                </h4>
+                <div className="flex flex-wrap gap-1 pl-6">
+                  {Array.isArray(dependencies) && dependencies.length > 0 ? (
+                    dependencies.map((dep: string, i: number) => (
+                      <Badge key={i} variant="secondary" className="text-xs">
+                        {dep}
+                      </Badge>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground italic">
+                      No dependencies identified
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Exports */}
+              <div className="space-y-2">
+                <h4 className="font-medium text-sm flex items-center">
+                  <ArrowRight className="w-4 h-4 mr-2 text-muted-foreground" />
+                  Exports
+                  <Badge variant="outline" className="ml-2">
+                    {Array.isArray(exports) ? exports.length : 0}
+                  </Badge>
+                </h4>
+                <div className="flex flex-wrap gap-1 pl-6">
+                  {Array.isArray(exports) && exports.length > 0 ? (
+                    exports.map((exp: string, i: number) => (
+                      <Badge key={i} variant="default" className="text-xs">
+                        {exp}
+                      </Badge>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground italic">
+                      No exports identified
+                    </span>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Right sidebar */}
+        <div className="space-y-6">
+          {/* Language & Architecture Info */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center">
+                <Layers className="w-5 h-5 mr-3 text-blue-600" />
+                Architecture & Patterns
+              </CardTitle>
+              <CardDescription>
+                Technical patterns and architectural insights
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {patterns_and_architecture.architectural_style && (
+                <div className="p-3 bg-muted/30 rounded-lg">
+                  <h4 className="font-semibold mb-2 flex items-center text-sm">
+                    <Layers className="w-4 h-4 mr-2 text-blue-500" />
+                    Architectural Style
+                  </h4>
+                  <p className="text-sm text-muted-foreground">
+                    {patterns_and_architecture.architectural_style}
+                  </p>
+                </div>
+              )}
+
+              {patterns_and_architecture.design_patterns &&
+                Array.isArray(patterns_and_architecture.design_patterns) &&
+                patterns_and_architecture.design_patterns.length > 0 && (
+                  <div>
+                    <h4 className="font-semibold mb-2 flex items-center text-sm">
+                      <Star className="w-4 h-4 mr-2 text-yellow-500" />
+                      Design Patterns
+                    </h4>
+                    <div className="flex flex-wrap gap-1">
+                      {patterns_and_architecture.design_patterns.map(
+                        (pattern: string, i: number) => (
+                          <Badge key={i} variant="default" className="text-xs">
+                            {pattern}
+                          </Badge>
+                        )
+                      )}
                     </div>
-                    <div className="flex flex-wrap gap-1 pl-6">
-                      {itemsArray.length > 0 ? (
-                        itemsArray.map((item: string, i: number) => (
+                  </div>
+                )}
+
+              {patterns_and_architecture.key_concepts &&
+                Array.isArray(patterns_and_architecture.key_concepts) &&
+                patterns_and_architecture.key_concepts.length > 0 && (
+                  <div>
+                    <h4 className="font-semibold mb-2 flex items-center text-sm">
+                      <Lightbulb className="w-4 h-4 mr-2 text-orange-500" />
+                      Key Concepts
+                    </h4>
+                    <div className="flex flex-wrap gap-1">
+                      {patterns_and_architecture.key_concepts.map(
+                        (concept: string, i: number) => (
                           <Badge
                             key={i}
                             variant="secondary"
                             className="text-xs"
                           >
-                            {item}
+                            {concept}
                           </Badge>
-                        ))
-                      ) : (
-                        <span className="text-xs text-muted-foreground italic">
-                          None
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </CardContent>
-          </Card>
-        </div>
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                <ShieldCheck className="w-5 h-5 mr-3 text-green-600" />
-                Quality Assessment
-              </CardTitle>
-              <CardDescription>
-                Code quality metrics and architectural analysis
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <QualityIndicator
-                score={code_quality.maintainability_score}
-                label="Maintainability"
-              />
-              <QualityIndicator
-                score={code_quality.complexity_score}
-                label="Complexity"
-              />
-              {code_quality.architecture_notes && (
-                <div className="p-3 bg-muted/30 rounded-lg">
-                  <h4 className="font-semibold mb-2 flex items-center text-sm">
-                    <Lightbulb className="w-4 h-4 mr-2 text-yellow-500" />
-                    Architecture Notes
-                  </h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {code_quality.architecture_notes}
-                  </p>
-                </div>
-              )}
-              {code_quality.patterns && code_quality.patterns.length > 0 && (
-                <div>
-                  <h4 className="font-semibold mb-2 flex items-center text-sm">
-                    <Star className="w-4 h-4 mr-2 text-blue-500" />
-                    Design Patterns
-                  </h4>
-                  <div className="flex flex-wrap gap-1">
-                    {code_quality.patterns.map((pattern: string, i: number) => (
-                      <Badge key={i} variant="default" className="text-xs">
-                        {pattern}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {code_quality.potential_issues &&
-                Array.isArray(code_quality.potential_issues) &&
-                code_quality.potential_issues.length > 0 && (
-                  <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-                    <h4 className="font-semibold mb-2 flex items-center text-sm text-red-700">
-                      <AlertTriangle className="w-4 h-4 mr-2" />
-                      Potential Issues
-                    </h4>
-                    <div className="space-y-1">
-                      {code_quality.potential_issues.map(
-                        (issue: string, i: number) => (
-                          <div
-                            key={i}
-                            className="text-sm text-red-600 flex items-start"
-                          >
-                            <span className="text-red-400 mr-2">•</span>
-                            <span>{issue}</span>
-                          </div>
                         )
                       )}
                     </div>
@@ -541,50 +588,62 @@ export function FileAnalysisView({
                 )}
             </CardContent>
           </Card>
-          {(functions.length > 0 || classes.length > 0 || totalImports > 0) && (
+
+          {/* Quality Assessment */}
+          {quality_assessment && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center">
-                  <Zap className="w-5 h-5 mr-3 text-orange-500" />
-                  Quick Stats
+                  <ShieldCheck className="w-5 h-5 mr-3 text-green-600" />
+                  Quality Assessment
                 </CardTitle>
+                <CardDescription>
+                  AI-generated code quality analysis
+                </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium">Functions</span>
-                  <Badge variant="outline">{functions.length}</Badge>
+              <CardContent>
+                <div className="p-3 bg-muted/30 rounded-lg">
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {quality_assessment}
+                  </p>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium">Classes</span>
-                  <Badge variant="outline">{classes.length}</Badge>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium">Imports</span>
-                  <Badge variant="outline">{totalImports}</Badge>
-                </div>
-                {file_stats && (
-                  <>
-                    {file_stats.lines_of_code && (
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm font-medium">
-                          Lines of Code
-                        </span>
-                        <Badge variant="outline">
-                          {file_stats.lines_of_code}
-                        </Badge>
-                      </div>
-                    )}
-                    {file_stats.file_size && (
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm font-medium">File Size</span>
-                        <Badge variant="outline">{file_stats.file_size}</Badge>
-                      </div>
-                    )}
-                  </>
-                )}
               </CardContent>
             </Card>
           )}
+
+          {/* Quick Stats */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center">
+                <Zap className="w-5 h-5 mr-3 text-orange-500" />
+                Quick Stats
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Total Components</span>
+                <Badge variant="outline">{components.length}</Badge>
+              </div>
+              {componentCounts.slice(0, 3).map(({ type, count }) => (
+                <div key={type} className="flex justify-between items-center">
+                  <span className="text-sm font-medium">{type}s</span>
+                  <Badge variant="outline">{count}</Badge>
+                </div>
+              ))}
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Dependencies</span>
+                <Badge variant="outline">
+                  {Array.isArray(dependencies) ? dependencies.length : 0}
+                </Badge>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Exports</span>
+                <Badge variant="outline">
+                  {Array.isArray(exports) ? exports.length : 0}
+                </Badge>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>
