@@ -1,4 +1,3 @@
-# This is the final, complete, and correct content for your file at:
 # backend/app/services/ai/gemini.py
 
 import json
@@ -23,23 +22,34 @@ async def call_gemini_for_code_analysis(code_content: str) -> dict:
     """
     Analyzes a single file's content using a detailed, expert prompt.
     """
-    logger.info("Making a real call to the Gemini API for single file analysis...")
+    logger.info("Making a real call to the Gemini API for structured code analysis...")
+    
     prompt = f"""
-    You are a senior software engineer reviewing Python code. Analyze the following code thoroughly and professionally.
+    You are a senior software engineer conducting a professional code review.
+    Your task is to analyze the provided source code and return a structured JSON object.
 
     ANALYSIS REQUIREMENTS:
-    - Summary: Write 2-3 sentences explaining the file's purpose, main responsibility, and how it fits into a larger system.
-    - Functions: For each function, provide its name, a concise purpose, a list of parameters, and its return type.
-    - Classes: For each class, provide its name, purpose, key methods, and any inheritance.
-    - Imports: Categorize all imports (standard library, third-party, local) and briefly explain their usage.
-    - Code Quality: Note any observed design patterns, potential issues (e.g., error handling, performance), or key architectural decisions.
+    1.  **Summary**: Write a concise, 2-3 sentence paragraph explaining the file's primary purpose and its role within a larger application.
+    2.  **Functions/Classes**: For each function or class, identify its name, its specific purpose, and list its key parameters or methods.
+    3.  **Dependencies**: List the main libraries or modules imported at the top of the file.
+    4.  **Code Quality**: Provide a brief assessment of the code's quality, noting any potential issues like missing error handling, performance bottlenecks, or good design patterns observed.
 
-    RESPONSE FORMAT:
-    Return ONLY a valid JSON object matching this exact schema:
+    STRICT RESPONSE FORMAT:
+    You MUST return ONLY a valid JSON object. Do not include any explanatory text before or after the JSON.
+    The JSON object must match this exact schema:
     {{
         "summary": "A 2-3 sentence description of the file's purpose and role.",
         "structured_analysis": {{
-            "functions": [], "classes": [], "imports": {{}}, "code_quality": {{}}
+            "components": [
+                {{
+                    "name": "Function or Class Name",
+                    "type": "Function | Class",
+                    "purpose": "A one-sentence description of what it does.",
+                    "details": "e.g., Parameters: [param1, param2] or Key Methods: [method1, method2]"
+                }}
+            ],
+            "dependencies": ["List of imported libraries"],
+            "quality_assessment": "A brief assessment of the code's quality."
         }}
     }}
 
@@ -48,18 +58,21 @@ async def call_gemini_for_code_analysis(code_content: str) -> dict:
     {code_content}
     ```
     """
+    
     try:
         response = await model.generate_content_async(prompt)
         cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
         result = json.loads(cleaned_text)
-        logger.info("Successfully received and parsed analysis from Gemini API.")
+        logger.info("Successfully received and parsed structured code analysis from Gemini API.")
         return result
     except Exception as e:
-        logger.error(f"Error calling or parsing Gemini API response: {e}", exc_info=True)
-        return {"summary": "AI analysis failed.", "structured_analysis": {"error": str(e)}}
+        logger.error(f"Error calling or parsing Gemini API for code analysis: {e}", exc_info=True)
+        return {{
+            "summary": "AI analysis failed.",
+            "structured_analysis": {{"error": str(e)}}
+        }}
 
-
-# --- FUNCTION 2: REPOSITORY ANALYSIS (RESTORED) ---
+# --- FUNCTION 2: REPOSITORY ANALYSIS (INTACT) ---
 async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
     """
     Analyzes a GitHub repository based on its metadata using a detailed, expert prompt.
@@ -67,12 +80,6 @@ async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
     logger.info("Making a real call to the Gemini API for repository analysis...")
     prompt = f"""
     You are a technical lead reviewing a GitHub repository. Analyze the repository metadata and provide insights about the project.
-
-    ANALYSIS REQUIREMENTS:
-    - Summary: Write 2-3 sentences about the project's purpose, its target users, and its main value proposition.
-    - Architecture: Infer the likely architecture patterns, tech stack decisions, and project structure from the metadata.
-    - Technology Assessment: Evaluate the choice of languages, key dependencies, and the overall technical approach.
-    - Project Insights: Comment on the development activity, complexity, and any maintenance considerations.
 
     RESPONSE FORMAT:
     Return ONLY a valid JSON object matching this exact schema:
@@ -92,89 +99,100 @@ async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
         return result
     except Exception as e:
         logger.error(f"Error calling or parsing Gemini API response for repo: {e}", exc_info=True)
-        return {"summary": "AI repository analysis failed.", "structured_analysis": {"error": str(e)}}
+        return {{"summary": "AI repository analysis failed.", "structured_analysis": {{"error": str(e)}}}}
 
 
-# --- FUNCTION 3: VALIDATION & MISMATCH (INTACT AND CORRECTED) ---
+# --- FUNCTION 3: SEMANTIC VALIDATION ENGINE (FULLY UPGRADED) ---
+
 class ValidationType(Enum):
-    API_ENDPOINT = "API_Endpoint_Missing"
-    PARAMETER_MISMATCH = "Parameter_Mismatch"
-    BUSINESS_LOGIC = "Business_Logic_Missing"
-    DATA_FLOW = "Data_Flow_Inconsistency"
-    SECURITY_REQUIREMENT = "Security_Requirement_Missing"
-    PERFORMANCE_CONSTRAINT = "Performance_Constraint_Missing"
-    CONSISTENCY_CHECK = "Consistency_Check"
+    """
+    Defines the specific types of validation checks the engine can perform.
+    This allows for focused, role-based analysis.
+    """
+    API_ENDPOINT_MISSING = "API Endpoint Missing"
+    PARAMETER_MISMATCH = "Parameter Mismatch"
+    BUSINESS_LOGIC_MISSING = "Business Logic Missing"
+    DATA_FLOW_INCONSISTENCY = "Data Flow Inconsistency"
+    SECURITY_REQUIREMENT_UNMET = "Security Requirement Unmet"
+    PERFORMANCE_CONSTRAINT_UNMET = "Performance Constraint Unmet"
+    GENERAL_CONSISTENCY = "General Consistency Check"
 
 @dataclass
 class ValidationContext:
-    """Context for validation to make prompts more focused"""
+    """
+    **This is the upgraded context.** It holds structured analysis data,
+    NOT raw text, which is the core of our intelligent strategy.
+    """
     focus_area: ValidationType
-    document_content: str
-    code_content: str
-    document_type: str
-    severity_threshold: str = "Medium"
-    max_mismatches: int = 8
+    document_analysis: Optional[List[Dict]] = field(default_factory=list)
+    code_analysis: Optional[Dict] = field(default_factory=dict)
 
 def _build_validation_instructions(focus_area: ValidationType) -> str:
-    if focus_area == ValidationType.API_ENDPOINT:
-        return "API ENDPOINTS: Compare documented API endpoints/functions with implemented methods."
-    return "General: Look for any clear contradictions between the document and the code."
-
-def _parse_and_validate_response(response_text: str) -> List[dict]:
-    try:
-        cleaned_text = response_text.strip().replace('```json', '').replace('```', '').strip()
-        result = json.loads(cleaned_text)
-        if not isinstance(result, list):
-            logger.warning("AI returned non-list response, wrapping in list.")
-            return [result] if result else []
-        return result
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse AI response as JSON: {e}")
-        return []
+    """
+    This helper generates detailed, specific instructions for the AI.
+    This is the key to enabling different validation profiles for different user roles.
+    """
+    if focus_area == ValidationType.API_ENDPOINT_MISSING:
+        return "API ENDPOINTS: Compare the functional requirements for API endpoints described in the document analysis against the implemented functions/classes in the code analysis. Identify any required endpoints that are completely missing from the code."
+    if focus_area == ValidationType.BUSINESS_LOGIC_MISSING:
+        return "BUSINESS LOGIC: Compare the high-level business requirements from the document analysis against the code's overall summary and component purposes. Identify any core business concepts or rules that are not mentioned or implemented in the code."
+    return "GENERAL CONSISTENCY: Perform a general consistency check. Look for any other clear contradictions between the document's stated goals and the code's implementation details as presented in their respective analyses."
 
 async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
-    logger.info(f"Starting Gemini validation for: {context.focus_area.value}")
+    """
+    **This is the upgraded validation function.**
+    It sends structured data to the AI with a focused, role-based prompt.
+    """
+    logger.info(f"Starting focused Gemini validation for: {context.focus_area.value}")
+    
     validation_instructions = _build_validation_instructions(context.focus_area)
-    document_analysis = {"content": context.document_content}
-    code_analysis = {"content": context.code_content}
+
     prompt = f"""
-    You are an expert software architect acting as a validation engine.
+    You are an expert software architect acting as a semantic validation engine.
+    Your task is to perform a highly focused validation check by comparing the structured analysis of a technical document against the structured analysis of a code file.
+
+    CRITICAL INSTRUCTIONS:
+    1.  **FOCUS**: Adhere strictly to the 'VALIDATION AREA' defined below.
+    2.  **PRECISION**: Only flag genuine, high-impact mismatches. Be precise and actionable.
+    3.  **SEMANTICS**: Understand intent. 'getUser' is equivalent to 'fetch_user_data'.
+    4.  **EVIDENCE**: The 'expected' field MUST come from the DOCUMENT ANALYSIS. The 'actual' field MUST come from the CODE ANALYSIS.
 
     VALIDATION AREA:
     {validation_instructions}
 
-    RESPONSE FORMAT:
-    Return ONLY a valid JSON array of mismatch objects. Each object must follow this schema:
+    STRICT RESPONSE FORMAT:
+    Return ONLY a valid JSON array of mismatch objects. Each object must follow this exact schema:
     {{
         "mismatch_type": "{context.focus_area.value}",
-        "description": "Clear, one-sentence description of the mismatch.",
-        "severity": "High/Medium/Low",
-        "confidence": "High/Medium/Low",
+        "description": "A clear, one-sentence summary of the core mismatch.",
+        "severity": "High | Medium | Low",
+        "confidence": "High | Medium | Low",
         "details": {{
-            "expected": "What the document specifies.",
-            "actual": "What exists in the code (or 'Missing').",
-            "evidence_document": "A direct quote from the document.",
-            "evidence_code": "A direct quote or reference from the code.",
-            "suggested_action": "A brief, actionable recommendation."
+            "expected": "What the document's structured analysis specifies.",
+            "actual": "What the code's structured analysis shows (or 'Missing').",
+            "evidence_document": "A direct quote or summary from the document analysis.",
+            "evidence_code": "A direct quote or summary from the code analysis.",
+            "suggested_action": "A brief, actionable recommendation for a developer to fix the issue."
         }}
     }}
-    If no mismatches are found, return an empty array: [].
+    If no mismatches are found for this specific validation area, you MUST return an empty array: [].
 
-    DOCUMENT ANALYSIS:
+    DOCUMENT ANALYSIS (The "Source of Truth"):
     ```json
-    {json.dumps(document_analysis, indent=2)}
+    {json.dumps(context.document_analysis, indent=2)}
     ```
 
-    CODE ANALYSIS:
+    CODE ANALYSIS (The "Implementation"):
     ```json
-    {json.dumps(code_analysis, indent=2)}
+    {json.dumps(context.code_analysis, indent=2)}
     ```
     """
     try:
         response = await model.generate_content_async(prompt)
-        result = _parse_and_validate_response(response.text)
+        cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
+        result = json.loads(cleaned_text)
         logger.info(f"Validation for {context.focus_area.value} complete: {len(result)} mismatches found.")
-        return result
+        return result if isinstance(result, list) else []
     except Exception as e:
         logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)
         return []

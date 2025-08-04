@@ -38,20 +38,22 @@ def read_code_components(
 def create_code_component(
     *,
     db: Session = Depends(deps.get_db),
-    component_in: schemas.CodeComponentCreate,
-    # --- FIX: Corrected function name ---
+    code_component_in: schemas.CodeComponentCreate,
     current_user: models.User = Depends(deps.get_current_user),
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks # 1. Add this dependency
 ) -> Any:
     """
-    Create new code component and trigger AI analysis in the background.
+    Create new code component.
     """
     code_component = crud.code_component.create_with_owner(
-        db=db, obj_in=component_in, owner_id=current_user.id
+        db=db, obj_in=code_component_in, owner_id=current_user.id
     )
-    
+
+    # 2. Add the new analysis service to the background queue
+    # This triggers our new pipeline without making the user wait
     background_tasks.add_task(
-        code_analysis_service.analyze_component, component_id=code_component.id
+        code_analysis_service.analyze_component_in_background,
+        component_id=code_component.id
     )
     
     return code_component

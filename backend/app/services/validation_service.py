@@ -1,4 +1,3 @@
-# This is the corrected content for your file at:
 # backend/app/services/validation_service.py
 
 import logging
@@ -11,18 +10,23 @@ from sqlalchemy import and_
 
 from app import crud, models, schemas
 from app.db.session import SessionLocal
+# We will upgrade this function in our next step (Task 2.C)
 from app.services.ai.gemini import call_gemini_for_validation, ValidationType, ValidationContext
 from app.models.document_code_link import DocumentCodeLink
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Your semaphore for rate limiting is preserved
 GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
 class ValidationService:
     @staticmethod
     @asynccontextmanager
     async def get_db_session():
+        """
+        Your robust async context manager for database sessions is preserved.
+        """
         db: Session = SessionLocal()
         try:
             yield db
@@ -32,7 +36,8 @@ class ValidationService:
     @staticmethod
     async def run_validation_scan(user_id: int, document_ids: List[int]):
         """
-        Runs a validation scan for a specific list of documents linked to a user's code.
+        Your top-level orchestration logic is preserved. It correctly filters
+        documents and links for the specific user.
         """
         if not document_ids:
             logger.warning(f"No document IDs provided for user {user_id}")
@@ -41,7 +46,6 @@ class ValidationService:
         logger.info(f"Starting validation scan for user_id: {user_id} on documents: {document_ids}")
         async with ValidationService.get_db_session() as db:
             try:
-                # First, validate that all requested documents belong to the user
                 user_documents = db.query(models.Document).filter(
                     and_(
                         models.Document.owner_id == user_id,
@@ -58,7 +62,6 @@ class ValidationService:
                     logger.warning(f"No valid documents found for user {user_id}")
                     return
 
-                # Fetch only the links related to the selected documents that belong to the user
                 links = db.query(models.DocumentCodeLink).join(models.Document).filter(
                     and_(
                         models.Document.owner_id == user_id,
@@ -66,16 +69,14 @@ class ValidationService:
                     )
                 ).all()
 
-                logger.info(f"Found {len(links)} links to validate for the selected documents.")
                 if not links:
                     logger.info(f"No document-code links found for documents {found_doc_ids} for user {user_id}")
                     return
 
-                # Process validation tasks
+                # Your original task processing logic is preserved
                 tasks = [ValidationService.validate_single_link(link, user_id) for link in links]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                # Log any exceptions that occurred
+                
                 successful_validations = 0
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
@@ -87,80 +88,71 @@ class ValidationService:
 
             except Exception as e:
                 logger.error(f"Top-level error in validation scan for user {user_id}: {e}", exc_info=True)
-                raise  # Re-raise to let the API endpoint handle it
+                raise
             finally:
                 logger.info(f"Validation scan finished for user_id: {user_id}")
 
     @staticmethod
     async def validate_single_link(link: DocumentCodeLink, user_id: int):
         """
-        Validates a single document-code link using Gemini AI.
+        --- THIS IS THE UPGRADED METHOD ---
+        It now performs a multi-pass validation using pre-analyzed structured data.
         """
         async with GEMINI_API_SEMAPHORE:
-            try:
-                async with ValidationService.get_db_session() as db:
-                    # Fetch the document and code component
+            async with ValidationService.get_db_session() as db:
+                try:
+                    # 1. Fetch the linked components
                     document = db.query(models.Document).filter(models.Document.id == link.document_id).first()
                     code_component = db.query(models.CodeComponent).filter(models.CodeComponent.id == link.code_component_id).first()
 
                     if not document or not code_component:
                         logger.error(f"Missing document or code component for link {link.id}")
                         return
-
-                    if not document.content:
-                        logger.warning(f"Document {document.id} has no content to validate")
+                    
+                    # 2. **CRITICAL CHANGE**: Check for pre-existing analysis instead of raw content
+                    if not document.analysis_results or not code_component.structured_analysis:
+                        logger.warning(f"Skipping link {link.id}: Document or Code Component has not been analyzed yet.")
                         return
 
-                    # Fetch code content from location
-                    async with httpx.AsyncClient() as client:
-                        response = await client.get(code_component.location)
-                        response.raise_for_status()
-                        code_content = response.text
+                    logger.info(f"Processing link {link.id}: Doc '{document.name}' vs Code '{code_component.name}'")
+                    
+                    # 3. **NEW**: Clear previous results for this link to ensure a fresh scan
+                    crud.mismatch.remove_by_link_id(db=db, link_id=link.id)
 
-                    if not code_content:
-                        logger.warning(f"Code component {code_component.id} has no content to validate")
-                        return
+                    # 4. **NEW**: Define the validation checks to run for this link
+                    validation_passes_to_run = [
+                        ValidationType.API_ENDPOINT_MISSING,
+                        ValidationType.BUSINESS_LOGIC_MISSING,
+                        ValidationType.GENERAL_CONSISTENCY,
+                    ]
 
-                    logger.info(f"Validating link {link.id}: {document.filename} <-> {code_component.name}")
+                    # 5. **NEW**: Build a list of concurrent AI tasks for each check
+                    ai_tasks = []
+                    for check_type in validation_passes_to_run:
+                        context = ValidationContext(
+                            focus_area=check_type,
+                            document_analysis=document.analysis_results,
+                            code_analysis=code_component.structured_analysis,
+                        )
+                        ai_tasks.append(call_gemini_for_validation(context))
 
-                    # Create validation context
-                    context = ValidationContext(
-                        document_content=document.content,
-                        code_content=code_content,
-                        document_type=document.document_type,
-                        focus_area=ValidationType.CONSISTENCY_CHECK
-                    )
+                    # 6. **NEW**: Run all AI validation passes concurrently
+                    validation_results = await asyncio.gather(*ai_tasks)
 
-                    # Call Gemini for validation
-                    validation_result = await call_gemini_for_validation(context)
+                    # 7. **NEW**: Process and store the aggregated results
+                    for mismatches in validation_results:
+                        if mismatches:
+                            for mismatch_data in mismatches:
+                                crud.mismatch.create_with_link(
+                                    db=db,
+                                    obj_in=mismatch_data,
+                                    link_id=link.id,
+                                    owner_id=user_id
+                                )
+                                logger.info(f"Created new mismatch for link {link.id}")
 
-                    if validation_result: # Check if the list is not empty
-                        for mismatch_item in validation_result:
-                            # Create mismatch record
-                            mismatch_data = {
-                                "document_id": document.id,
-                                "code_component_id": code_component.id,
-                                "mismatch_type": mismatch_item.get("mismatch_type"),
-                                "description": mismatch_item.get("description"),
-                                "severity": mismatch_item.get("severity"),
-                                "confidence": mismatch_item.get("confidence"),
-                                "details": mismatch_item.get("details"),
-                                "status": "open"
-                            }
-
-                            # Save mismatch to database
-                            mismatch = crud.mismatch.create_with_owner(
-                                db=db,
-                                obj_in=schemas.MismatchCreate(**mismatch_data),
-                                owner_id=user_id
-                            )
-
-                            logger.info(f"Created mismatch {mismatch.id} for link {link.id}")
-                    else:
-                        logger.info(f"No mismatch found for link {link.id}")
-
-            except Exception as e:
-                logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
-                raise
+                except Exception as e:
+                    logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
+                    raise
 
 validation_service = ValidationService()
