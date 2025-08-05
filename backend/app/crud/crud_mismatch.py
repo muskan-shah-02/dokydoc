@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.crud.base import CRUDBase
 from app.models.mismatch import Mismatch
+from app.models.document_code_link import DocumentCodeLink
 from app.schemas.mismatch import MismatchCreate, MismatchUpdate
 
 class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
@@ -53,6 +54,30 @@ class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
         ).delete()
         db.commit()
         return num_deleted
+
+    def create_with_link(
+        self,
+        db: Session,
+        *,
+        obj_in: dict,
+        link_id: int,
+        owner_id: int
+    ) -> Mismatch:
+        link = db.query(DocumentCodeLink).filter(DocumentCodeLink.id == link_id).first()
+        if not link:
+            raise ValueError(f"DocumentCodeLink {link_id} not found")
+
+        mismatch_schema = MismatchCreate(
+            **obj_in,
+            document_id=link.document_id,
+            code_component_id=link.code_component_id
+        )
+
+        db_obj = self.model(**mismatch_schema.model_dump(), owner_id=owner_id)
+        db.add(db_obj)
+        db.commit()
+        db.refresh(db_obj)
+        return db_obj
 
 # A single, reusable instance of our CRUD class.
 mismatch = CRUDMismatch(Mismatch)

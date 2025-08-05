@@ -115,11 +115,12 @@ class ValidationService:
 
                     # --- THE FINAL FIX IS HERE ---
                     # The column in the AnalysisResult model is named 'result'.
-                    document_analysis_data = [res.result for res in doc_analysis_objects]
+                    document_analysis_data = [res.result_data for res in doc_analysis_objects]
 
-                    logger.info(f"Processing link {link.id}: Doc '{document.name}' vs Code '{code_component.name}'")
+                    logger.info(f"Processing link {link.id}: Doc '{document.filename}' vs Code '{code_component.name}'")
+
                     
-                    crud.mismatch.remove_by_link_id(db=db, link_id=link.id)
+                    crud.mismatch.remove_by_link(db=db, document_id=document.id, code_component_id=code_component.id)
 
                     validation_passes_to_run = [
                         ValidationType.API_ENDPOINT_MISSING,
