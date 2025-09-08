@@ -1,0 +1,36 @@
+# Business Requirements Document (BRD)
+
+## Project Overview
+This is a test document to validate the multi-pass Document Analysis Engine (DAE) implementation.
+
+## Functional Requirements
+1. User Authentication System
+   - Users must be able to login with email and password
+   - Password must be at least 8 characters long
+   - Failed login attempts should be logged
+
+2. Document Management
+   - Users can upload documents in PDF, DOCX, and TXT formats
+   - Documents should be stored securely
+   - Users can view and download their uploaded documents
+
+## Technical Specifications
+- Backend: FastAPI with Python 3.11
+- Database: PostgreSQL with SQLAlchemy ORM
+- Authentication: JWT tokens
+- File Storage: Local file system with UUID-based naming
+
+## API Endpoints
+- POST /api/v1/documents/upload - Upload a new document
+- GET /api/v1/documents/{id} - Get document details
+- GET /api/v1/documents/{id}/segments - Get document segments
+
+## Security Requirements
+- All API endpoints must be protected with JWT authentication
+- File uploads must be validated for file type and size
+- Database queries must use parameterized statements to prevent SQL injection
+
+## Performance Requirements
+- Document upload should complete within 30 seconds
+- API responses should return within 2 seconds
+- System should support up to 100 concurrent users

@@ -1,11 +1,16 @@
-# This is the final, updated content for your file at:
-# backend/app/models/document.py
+from typing import TYPE_CHECKING, List
+from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
+
+if TYPE_CHECKING:
+    from .analysis_result import AnalysisResult  # noqa: F401
+    from .document_segment import DocumentSegment # noqa: F401
+
 
 class Document(Base):
     """
@@ -13,38 +18,48 @@ class Document(Base):
     """
     __tablename__ = "documents"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filename: Mapped[str] = mapped_column(String, index=True, nullable=False)
     
-    # The original name of the file uploaded by the user
-    filename = Column(String, index=True, nullable=False)
+    # Document type classification (e.g., "BRD", "API_DOCS", "TECHNICAL_SPECS")
+    document_type: Mapped[str] = mapped_column(String, nullable=True)
     
-    # The type of document, e.g., "BRD", "SRS", "Technical Spec"
-    document_type = Column(String, nullable=False)
+    # Document version for tracking changes
+    version: Mapped[str] = mapped_column(String, default="1.0")
     
-    # The version string provided by the user, e.g., "v1.0", "v2.3"
-    version = Column(String, nullable=False)
+    # Owner of the document (links to users table)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     
-    # The path on the server's storage where the actual file is located
-    storage_path = Column(String, nullable=False, unique=True)
-
-    # The size of the file in kilobytes
-    file_size_kb = Column(Integer, nullable=True)
-
-    # The full text content extracted from the document by our parsing service.
-    content = Column(Text, nullable=True)
+    # Storage path for the original file
+    storage_path: Mapped[str] = mapped_column(String, nullable=True)
     
-    # A status field to track background parsing
-    status = Column(String, default="processing") # e.g., "processing", "completed", "failed"
+    # The pristine, unmodified text content extracted from the document.
+    # All other analyses and segments will reference this single source of truth.
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # Add this line to your Document model after the status field
-    progress = Column(Integer, default=0)  # Progress percentage (0-100)
+    # Stores the output of Pass 1 (Composition & Classification).
+    # Example: {"BRD": 80, "API_DOCS": 20}
+    composition_analysis: Mapped[dict] = mapped_column(JSONB, nullable=True)
     
-    # The timestamp when the document record was created
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    status: Mapped[str] = mapped_column(String, default="uploaded")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
     
-    # Foreign key to link this document to the user who uploaded it
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    # File size in KB
+    file_size_kb: Mapped[int] = mapped_column(Integer, nullable=True)
     
-    # Creates a relationship, allowing you to access the user object
-    # from a document object, e.g., my_document.owner.email
-    owner = relationship("User")
+    # Legacy content field for backward compatibility
+    content: Mapped[str] = mapped_column(Text, nullable=True)
+    
+    # Timestamp fields
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    
+    # A document is composed of many segments.
+    # The 'cascade' option ensures that when a document is deleted,
+    # all of its associated segments are also deleted.
+    segments: Mapped[List["DocumentSegment"]] = relationship(
+        "DocumentSegment", back_populates="document", cascade="all, delete-orphan"
+    )
+    
+    # Owner of the document
+    owner: Mapped["User"] = relationship("User", back_populates="documents")

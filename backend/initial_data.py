@@ -1,11 +1,11 @@
 import asyncio
-import logging
-from app.db.session import SessionLocal
+from app.db.session import get_db_context
 from app.crud.crud_user import user as user_crud
 from app.schemas.user import UserCreate, Role
+from app.core.logging import get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Get logger for this module
+logger = get_logger("initial_data")
 
 # The user data remains the same
 users_to_create = [
@@ -39,35 +39,34 @@ users_to_create = [
 
 async def main() -> None:
     logger.info("Starting initial data creation process...")
-    db = SessionLocal()
+    
+    with get_db_context() as db:
+        for user_data in users_to_create:
+            user = user_crud.get_user_by_email(db, email=user_data["email"])
+            
+            # If user doesn't exist, create them
+            if not user:
+                user_in_create = UserCreate(
+                    email=user_data["email"],
+                    password=user_data["password"],
+                    roles=user_data["roles"],
+                )
+                user = user_crud.create_user(db, obj_in=user_in_create)
+                logger.info(f"Created user: {user.email}")
 
-    for user_data in users_to_create:
-        user = user_crud.get_user_by_email(db, email=user_data["email"])
-        
-        # If user doesn't exist, create them
-        if not user:
-            user_in_create = UserCreate(
-                email=user_data["email"],
-                password=user_data["password"],
-                roles=user_data["roles"],
-            )
-            user = user_crud.create_user(db, obj_in=user_in_create)
-            logger.info(f"Created user: {user.email}")
+            # --- EXPLICITLY SET AND SAVE ROLES ---
+            # This part ensures the roles are correct, even if they were not set on creation
+            role_values = [role.value for role in user_data["roles"]]
+            if user.roles != role_values:
+                logger.info(f"Updating roles for {user.email}...")
+                user.roles = role_values
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"Successfully set roles for {user.email} to: {user.roles}")
+            else:
+                 logger.info(f"Roles for {user.email} are already correct.")
 
-        # --- EXPLICITLY SET AND SAVE ROLES ---
-        # This part ensures the roles are correct, even if they were not set on creation
-        role_values = [role.value for role in user_data["roles"]]
-        if user.roles != role_values:
-            logger.info(f"Updating roles for {user.email}...")
-            user.roles = role_values
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info(f"Successfully set roles for {user.email} to: {user.roles}")
-        else:
-             logger.info(f"Roles for {user.email} are already correct.")
-
-    db.close()
     logger.info("Initial data creation process finished.")
 
 

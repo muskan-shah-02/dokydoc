@@ -1,6 +1,5 @@
 # backend/app/services/validation_service.py
 
-import logging
 import asyncio
 import httpx
 from typing import List
@@ -13,14 +12,17 @@ from app.db.session import SessionLocal
 # We will upgrade this function in our next step (Task 2.C)
 from app.services.ai.gemini import call_gemini_for_validation, ValidationType, ValidationContext
 from app.models.document_code_link import DocumentCodeLink
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from app.core.logging import LoggerMixin
+from app.core.exceptions import ValidationException, AIAnalysisException
 
 # Your semaphore for rate limiting is preserved
 GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
-class ValidationService:
+class ValidationService(LoggerMixin):
+    
+    def __init__(self):
+        super().__init__()
+    
     @staticmethod
     @asynccontextmanager
     async def get_db_session():
@@ -33,17 +35,16 @@ class ValidationService:
         finally:
             db.close()
 
-    @staticmethod
-    async def run_validation_scan(user_id: int, document_ids: List[int]):
+    async def run_validation_scan(self, user_id: int, document_ids: List[int]):
         """
         Your top-level orchestration logic is preserved. It correctly filters
         documents and links for the specific user.
         """
         if not document_ids:
-            logger.warning(f"No document IDs provided for user {user_id}")
+            self.logger.warning(f"No document IDs provided for user {user_id}")
             return
 
-        logger.info(f"Starting validation scan for user_id: {user_id} on documents: {document_ids}")
+        self.logger.info(f"Starting validation scan for user_id: {user_id} on documents: {document_ids}")
         async with ValidationService.get_db_session() as db:
             try:
                 user_documents = db.query(models.Document).filter(
@@ -56,10 +57,10 @@ class ValidationService:
                 found_doc_ids = [doc.id for doc in user_documents]
                 if len(found_doc_ids) != len(document_ids):
                     missing_docs = set(document_ids) - set(found_doc_ids)
-                    logger.warning(f"Some documents not found or not owned by user {user_id}: {missing_docs}")
+                    self.logger.warning(f"Some documents not found or not owned by user {user_id}: {missing_docs}")
 
                 if not found_doc_ids:
-                    logger.warning(f"No valid documents found for user {user_id}")
+                    self.logger.warning(f"No valid documents found for user {user_id}")
                     return
 
                 links = db.query(models.DocumentCodeLink).join(models.Document).filter(
@@ -70,30 +71,29 @@ class ValidationService:
                 ).all()
 
                 if not links:
-                    logger.info(f"No document-code links found for documents {found_doc_ids} for user {user_id}")
+                    self.logger.info(f"No document-code links found for documents {found_doc_ids} for user {user_id}")
                     return
 
                 # Your original task processing logic is preserved
-                tasks = [ValidationService.validate_single_link(link, user_id) for link in links]
+                tasks = [self.validate_single_link(link, user_id) for link in links]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 successful_validations = 0
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
-                        logger.error(f"Validation failed for link {links[i].id}: {result}")
+                        self.logger.error(f"Validation failed for link {links[i].id}: {result}")
                     else:
                         successful_validations += 1
 
-                logger.info(f"Validation completed: {successful_validations}/{len(links)} links processed successfully")
+                self.logger.info(f"Validation completed: {successful_validations}/{len(links)} links processed successfully")
 
             except Exception as e:
-                logger.error(f"Top-level error in validation scan for user {user_id}: {e}", exc_info=True)
+                self.logger.error(f"Top-level error in validation scan for user {user_id}: {e}", exc_info=True)
                 raise
             finally:
-                logger.info(f"Validation scan finished for user_id: {user_id}")
+                self.logger.info(f"Validation scan finished for user_id: {user_id}")
 
-    @staticmethod
-    async def validate_single_link(link: DocumentCodeLink, user_id: int):
+    async def validate_single_link(self, link: DocumentCodeLink, user_id: int):
         """
         --- THIS IS THE FINAL, ARCHITECTURALLY CORRECT METHOD ---
         """
@@ -104,20 +104,20 @@ class ValidationService:
                     code_component = db.query(models.CodeComponent).filter(models.CodeComponent.id == link.code_component_id).first()
 
                     if not document or not code_component:
-                        logger.error(f"Missing document or code component for link {link.id}")
+                        self.logger.error(f"Missing document or code component for link {link.id}")
                         return
 
                     doc_analysis_objects = crud.analysis_result.get_multi_by_document(db=db, document_id=document.id)
 
                     if not doc_analysis_objects or not code_component.structured_analysis:
-                        logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")
+                        self.logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")
                         return
 
                     # --- THE FINAL FIX IS HERE ---
                     # The column in the AnalysisResult model is named 'result'.
                     document_analysis_data = [res.result_data for res in doc_analysis_objects]
 
-                    logger.info(f"Processing link {link.id}: Doc '{document.filename}' vs Code '{code_component.name}'")
+                    self.logger.info(f"Processing link {link.id}: Doc '{document.filename}' vs Code '{code_component.name}'")
 
                     
                     crud.mismatch.remove_by_link(db=db, document_id=document.id, code_component_id=code_component.id)
@@ -148,10 +148,10 @@ class ValidationService:
                                     link_id=link.id,
                                     owner_id=user_id
                                 )
-                                logger.info(f"Created new mismatch for link {link.id}")
+                                self.logger.info(f"Created new mismatch for link {link.id}")
 
                 except Exception as e:
-                    logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
+                    self.logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
                     raise
 
 validation_service = ValidationService()

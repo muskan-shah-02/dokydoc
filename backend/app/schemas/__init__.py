@@ -6,3 +6,4 @@ from .document_code_link import DocumentCodeLink, DocumentCodeLinkCreate
 from .document_status import DocumentStatus
 from .analysis_result import AnalysisResult, AnalysisResultCreate
 from .mismatch import Mismatch, MismatchCreate, MismatchUpdate
+from .document_segment import DocumentSegment, DocumentSegmentCreate, DocumentSegmentUpdate

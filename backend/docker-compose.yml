@@ -1,31 +1,113 @@
 services:
-  app:
-    container_name: dokydoc_app
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    # volumes:
-    #   - ${PWD}:/app
-    environment:
-      - DATABASE_URL=postgresql://postgres:mysecretpassword@db:5432/dokydoc
-      - PYTHONPATH=/app
-    depends_on:
-      - db
-    command: uvicorn main:app --host 0.0.0.0 --port 8000  # Removed --reload
-
+  # PostgreSQL Database
   db:
     image: postgres:15-alpine
     container_name: dokydoc_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dokydoc
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: simplepass
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=mysecretpassword
-      - POSTGRES_DB=dokydoc
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dokydoc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Redis Cache (for future use)
+  redis:
+    image: redis:7-alpine
+    container_name: dokydoc_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
     volumes:
-      - postgres_data:/var/lib/postgresql/data/
+      - redis_data:/data
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=${BUILD_ENV:-development}
+    container_name: dokydoc_app
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-true}
+      - DATABASE_URL=postgresql://postgres:simplepass@db:5432/dokydoc
+      - REDIS_URL=redis://redis:6379
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Nginx Reverse Proxy (for production)
+  nginx:
+    image: nginx:alpine
+    container_name: dokydoc_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./uploads:/var/www/uploads:ro
+    depends_on:
+      - app
+    networks:
+      - dokydoc_network
+    profiles:
+      - production
 
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  dokydoc_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

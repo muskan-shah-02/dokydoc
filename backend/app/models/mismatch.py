@@ -1,12 +1,15 @@
-# This is the updated content for your file at:
-# backend/app/models/mismatch.py
-
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.orm import relationship
+from typing import TYPE_CHECKING
+from datetime import datetime
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.sql import func
 
 from app.db.base_class import Base
+
+if TYPE_CHECKING:
+    from .user import User  # noqa: F401
+    from .document import Document  # noqa: F401
+    from .code_component import CodeComponent  # noqa: F401
 
 class Mismatch(Base):
     """
@@ -14,30 +17,32 @@ class Mismatch(Base):
     """
     __tablename__ = "mismatches"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
-    mismatch_type = Column(String, index=True, nullable=False)
-    description = Column(Text, nullable=False)
-    severity = Column(String, index=True, nullable=False)
-    status = Column(String, default="new", index=True, nullable=False)
-    details = Column(JSONB, nullable=True)
+    mismatch_type: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="new", index=True, nullable=False)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=True)
 
     # --- NEW COLUMNS TO ADD ---
     
     # The AI's confidence in this mismatch finding (e.g., "High", "Medium", "Low")
-    confidence = Column(String, nullable=True)
+    confidence: Mapped[str] = mapped_column(String, nullable=True)
     
     # A field for users to add notes or context to a mismatch
-    user_notes = Column(Text, nullable=True)
+    user_notes: Mapped[str] = mapped_column(Text, nullable=True)
     
     # --- END OF NEW COLUMNS ---
 
-    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
-    code_component_id = Column(Integer, ForeignKey("code_components.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    document_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id"), nullable=False)
+    code_component_id: Mapped[int] = mapped_column(Integer, ForeignKey("code_components.id"), nullable=False)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
 
-    owner = relationship("User")
-    document = relationship("Document")
-    code_component = relationship("CodeComponent")
+    owner: Mapped["User"] = relationship("User")
+    document: Mapped["Document"] = relationship("Document")
+    code_component: Mapped["CodeComponent"] = relationship("CodeComponent")
+    
+    # Timestamp fields
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

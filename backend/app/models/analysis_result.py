@@ -1,34 +1,34 @@
-# This is the content for your NEW file at:
-# backend/app/models/analysis_result.py
+from typing import TYPE_CHECKING
+from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy import ForeignKey, Integer, DateTime
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.sql import func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
 
-class AnalysisResult(Base):
-    """
-    Database model for storing the results of various AI analyses
-    performed on a document.
-    """
-    __tablename__ = "analysis_results"
+if TYPE_CHECKING:
+    from .document import Document  # noqa: F401 - Keep for potential future direct links
+    from .document_segment import DocumentSegment # noqa: F401
 
-    id = Column(Integer, primary_key=True, index=True)
+
+class AnalysisResult(Base):
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     
-    # The type of analysis performed, e.g., "summary", "functional_requirements"
-    analysis_type = Column(String, index=True, nullable=False)
+    # The structured JSON output from Pass 3 of the analysis.
+    structured_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     
-    # The structured result from the AI, stored as a JSON object.
-    # Using JSONB is efficient for querying in PostgreSQL.
-    result_data = Column(JSONB)
+    # An analysis result is now linked to a specific segment of a document.
+    segment_id: Mapped[int] = mapped_column(ForeignKey("document_segments.id"), nullable=False)
     
-    # The timestamp when the analysis was completed.
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # The original document_id is now nullable. The primary relationship is through the segment.
+    # We keep it for now for easier querying, but it's technically redundant.
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=True)
+
+    segment: Mapped["DocumentSegment"] = relationship(
+        "DocumentSegment", back_populates="analysis_results"
+    )
     
-    # Foreign key to link this analysis result back to the original document.
-    document_id = Column(Integer, ForeignKey("documents.id"))
-    
-    # Creates a relationship to the Document model.
-    document = relationship("Document")
+    # Timestamp fields
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

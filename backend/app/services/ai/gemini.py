@@ -1,175 +1,128 @@
 # backend/app/services/ai/gemini.py
 
 import json
-import logging
-from typing import List, Dict, Optional
+import asyncio
+from typing import Optional, Dict, Any, List
 from enum import Enum
 from dataclasses import dataclass, field
 import google.generativeai as genai
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from app.core.config import settings
+from app.core.logging import LoggerMixin
+from app.services.ai.prompt_manager import prompt_manager, PromptType
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+class GeminiService(LoggerMixin):
+    """
+    Service class for interacting with Google's Gemini AI API.
+    Provides both text and vision capabilities with retry logic and error handling.
+    """
+    
+    def __init__(self):
+        super().__init__()
+        
+        if not settings.GEMINI_API_KEY or "YOUR_GEMINI_API_KEY_HERE" in settings.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured correctly")
+        
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        self.model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        self.vision_model = genai.GenerativeModel(settings.GEMINI_VISION_MODEL)
+        self.logger.info("GeminiService initialized successfully")
 
-# Configure the Gemini client
-genai.configure(api_key=settings.GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    async def generate_content(self, prompt: str, **kwargs) -> genai.types.GenerateContentResponse:
+        """
+        Generate content with retry logic and error handling.
+        """
+        try:
+            self.logger.debug("Sending request to Gemini API")
+            response = await self.model.generate_content_async(prompt, **kwargs)
+            self.logger.debug("Gemini API response received successfully")
+            return response
+        except Exception as e:
+            self.logger.error(f"Error calling Gemini API: {e}")
+            raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    async def generate_content_with_vision(self, prompt: str, image, **kwargs) -> genai.types.GenerateContentResponse:
+        """
+        Generate content with vision capabilities and retry logic.
+        """
+        try:
+            self.logger.debug("Sending vision request to Gemini API")
+            response = await self.vision_model.generate_content_async([prompt, image], **kwargs)
+            self.logger.debug("Gemini Vision API response received successfully")
+            return response
+        except Exception as e:
+            self.logger.error(f"Error calling Gemini Vision API: {e}")
+            raise
+
+    async def call_gemini_for_code_analysis(self, code_content: str) -> dict:
+        """
+        Analyzes ANY file's content using a universal, adaptive prompt.
+        Works with any programming language, framework, or architectural pattern.
+        """
+        try:
+            self.logger.info("Making a real call to the Gemini API for universal code analysis...")
+            
+            # Use the prompt manager for code analysis
+            prompt = prompt_manager.get_prompt(PromptType.CODE_ANALYSIS)
+            
+            # Prepare the full prompt with the code content
+            full_prompt = f"{prompt}\n\nCODE TO ANALYZE:\n{code_content}"
+            
+            # Call Gemini API
+            response = await self.generate_content(full_prompt)
+            response_text = response.text
+            
+            # Parse the JSON response
+            try:
+                analysis_data = json.loads(response_text)
+                self.logger.info("Code analysis completed successfully")
+                return analysis_data
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
+                # Return a fallback structure
+                return {
+                    "summary": "Code analysis completed but response parsing failed",
+                    "structured_analysis": {
+                        "language_info": {"primary_language": "Unknown", "framework": "Unknown", "file_type": "Unknown"},
+                        "components": [],
+                        "dependencies": [],
+                        "exports": [],
+                        "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                        "quality_assessment": "Analysis failed due to response parsing error"
+                    }
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error in code analysis: {e}")
+            raise
+
+# Legacy compatibility - create a global instance
+try:
+    gemini_service = GeminiService()
+    model = gemini_service.model  # For backward compatibility
+except Exception as e:
+    print(f"Warning: Could not initialize GeminiService: {e}")
+    model = None
+    gemini_service = None
 
 # --- FUNCTION 1: CODE ANALYSIS (INTACT) ---
 async def call_gemini_for_code_analysis(code_content: str) -> dict:
     """
-    Analyzes ANY file's content using a universal, adaptive prompt.
-    Works with any programming language, framework, or code pattern.
+    Legacy function for backward compatibility.
     """
-    logger.info("Making a real call to the Gemini API for universal code analysis...")
-    
-    prompt = f"""
-    You are an expert software architect analyzing source code. Your task is to understand and document ANY type of code file, regardless of language, framework, or architectural pattern.
-
-    UNIVERSAL ANALYSIS APPROACH:
-    1. **Identify the Language/Framework**: Determine what programming language and frameworks are being used
-    2. **Understand the Purpose**: What does this file accomplish in the broader system?
-    3. **Extract All Meaningful Elements**: Find all significant code constructs, regardless of type
-    4. **Assess Quality & Patterns**: Evaluate code quality, patterns, and architectural decisions
-
-    ADAPTIVE COMPONENT DETECTION:
-    Scan for ANY of these code elements (language-agnostic):
-    - Functions/Methods (def, function, async def, const myFunc, public void, etc.)
-    - Classes/Objects (class, interface, struct, type, enum, etc.)
-    - Components (React components, Vue components, Angular components)
-    - Modules/Exports (export, module.exports, import/export statements)
-    - Constants/Variables (const, let, var, final, static, etc.)
-    - APIs/Endpoints (routes, controllers, handlers)
-    - Database Models/Schemas
-    - Configuration Objects
-    - Custom Types/Interfaces
-    - Hooks/Middleware
-    - Services/Utilities
-    
-    LANGUAGE-SPECIFIC ADAPTATIONS:
-    - **Python**: Functions, classes, decorators, async functions, dataclasses, enums
-    - **JavaScript/TypeScript**: Functions, classes, React components, hooks, interfaces, types
-    - **Java/C#**: Classes, methods, interfaces, enums, annotations
-    - **Go**: Functions, structs, interfaces, methods
-    - **Rust**: Functions, structs, enums, traits, impl blocks
-    - **PHP**: Classes, functions, traits, interfaces
-    - **Ruby**: Classes, modules, methods, constants
-    - **And ANY other language patterns you encounter**
-
-    STRICT RESPONSE FORMAT:
-    Return ONLY valid JSON matching this schema:
-    {{
-        "summary": "2-3 sentences describing the file's purpose, language, and role in the system",
-        "structured_analysis": {{
-            "language_info": {{
-                "primary_language": "Detected language (e.g., Python, JavaScript, TypeScript, Java)",
-                "framework": "Main framework if detected (e.g., React, FastAPI, Express, Spring)",
-                "file_type": "Type of file (e.g., Component, Service, Model, Configuration, Utility)"
-            }},
-            "components": [
-                {{
-                    "name": "Exact name found in code",
-                    "type": "Function|AsyncFunction|Class|Interface|Component|Constant|Variable|Hook|Service|Route|Model|Type|Enum|Method|Module",
-                    "purpose": "What this component does - one clear sentence",
-                    "details": "Key parameters, return types, props, fields, or other relevant details",
-                    "line_info": "Approximate location or signature if complex"
-                }}
-            ],
-            "dependencies": [
-                "List of imports, requires, or external dependencies with actual names from the code"
-            ],
-            "exports": [
-                "What this file exports or makes available to other files"
-            ],
-            "patterns_and_architecture": {{
-                "design_patterns": ["Any design patterns observed (e.g., Factory, Observer, MVC)"],
-                "architectural_style": "Overall style (e.g., Functional, OOP, Component-based, Microservice)",
-                "key_concepts": ["Main programming concepts used (e.g., async/await, HOCs, dependency injection)"]
-            }},
-            "quality_assessment": "Brief assessment of code quality, structure, error handling, and best practices observed"
-        }}
-    }}
-
-    CRITICAL INSTRUCTIONS:
-    - ALWAYS populate the components array with actual elements found in the code
-    - If you find ANYTHING that looks like a meaningful code construct, include it
-    - Use the exact names from the code, not generic placeholders
-    - Be language-agnostic - adapt to whatever language/framework you encounter
-    - If it's a configuration file, document the key configurations
-    - If it's a test file, document the test cases and what they test
-    - If it's a data file, document the data structure and purpose
-    - Never return empty components array unless the file truly has no meaningful code elements
-
-    EXAMPLES OF WHAT TO CAPTURE:
-    - Python: `async def get_user(id: int)` → {{"name": "get_user", "type": "AsyncFunction", "details": "Parameters: id (int), fetches user data"}}
-    - React: `const UserCard = ({{ user }}) =>` → {{"name": "UserCard", "type": "Component", "details": "Props: user object, renders user information"}}
-    - Java: `public class UserService` → {{"name": "UserService", "type": "Class", "details": "Service class for user operations"}}
-    - Config: `API_BASE_URL = "https://api.example.com"` → {{"name": "API_BASE_URL", "type": "Constant", "details": "Base URL for API requests"}}
-
-    CODE TO ANALYZE:
-    ```
-    {code_content}
-    ```
-    """
-    
-    try:
-        response = await model.generate_content_async(prompt)
-        cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        result = json.loads(cleaned_text)
-        
-        # Validate that we got components
-        components = result.get("structured_analysis", {}).get("components", [])
-        if not components:
-            logger.warning("AI returned empty components array - this might indicate an issue with analysis")
-        else:
-            logger.info(f"Successfully analyzed code: found {len(components)} components")
-            
-        return result
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gemini response as JSON: {e}")
-        logger.error(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
-        return {
-            "summary": "AI analysis failed due to JSON parsing error.",
-            "structured_analysis": {"error": f"JSON Parse Error: {str(e)}"}
-        }
-    except Exception as e:
-        logger.error(f"Error calling or parsing Gemini API for code analysis: {e}", exc_info=True)
-        return {
-            "summary": "AI analysis failed due to unexpected error.",
-            "structured_analysis": {"error": str(e)}
-        }
-
-# --- FUNCTION 2: REPOSITORY ANALYSIS (INTACT) ---
-async def call_gemini_for_repository_analysis(repo_metadata: dict) -> dict:
-    """
-    Analyzes a GitHub repository based on its metadata using a detailed, expert prompt.
-    """
-    logger.info("Making a real call to the Gemini API for repository analysis...")
-    prompt = f"""
-    You are a technical lead reviewing a GitHub repository. Analyze the repository metadata and provide insights about the project.
-
-    RESPONSE FORMAT:
-    Return ONLY a valid JSON object matching this exact schema:
-    {{
-        "summary": "A 2-3 sentence description of the project's purpose and value.",
-        "structured_analysis": {{}}
-    }}
-
-    REPOSITORY METADATA:
-    {json.dumps(repo_metadata, indent=2)}
-    """
-    try:
-        response = await model.generate_content_async(prompt)
-        cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
-        result = json.loads(cleaned_text)
-        logger.info("Successfully received and parsed repository analysis from Gemini API.")
-        return result
-    except Exception as e:
-        logger.error(f"Error calling or parsing Gemini API response for repo: {e}", exc_info=True)
-        return {{"summary": "AI repository analysis failed.", "structured_analysis": {{"error": str(e)}}}}
-
+    if gemini_service:
+        return await gemini_service.call_gemini_for_code_analysis(code_content)
+    else:
+        raise RuntimeError("GeminiService not available")
 
 # --- FUNCTION 3: SEMANTIC VALIDATION ENGINE (FULLY UPGRADED) ---
 
@@ -212,6 +165,9 @@ async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
     **This is the upgraded validation function.**
     It sends structured data to the AI with a focused, role-based prompt.
     """
+    if not model:
+        raise RuntimeError("Gemini model not available")
+        
     logger.info(f"Starting focused Gemini validation for: {context.focus_area.value}")
     
     validation_instructions = _build_validation_instructions(context.focus_area)

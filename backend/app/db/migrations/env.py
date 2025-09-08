@@ -33,6 +33,7 @@ from app.models.code_component import CodeComponent
 from app.models.document_code_link import DocumentCodeLink
 from app.models.analysis_result import AnalysisResult
 from app.models.mismatch import Mismatch 
+from app.models.document_segment import DocumentSegment
 
 
 target_metadata = Base.metadata
@@ -55,8 +56,14 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
+    # Get the database URL directly from environment
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise ValueError("DATABASE_URL environment variable is not set")
+    
+    # Create engine directly from the URL
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        {"sqlalchemy.url": db_url},
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

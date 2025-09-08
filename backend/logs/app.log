@@ -1,0 +1,2 @@
+{"timestamp": "2025-09-06T09:58:38.856793", "level": "INFO", "logger": "app.initial_data", "message": "Starting initial data creation process...", "module": "initial_data", "function": "main", "line": 41}
+{"timestamp": "2025-09-06T09:58:41.571731", "level": "ERROR", "logger": "app.database", "message": "Error in database context: (psycopg2.OperationalError) could not translate host name \"db\" to address: Name or service not known\n\n(Background on this error at: https://sqlalche.me/e/20/e3q8)", "module": "session", "function": "get_db_context", "line": 88}

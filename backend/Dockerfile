@@ -1,18 +1,63 @@
-# Start from an official Python base image
-FROM python:3.11-slim
+# Multi-stage Dockerfile for DokyDoc Backend
+FROM python:3.11-slim as base
 
-# Set the working directory inside the container
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
 WORKDIR /app
 
-# Copy the requirements file and install dependencies
-COPY ./requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-# Copy the rest of the application code into the container
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Expose the port the app runs on
+# Create necessary directories and set permissions
+RUN mkdir -p /app/uploads /app/logs /app/temp \
+    && chown -R appuser:appuser /app \
+    && chmod -R 755 /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
 EXPOSE 8000
 
-# ADD THIS LINE - tells Docker how to run your app
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Development stage
+FROM base as development
+
+# Install development dependencies
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    pytest-cov \
+    black \
+    isort \
+    flake8
+
+# Enable auto-reload
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

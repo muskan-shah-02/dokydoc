@@ -24,15 +24,15 @@ class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
         """
         Create a new document in the database and associate it with an owner.
         """
-        # Convert the Pydantic schema object to a dictionary
-        obj_in_data = obj_in.dict()
+        # Convert the Pydantic schema object to a dictionary (Pydantic v2 compatible)
+        obj_in_data = obj_in.model_dump()
+        
+        # Override owner_id and storage_path from parameters
+        obj_in_data["owner_id"] = owner_id
+        obj_in_data["storage_path"] = storage_path
         
         # Create a new SQLAlchemy model instance
-        db_obj = self.model(
-            **obj_in_data, 
-            owner_id=owner_id, 
-            storage_path=storage_path
-        )
+        db_obj = self.model(**obj_in_data)
         
         # Add the new object to the session and commit to the database
         db.add(db_obj)

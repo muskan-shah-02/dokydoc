@@ -13,7 +13,11 @@ class DocumentBase(BaseModel):
 
 # --- Create Schema ---
 class DocumentCreate(DocumentBase):
-    pass
+    raw_text: str
+    owner_id: int
+    storage_path: Optional[str] = None  # Optional since we pass it separately
+    status: str
+    progress: int
 
 # --- Update Schema ---
 class DocumentUpdate(BaseModel):
@@ -31,11 +35,15 @@ class Document(DocumentBase):
     owner_id: int
     storage_path: str
     created_at: datetime
+    updated_at: datetime
     
     # Add the new fields so they are included in API responses
     content: Optional[str] = None
     status: Optional[str] = None
     file_size_kb: Optional[int] = None
+    raw_text: Optional[str] = None
+    composition_analysis: Optional[dict] = None
+    progress: Optional[int] = None
 
     # Pydantic v2 uses `from_attributes`
     class Config:
