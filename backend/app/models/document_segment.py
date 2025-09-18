@@ -1,7 +1,8 @@
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from datetime import datetime
+from enum import Enum
 
-from sqlalchemy import ForeignKey, Integer, String, DateTime
+from sqlalchemy import ForeignKey, Integer, String, DateTime, Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -9,6 +10,15 @@ from app.db.base_class import Base
 if TYPE_CHECKING:
     from .analysis_result import AnalysisResult  # noqa: F401
     from .document import Document  # noqa: F401
+
+
+class SegmentStatus(str, Enum):
+    """Status of a document segment during analysis"""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 class DocumentSegment(Base):
@@ -33,8 +43,23 @@ class DocumentSegment(Base):
     
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
     
+    # Status and retry tracking for Phase 2 architecture
+    status: Mapped[SegmentStatus] = mapped_column(
+        SQLEnum(SegmentStatus), 
+        default=SegmentStatus.PENDING, 
+        nullable=False
+    )
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # Link to the analysis run that created/processed this segment
+    analysis_run_id: Mapped[Optional[int]] = mapped_column(ForeignKey("analysis_runs.id"), nullable=True)
+    
     # A segment belongs to one document.
     document: Mapped["Document"] = relationship("Document", back_populates="segments")
+    
+    # Relationship to the analysis run
+    analysis_run = relationship("AnalysisRun", backref="segments")
     
     # A segment can have multiple analysis results (e.g., from different profiles).
     analysis_results: Mapped[List["AnalysisResult"]] = relationship(

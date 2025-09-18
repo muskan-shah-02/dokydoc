@@ -16,6 +16,7 @@ class AnalysisResultBase(BaseModel):
 # The `structured_data` can be any valid JSON structure returned by the AI.
 class AnalysisResultCreate(AnalysisResultBase):
     structured_data: Any
+    status: Optional[str] = "SUCCESS"
 
 # --- Main Schema for API Responses ---
 # This is the schema used when returning analysis result data from the API.

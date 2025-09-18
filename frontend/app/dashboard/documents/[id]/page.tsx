@@ -18,6 +18,7 @@ import {
   ListChecks,
   ChevronDown,
   ChevronRight,
+  Activity,
   FileCode,
   BookOpen,
   Settings,
@@ -27,7 +28,15 @@ import {
   Palette,
   TestTube,
   HelpCircle,
+  Loader2,
 } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
 // --- Interface Definitions ---
 interface Document {
@@ -313,6 +322,9 @@ export default function DocumentDetailPage() {
   const [consolidatedAnalysis, setConsolidatedAnalysis] = useState<any>(null);
   const [isGeneratingConsolidated, setIsGeneratingConsolidated] =
     useState(false);
+  const [analysisRuns, setAnalysisRuns] = useState<any[]>([]);
+  const [activeRun, setActiveRun] = useState<any>(null);
+  const [isLoadingRuns, setIsLoadingRuns] = useState(false);
 
   // Get the document ID from the URL
   useEffect(() => {
@@ -393,11 +405,71 @@ export default function DocumentDetailPage() {
     }
   }, [documentId]);
 
+  // Fetch analysis runs for this document
+  const fetchAnalysisRuns = useCallback(async () => {
+    if (!documentId) return;
+
+    setIsLoadingRuns(true);
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setIsLoadingRuns(false);
+      return;
+    }
+
+    try {
+      // Fetch all runs
+      const runsResponse = await fetch(
+        `http://localhost:8000/api/v1/analysis/document/${documentId}/runs`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (runsResponse.ok) {
+        try {
+          const runsData = await runsResponse.json();
+          setAnalysisRuns(runsData.runs || []);
+        } catch {
+          setAnalysisRuns([]);
+        }
+      } else {
+        setAnalysisRuns([]);
+      }
+
+      // Fetch active run
+      try {
+        const activeResponse = await fetch(
+          `http://localhost:8000/api/v1/analysis/document/${documentId}/runs/active`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (activeResponse.ok) {
+          try {
+            const activeData = await activeResponse.json();
+            setActiveRun(activeData.active_run || null);
+          } catch {
+            setActiveRun(null);
+          }
+        } else {
+          setActiveRun(null);
+        }
+      } catch (activeErr) {
+        // Swallow network/server errors for the active endpoint to avoid UI crashes
+        setActiveRun(null);
+      }
+    } catch (err) {
+      console.error("Error fetching analysis runs:", err);
+    } finally {
+      setIsLoadingRuns(false);
+    }
+  }, [documentId]);
+
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
-
-  // Note: loadSegmentAnalysis function removed - we now get all data in one request!
+    fetchAnalysisRuns();
+  }, [fetchData, fetchAnalysisRuns]);
 
   const handleRunAnalysis = async () => {
     if (!documentId) return;
@@ -434,6 +506,7 @@ export default function DocumentDetailPage() {
       // Refresh the data after a short delay
       setTimeout(() => {
         fetchData();
+        fetchAnalysisRuns();
       }, 3000);
     } catch (err) {
       setError((err as Error).message);
@@ -683,6 +756,137 @@ export default function DocumentDetailPage() {
             </Button>
           </div>
         </div>
+
+        {/* Analysis Runs Section */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              Analysis Runs
+            </CardTitle>
+            <CardDescription>
+              Track the progress and history of analysis runs for this document
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {isLoadingRuns ? (
+              <div className="flex items-center justify-center p-4">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <span className="ml-2">Loading analysis runs...</span>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Active Run */}
+                {activeRun && (
+                  <div className="border rounded-lg p-4 bg-blue-50 border-blue-200">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="font-medium text-blue-900">
+                          Active Analysis
+                        </h4>
+                        <p className="text-sm text-blue-700">
+                          Run #{activeRun.id} - {activeRun.status}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm text-blue-700">
+                          {activeRun.completed_segments || 0} /{" "}
+                          {activeRun.total_segments || 0} segments
+                        </div>
+                        <div className="text-xs text-blue-600">
+                          {activeRun.progress_percentage?.toFixed(1) || 0}%
+                          complete
+                        </div>
+                      </div>
+                    </div>
+                    {activeRun.total_segments > 0 && (
+                      <div className="mt-2">
+                        <div className="w-full bg-blue-200 rounded-full h-2">
+                          <div
+                            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                            style={{
+                              width: `${activeRun.progress_percentage || 0}%`,
+                            }}
+                          ></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Run History */}
+                {analysisRuns.length > 0 && (
+                  <div>
+                    <h4 className="font-medium mb-2">Run History</h4>
+                    <div className="space-y-2">
+                      {analysisRuns.slice(0, 5).map((run) => (
+                        <div
+                          key={run.id}
+                          className={`border rounded-lg p-3 ${
+                            run.status === "COMPLETED"
+                              ? "bg-green-50 border-green-200"
+                              : run.status === "FAILED"
+                              ? "bg-red-50 border-red-200"
+                              : "bg-gray-50 border-gray-200"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <span className="font-medium">Run #{run.id}</span>
+                              <span
+                                className={`ml-2 px-2 py-1 rounded text-xs ${
+                                  run.status === "COMPLETED"
+                                    ? "bg-green-100 text-green-800"
+                                    : run.status === "FAILED"
+                                    ? "bg-red-100 text-red-800"
+                                    : "bg-gray-100 text-gray-800"
+                                }`}
+                              >
+                                {run.status}
+                              </span>
+                            </div>
+                            <div className="text-sm text-gray-600">
+                              {run.completed_segments || 0} /{" "}
+                              {run.total_segments || 0} segments
+                              {run.failed_segments > 0 && (
+                                <span className="text-red-600 ml-2">
+                                  ({run.failed_segments} failed)
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          {run.error_message && (
+                            <div className="mt-2 text-sm text-red-600">
+                              Error: {run.error_message}
+                            </div>
+                          )}
+                          <div className="mt-1 text-xs text-gray-500">
+                            {run.started_at
+                              ? new Date(run.started_at).toLocaleString()
+                              : "Not started"}
+                            {run.completed_at && (
+                              <span>
+                                {" "}
+                                - {new Date(run.completed_at).toLocaleString()}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {analysisRuns.length === 0 && !activeRun && (
+                  <div className="text-center py-4 text-gray-500">
+                    No analysis runs found. Click "Run Multi-Pass Analysis" to
+                    start.
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <div className="space-y-4">
           {viewMode === "separated" ? (

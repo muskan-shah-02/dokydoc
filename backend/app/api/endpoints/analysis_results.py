@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas
 from app.api import deps
 from app.services.analysis_service import DocumentAnalysisEngine
+from app.services.analysis_run_service import AnalysisRunService
 from app.core.logging import LoggerMixin
 from app.core.exceptions import DocumentProcessingException, NotFoundException
 
@@ -24,7 +25,7 @@ analysis_endpoints = AnalysisEndpoints()
 router = APIRouter()
 
 # --- This is our new multi-pass analysis background task ---
-async def perform_multi_pass_analysis(db: Session, document_id: int):
+async def perform_multi_pass_analysis(db: Session, document_id: int, triggered_by_user_id: int):
     """
     This function runs in the background and performs the complete multi-pass analysis
     using the Document Analysis Engine (DAE).
@@ -37,24 +38,37 @@ async def perform_multi_pass_analysis(db: Session, document_id: int):
         logger.warning(f"Document {document_id} has no raw_text to analyze.")
         return
 
+    # Initialize services
+    run_service = AnalysisRunService()
+    dae = DocumentAnalysisEngine()
+    
+    # Start a new analysis run
+    analysis_run = run_service.create_analysis_run(
+        db=db, 
+        document_id=document_id, 
+        user_id=triggered_by_user_id,
+        learning_mode=True
+    )
+    
     try:
-        # Initialize the Document Analysis Engine
-        dae = DocumentAnalysisEngine()
-        
         # Use the new Document Analysis Engine with learning mode enabled
-        success = await dae.analyze_document(db=db, document_id=document_id, learning_mode=True)
+        success = await dae.analyze_document(db=db, document_id=document_id, learning_mode=True, analysis_run_id=analysis_run.id)
         
         if success:
+            run_service.complete_run(db=db, run_id=analysis_run.id, success=True)
             logger.info(f"Multi-pass analysis completed successfully for document {document_id}")
         else:
+            run_service.fail_run(db=db, run_id=analysis_run.id, error_message="Analysis failed")
             logger.warning(f"Multi-pass analysis failed for document {document_id}")
 
     except DocumentProcessingException as e:
+        run_service.fail_run(db=db, run_id=analysis_run.id, error_message=str(e))
         if "already_running" in str(e.details):
             logger.warning(f"Analysis already running for document {document_id}, skipping duplicate request")
         else:
             logger.error(f"Document processing error for document {document_id}: {e}")
     except Exception as e:
+        run_service.fail_run(db=db, run_id=analysis_run.id, error_message=str(e))
         logger.error(f"An error occurred during multi-pass analysis for document {document_id}: {e}")
 
 
@@ -149,7 +163,8 @@ async def run_new_analysis(
     background_tasks.add_task(
         perform_multi_pass_analysis,
         db=db,
-        document_id=document_id
+        document_id=document_id,
+        triggered_by_user_id=current_user.id
     )
 
     logger.info(f"Multi-pass analysis scheduled for document {document_id}")
@@ -256,3 +271,94 @@ async def consolidate_analysis(
     except Exception as e:
         logger.error(f"Error generating consolidated analysis for document {document_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate consolidated analysis")
+
+
+@router.get("/document/{document_id}/runs")
+def get_analysis_runs(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get all analysis runs for a document with their status and progress.
+    """
+    logger = analysis_endpoints.logger
+    logger.info(f"Fetching analysis runs for document {document_id}")
+    
+    # Verify document ownership
+    document = crud.document.get(db=db, id=document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to view this document's analysis runs")
+    
+    # Get analysis runs for this document
+    run_service = AnalysisRunService()
+    runs = run_service.get_runs_for_document(db=db, document_id=document_id)
+    
+    return {
+        "document_id": document_id,
+        "total_runs": len(runs),
+        "runs": [
+            {
+                "id": run.id,
+                "status": run.status,
+                "started_at": run.started_at,
+                "completed_at": run.completed_at,
+                "total_segments": run.total_segments,
+                "completed_segments": run.completed_segments,
+                "failed_segments": run.failed_segments,
+                "error_message": run.error_message,
+                "learning_mode": run.learning_mode
+            }
+            for run in runs
+        ]
+    }
+
+
+@router.get("/document/{document_id}/runs/active")
+def get_active_analysis_run(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get the currently active analysis run for a document, if any.
+    """
+    logger = analysis_endpoints.logger
+    logger.info(f"Fetching active analysis run for document {document_id}")
+    
+    # Verify document ownership
+    document = crud.document.get(db=db, id=document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to view this document's analysis runs")
+    
+    # Get active run for this document
+    run_service = AnalysisRunService()
+    active_run = run_service.get_active_run(db=db, document_id=document_id)
+    
+    if not active_run:
+        return {"active_run": None}
+    
+    # Be defensive: coalesce possible None values to avoid 500s
+    total_segments = active_run.total_segments or 0
+    completed_segments = active_run.completed_segments or 0
+    failed_segments = active_run.failed_segments or 0
+    progress_percentage = (completed_segments / total_segments * 100) if total_segments > 0 else 0
+
+    return {
+        "active_run": {
+            "id": active_run.id,
+            "status": active_run.status,
+            "started_at": active_run.started_at,
+            "total_segments": total_segments,
+            "completed_segments": completed_segments,
+            "failed_segments": failed_segments,
+            "progress_percentage": progress_percentage,
+            "learning_mode": active_run.learning_mode,
+        }
+    }

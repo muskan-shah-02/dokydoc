@@ -7,6 +7,7 @@ class DocumentSegmentBase(BaseModel):
     start_char_index: int
     end_char_index: int
     document_id: int
+    analysis_run_id: Optional[int] = None
 
 
 class DocumentSegmentCreate(DocumentSegmentBase):
