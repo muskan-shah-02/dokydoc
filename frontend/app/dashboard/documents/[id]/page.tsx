@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,14 @@ import {
   TestTube,
   HelpCircle,
   Loader2,
+  History,
+  Timer,
+  PlayCircle,
+  PauseCircle,
+  CheckCircle,
+  XCircle,
+  Globe,
+  Layers,
 } from "lucide-react";
 import {
   Card,
@@ -151,150 +159,437 @@ const SegmentAnalysisCard = ({
     );
   }
 
-  const renderStructuredData = (data: any) => {
-    if (!data || typeof data !== "object") {
-      return (
-        <div className="text-gray-500 italic">No structured data available</div>
-      );
-    }
-
-    // Pull common metadata fields to a concise header
-    const metaKeys = [
-      "date",
-      "file",
-      "author",
-      "version",
-      "document_title",
-      "title",
-    ];
-    const meta: Record<string, any> = {};
-    const rest: Record<string, any> = {};
-    Object.entries(data).forEach(([k, v]) => {
-      if (metaKeys.includes(k)) meta[k] = v;
-      else rest[k] = v;
-    });
-
-    return (
-      <div className="space-y-6">
-        {Object.keys(meta).length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {Object.entries(meta).map(([k, v]) => (
-              <div key={k} className="bg-white border rounded p-3">
-                <div className="text-xs uppercase text-gray-500">
-                  {k.replace(/_/g, " ")}
-                </div>
-                <div className="text-sm text-gray-800 break-words">
-                  {String(v)}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="space-y-4">
-          {Object.entries(rest).map(([key, value]) => (
-            <div key={key} className="border-l-4 border-blue-200 pl-4">
-              <h5 className="font-semibold text-gray-800 capitalize mb-2">
-                {key.replace(/_/g, " ")}
-              </h5>
-              {Array.isArray(value) ? (
-                <ul className="space-y-1 list-disc ml-4">
-                  {value.map((item, index) => (
-                    <li
-                      key={index}
-                      className="text-sm text-gray-700 bg-gray-50 p-2 rounded"
-                    >
-                      {typeof item === "object"
-                        ? JSON.stringify(item, null, 2)
-                        : String(item)}
-                    </li>
-                  ))}
-                </ul>
-              ) : typeof value === "object" ? (
-                <div className="bg-gray-50 p-3 rounded text-sm">
-                  <pre className="whitespace-pre-wrap">
-                    {JSON.stringify(value, null, 2)}
-                  </pre>
-                </div>
-              ) : (
-                <p className="text-sm text-gray-700 bg-gray-50 p-2 rounded">
-                  {String(value)}
-                </p>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       <CollapsibleTrigger className="w-full">
         <div
-          className={`bg-white p-4 rounded-lg border shadow-sm hover:shadow-md transition-all duration-200 ${colorClasses}`}
+          className={`bg-white p-6 rounded-xl border-2 shadow-sm hover:shadow-lg transition-all duration-300 ${colorClasses} ${
+            isOpen ? "border-blue-300 shadow-md" : "hover:border-gray-300"
+          }`}
         >
           <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <IconComponent className="h-6 w-6" />
-              <div>
-                <h3 className="font-semibold text-lg text-gray-900">
+            <div className="flex items-center space-x-4">
+              <div
+                className={`p-3 rounded-lg ${
+                  colorClasses.includes("bg-blue")
+                    ? "bg-blue-100"
+                    : colorClasses.includes("bg-green")
+                    ? "bg-green-100"
+                    : "bg-gray-100"
+                }`}
+              >
+                <IconComponent className="h-7 w-7" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-bold text-xl text-gray-900 mb-1">
                   {segment.segment_type.replace(/_/g, " ")}
                 </h3>
-                <p className="text-sm text-gray-600">
-                  Characters {segment.start_char_index.toLocaleString()} -{" "}
-                  {segment.end_char_index.toLocaleString()}
-                  <span className="ml-2 text-xs bg-gray-100 px-2 py-1 rounded">
+                <div className="flex items-center space-x-3 text-sm text-gray-600">
+                  <span className="flex items-center">
+                    <span className="font-medium">Range:</span>
+                    <span className="ml-1">
+                      {segment.start_char_index.toLocaleString()} -{" "}
+                      {segment.end_char_index.toLocaleString()}
+                    </span>
+                  </span>
+                  <span className="bg-gray-100 px-3 py-1 rounded-full text-xs font-medium">
                     {(
                       segment.end_char_index - segment.start_char_index
                     ).toLocaleString()}{" "}
                     chars
                   </span>
-                </p>
+                </div>
               </div>
             </div>
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-3">
               <Badge
                 variant="outline"
-                className="bg-green-100 text-green-800 border-green-200"
+                className={`px-3 py-1 font-medium ${
+                  isLoading
+                    ? "bg-yellow-100 text-yellow-800 border-yellow-300"
+                    : analysisResult
+                    ? "bg-green-100 text-green-800 border-green-300"
+                    : "bg-gray-100 text-gray-600 border-gray-300"
+                }`}
               >
-                {isLoading ? "Analyzing..." : "Analyzed"}
+                {isLoading ? (
+                  <span className="flex items-center">
+                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-yellow-800 mr-2"></div>
+                    Analyzing...
+                  </span>
+                ) : analysisResult ? (
+                  "✓ Analyzed"
+                ) : (
+                  "Pending"
+                )}
               </Badge>
-              {isOpen ? (
+              <div
+                className={`p-2 rounded-lg transition-transform duration-200 ${
+                  isOpen ? "rotate-180 bg-blue-100" : "hover:bg-gray-100"
+                }`}
+              >
                 <ChevronDown className="h-5 w-5 text-gray-500" />
-              ) : (
-                <ChevronRight className="h-5 w-5 text-gray-500" />
-              )}
+              </div>
             </div>
           </div>
         </div>
       </CollapsibleTrigger>
-      <CollapsibleContent className="mt-2">
-        <div className="bg-gray-50 p-6 rounded-lg border">
+      <CollapsibleContent className="mt-4">
+        <div className="bg-gradient-to-br from-gray-50 to-white p-6 rounded-xl border border-gray-200 shadow-sm">
           {analysisResult ? (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h4 className="font-semibold text-gray-900 text-lg">
+            <div className="space-y-6">
+              <div className="flex items-center justify-between pb-4 border-b border-gray-200">
+                <h4 className="font-bold text-gray-900 text-xl flex items-center">
+                  <span className="w-3 h-3 bg-blue-500 rounded-full mr-3"></span>
                   Analysis Results
                 </h4>
-                <Badge variant="secondary" className="text-xs">
-                  {Object.keys(analysisResult.structured_data || {}).length}{" "}
-                  fields
-                </Badge>
+                <div className="flex items-center space-x-2">
+                  <Badge
+                    variant="secondary"
+                    className="bg-blue-100 text-blue-800 px-3 py-1"
+                  >
+                    {Object.keys(analysisResult.structured_data || {}).length}{" "}
+                    fields
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className="bg-green-50 text-green-700 border-green-200"
+                  >
+                    ✓ Complete
+                  </Badge>
+                </div>
               </div>
-              {renderStructuredData(analysisResult.structured_data)}
+              <div className="max-h-96 overflow-y-auto">
+                {renderStructuredData(analysisResult.structured_data)}
+              </div>
             </div>
           ) : (
-            <div className="text-center py-8 text-gray-500">
-              <BrainCircuit className="h-12 w-12 mx-auto mb-3 text-gray-400" />
-              <p className="text-lg font-medium">No analysis data available</p>
-              <p className="text-sm">This segment hasn't been analyzed yet.</p>
+            <div className="text-center py-12 text-gray-500">
+              <div className="bg-gray-100 rounded-full p-4 w-20 h-20 mx-auto mb-4 flex items-center justify-center">
+                <BrainCircuit className="h-10 w-10 text-gray-400" />
+              </div>
+              <h4 className="text-lg font-semibold text-gray-700 mb-2">
+                No Analysis Available
+              </h4>
+              <p className="text-sm text-gray-600">
+                This segment hasn't been analyzed yet or the analysis failed.
+              </p>
             </div>
           )}
         </div>
       </CollapsibleContent>
     </Collapsible>
   );
+};
+
+// Smart data renderer for user-friendly display
+const renderStructuredData = (data: any) => {
+  if (!data || typeof data !== "object") {
+    return (
+      <div className="text-gray-500 italic">No structured data available</div>
+    );
+  }
+
+  // Smart renderer that creates user-friendly displays based on content type
+  const renderSmartContent = (obj: any): React.JSX.Element => {
+    // Handle endpoints specifically for API_DOCS
+    if (obj.endpoints && Array.isArray(obj.endpoints)) {
+      return (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
+            <h4 className="font-semibold text-green-900 mb-2 flex items-center">
+              <Globe className="w-4 h-4 mr-2" />
+              API Endpoints
+            </h4>
+            <p className="text-green-800 text-sm">
+              This section contains {obj.endpoints.length} API endpoint(s) with
+              their specifications.
+            </p>
+          </div>
+
+          <div className="grid gap-4">
+            {obj.endpoints.map((endpoint: any, index: number) => (
+              <div
+                key={index}
+                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
+              >
+                <div className="flex items-center space-x-3 mb-3">
+                  <Badge className="bg-blue-100 text-blue-800">
+                    {endpoint.method || "GET"}
+                  </Badge>
+                  <code className="bg-gray-100 px-2 py-1 rounded text-sm font-mono">
+                    {endpoint.path || endpoint.url || "No path specified"}
+                  </code>
+                </div>
+
+                {endpoint.description && (
+                  <p className="text-gray-700 mb-3">{endpoint.description}</p>
+                )}
+
+                {endpoint.parameters && endpoint.parameters.length > 0 && (
+                  <div className="mb-3">
+                    <h6 className="font-medium text-gray-800 mb-2">
+                      Parameters:
+                    </h6>
+                    <div className="space-y-1">
+                      {endpoint.parameters.map((param: any, i: number) => (
+                        <div
+                          key={i}
+                          className="flex items-center space-x-2 text-sm"
+                        >
+                          <code className="bg-gray-100 px-2 py-1 rounded">
+                            {param.name || param}
+                          </code>
+                          {param.type && (
+                            <span className="text-gray-500">
+                              ({param.type})
+                            </span>
+                          )}
+                          {param.required && (
+                            <Badge variant="outline" className="text-xs">
+                              Required
+                            </Badge>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {endpoint.response && (
+                  <div>
+                    <h6 className="font-medium text-gray-800 mb-1">
+                      Response:
+                    </h6>
+                    <p className="text-sm text-gray-600">{endpoint.response}</p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Handle architecture for TECHNICAL_SPECS
+    if (obj.architecture && typeof obj.architecture === "object") {
+      return (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg p-4">
+            <h4 className="font-semibold text-purple-900 mb-2 flex items-center">
+              <Layers className="w-4 h-4 mr-2" />
+              System Architecture
+            </h4>
+            <p className="text-purple-800 text-sm">
+              Technical architecture and system design specifications.
+            </p>
+          </div>
+
+          {obj.architecture.core_services && (
+            <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+              <h5 className="font-medium text-gray-800 mb-3">Core Services</h5>
+              <div className="grid gap-3">
+                {obj.architecture.core_services.map(
+                  (service: any, index: number) => (
+                    <div
+                      key={index}
+                      className="border-l-4 border-blue-200 pl-4 py-2"
+                    >
+                      <div className="flex items-center space-x-2 mb-1">
+                        <h6 className="font-medium text-blue-900">
+                          {service.name}
+                        </h6>
+                        {service.technology && (
+                          <Badge variant="outline" className="text-xs">
+                            {service.technology}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-sm text-gray-700">
+                        {service.description}
+                      </p>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Handle security requirements
+    if (obj.security_requirements && Array.isArray(obj.security_requirements)) {
+      return (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
+            <h4 className="font-semibold text-red-900 mb-2 flex items-center">
+              <Shield className="w-4 h-4 mr-2" />
+              Security Requirements
+            </h4>
+            <p className="text-red-800 text-sm">
+              Security specifications and compliance requirements.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {obj.security_requirements.map((req: any, index: number) => (
+              <div
+                key={index}
+                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
+              >
+                <h6 className="font-medium text-gray-800 mb-2">
+                  {req.requirement || `Requirement ${index + 1}`}
+                </h6>
+                {req.details && typeof req.details === "object" && (
+                  <div className="space-y-2">
+                    {Object.entries(req.details).map(([key, value]) => (
+                      <div
+                        key={key}
+                        className="border-l-4 border-orange-200 pl-3"
+                      >
+                        <div className="font-medium text-sm text-orange-900 capitalize">
+                          {key.replace(/_/g, " ")}
+                        </div>
+                        <div className="text-sm text-gray-700">
+                          {String(value)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Handle UI/UX specifications
+    if (obj.modules && Array.isArray(obj.modules)) {
+      return (
+        <div className="space-y-4">
+          <div className="bg-gradient-to-r from-pink-50 to-rose-50 border border-pink-200 rounded-lg p-4">
+            <h4 className="font-semibold text-pink-900 mb-2 flex items-center">
+              <Palette className="w-4 h-4 mr-2" />
+              UI/UX Specifications
+            </h4>
+            <p className="text-pink-800 text-sm">
+              User interface and user experience design specifications.
+            </p>
+          </div>
+
+          <div className="grid gap-4">
+            {obj.modules.map((module: any, index: number) => (
+              <div
+                key={index}
+                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
+              >
+                <h6 className="font-medium text-gray-800 mb-2">
+                  {module.module_name || `Module ${index + 1}`}
+                </h6>
+                {module.features && Array.isArray(module.features) && (
+                  <div>
+                    <p className="text-sm text-gray-600 mb-2">Features:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {module.features.map((feature: string, i: number) => (
+                        <Badge key={i} variant="outline" className="text-xs">
+                          {feature}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Generic fallback for other data types
+    return renderGenericContent(obj);
+  };
+
+  // Generic content renderer for unstructured data
+  const renderGenericContent = (obj: any): React.JSX.Element => {
+    return (
+      <div className="space-y-4">
+        {Object.entries(obj).map(([key, value]) => (
+          <div
+            key={key}
+            className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
+          >
+            <h6 className="font-medium text-gray-800 mb-3 capitalize flex items-center">
+              <span className="w-2 h-2 bg-gray-400 rounded-full mr-2"></span>
+              {key.replace(/_/g, " ")}
+            </h6>
+
+            {Array.isArray(value) ? (
+              <div className="space-y-2">
+                {value.map((item, index) => (
+                  <div
+                    key={index}
+                    className="border-l-4 border-gray-200 pl-3 py-1"
+                  >
+                    <div className="text-sm text-gray-700">
+                      {typeof item === "object"
+                        ? JSON.stringify(item, null, 2)
+                        : String(item)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : typeof value === "object" && value !== null ? (
+              <div className="bg-gray-50 p-3 rounded">
+                <pre className="text-sm text-gray-700 whitespace-pre-wrap">
+                  {JSON.stringify(value, null, 2)}
+                </pre>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-700">{String(value)}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // Extract summary if available
+  const summary = data.summary;
+  const remainingData = { ...data };
+  delete remainingData.summary;
+
+  return (
+    <div className="space-y-6">
+      {/* Summary Section */}
+      {summary && (
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
+          <h4 className="font-semibold text-blue-900 mb-2 flex items-center">
+            <span className="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>
+            Summary
+          </h4>
+          <p className="text-blue-800 text-sm leading-relaxed">{summary}</p>
+        </div>
+      )}
+
+      {/* Smart Content Rendering */}
+      {Object.keys(remainingData).length > 0 ? (
+        renderSmartContent(remainingData)
+      ) : (
+        <div className="text-gray-500 italic text-center py-8">
+          No detailed analysis data available
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Helper function to format elapsed time
+const formatElapsedTime = (seconds: number): string => {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
 // --- Main Document Detail Page Component ---
@@ -325,6 +620,14 @@ export default function DocumentDetailPage() {
   const [analysisRuns, setAnalysisRuns] = useState<any[]>([]);
   const [activeRun, setActiveRun] = useState<any>(null);
   const [isLoadingRuns, setIsLoadingRuns] = useState(false);
+  const [analysisStartTime, setAnalysisStartTime] = useState<Date | null>(null);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [showRunHistory, setShowRunHistory] = useState(false);
+
+  // Memoize progress calculation to prevent unnecessary re-renders
+  const progressPercentage = useMemo(() => {
+    return Math.min(100, Math.round((elapsedTime / 300) * 100));
+  }, [elapsedTime]);
 
   // Get the document ID from the URL
   useEffect(() => {
@@ -334,6 +637,32 @@ export default function DocumentDetailPage() {
       setDocumentId(id);
     }
   }, []);
+
+  // Timer effect for tracking analysis progress
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+
+    if (isAnalyzing && analysisStartTime) {
+      interval = setInterval(() => {
+        const now = new Date();
+        const elapsed = Math.floor(
+          (now.getTime() - analysisStartTime.getTime()) / 1000
+        );
+        // Only update if the elapsed time has actually changed (reduces unnecessary re-renders)
+        setElapsedTime((prevElapsed) =>
+          prevElapsed !== elapsed ? elapsed : prevElapsed
+        );
+      }, 1000);
+    } else {
+      setElapsedTime(0);
+    }
+
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [isAnalyzing, analysisStartTime]);
 
   // Fetch document details and segments
   const fetchData = useCallback(async () => {
@@ -476,12 +805,14 @@ export default function DocumentDetailPage() {
 
     setIsAnalyzing(true);
     setError(null);
+    setAnalysisStartTime(new Date());
 
     const token = localStorage.getItem("accessToken");
 
     if (!token) {
       setError("Authentication token not found.");
       setIsAnalyzing(false);
+      setAnalysisStartTime(null);
       return;
     }
 
@@ -499,19 +830,43 @@ export default function DocumentDetailPage() {
         throw new Error(errData.detail || "Failed to start analysis.");
       }
 
-      alert(
-        "Multi-pass analysis has been triggered! Results will appear here shortly. Please refresh the page in a moment."
-      );
+      // Start periodic polling for updates (optimized to reduce page blinking)
+      const pollInterval = setInterval(async () => {
+        try {
+          // Only check if analysis is complete, don't refetch all data every time
+          const activeRunResponse = await fetch(
+            `http://localhost:8000/api/v1/analysis/document/${documentId}/runs/active`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
 
-      // Refresh the data after a short delay
+          if (activeRunResponse.ok) {
+            const activeRunData = await activeRunResponse.json();
+            if (!activeRunData || activeRunData.length === 0) {
+              // No active run, analysis is complete - now fetch updated data
+              setIsAnalyzing(false);
+              setAnalysisStartTime(null);
+              clearInterval(pollInterval);
+
+              // Only fetch data when analysis is actually complete
+              await fetchData();
+              await fetchAnalysisRuns();
+            }
+          }
+        } catch (pollErr) {
+          console.error("Error polling for updates:", pollErr);
+        }
+      }, 3000); // Reduced frequency from 2s to 3s
+
+      // Stop polling after 10 minutes maximum
       setTimeout(() => {
-        fetchData();
-        fetchAnalysisRuns();
-      }, 3000);
+        clearInterval(pollInterval);
+        setIsAnalyzing(false);
+        setAnalysisStartTime(null);
+      }, 600000);
     } catch (err) {
       setError((err as Error).message);
-    } finally {
       setIsAnalyzing(false);
+      setAnalysisStartTime(null);
     }
   };
 
@@ -750,23 +1105,104 @@ export default function DocumentDetailPage() {
               disabled={isAnalyzing}
               className="bg-blue-600 hover:bg-blue-700"
             >
-              {isAnalyzing
-                ? "Running Multi-Pass Analysis..."
-                : "Run Multi-Pass Analysis"}
+              {isAnalyzing ? (
+                <div className="flex items-center">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Processing...
+                </div>
+              ) : (
+                "Run Multi-Pass Analysis"
+              )}
             </Button>
           </div>
         </div>
 
+        {/* Processing Status Section */}
+        {isAnalyzing && (
+          <Card className="border-blue-200 bg-blue-50">
+            <CardContent className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center space-x-3">
+                  <div className="bg-blue-100 p-2 rounded-full">
+                    <Timer className="h-5 w-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-blue-900">
+                      Analysis in Progress
+                    </h3>
+                    <p className="text-sm text-blue-700">
+                      Multi-pass document analysis is running. This typically
+                      takes 3-5 minutes.
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-2xl font-bold text-blue-900">
+                    {formatElapsedTime(elapsedTime)}
+                  </div>
+                  <div className="text-xs text-blue-600">Elapsed Time</div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-blue-700">
+                    Estimated completion time:
+                  </span>
+                  <span className="font-medium text-blue-900">3-5 minutes</span>
+                </div>
+
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-500"
+                    style={{
+                      width: `${progressPercentage}%`,
+                    }}
+                  ></div>
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-blue-600">
+                  <span>0 min</span>
+                  <span className="flex items-center">
+                    <PlayCircle className="h-3 w-3 mr-1" />
+                    Processing segments...
+                  </span>
+                  <span>5 min</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Analysis Runs Section */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Activity className="h-5 w-5" />
-              Analysis Runs
-            </CardTitle>
-            <CardDescription>
-              Track the progress and history of analysis runs for this document
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Activity className="h-5 w-5" />
+                  Analysis Runs
+                </CardTitle>
+                <CardDescription>
+                  Track the progress and history of analysis runs for this
+                  document
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRunHistory(!showRunHistory)}
+                className="flex items-center gap-2"
+              >
+                <History className="h-4 w-4" />
+                {showRunHistory ? "Hide History" : "Show History"}
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${
+                    showRunHistory ? "rotate-180" : ""
+                  }`}
+                />
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             {isLoadingRuns ? (
@@ -815,9 +1251,9 @@ export default function DocumentDetailPage() {
                 )}
 
                 {/* Run History */}
-                {analysisRuns.length > 0 && (
+                {showRunHistory && analysisRuns.length > 0 && (
                   <div>
-                    <h4 className="font-medium mb-2">Run History</h4>
+                    <h4 className="font-medium mb-2">Previous Runs</h4>
                     <div className="space-y-2">
                       {analysisRuns.slice(0, 5).map((run) => (
                         <div
@@ -861,15 +1297,23 @@ export default function DocumentDetailPage() {
                             </div>
                           )}
                           <div className="mt-1 text-xs text-gray-500">
-                            {run.started_at
-                              ? new Date(run.started_at).toLocaleString()
-                              : "Not started"}
-                            {run.completed_at && (
-                              <span>
-                                {" "}
-                                - {new Date(run.completed_at).toLocaleString()}
-                              </span>
-                            )}
+                            {run.status === "COMPLETED" && run.completed_at
+                              ? `Completed: ${new Date(
+                                  run.completed_at
+                                ).toLocaleString()}`
+                              : run.status === "RUNNING" && run.started_at
+                              ? `Started: ${new Date(
+                                  run.started_at
+                                ).toLocaleString()}`
+                              : run.status === "FAILED" && run.started_at
+                              ? `Failed: ${new Date(
+                                  run.started_at
+                                ).toLocaleString()}`
+                              : run.created_at
+                              ? `Created: ${new Date(
+                                  run.created_at
+                                ).toLocaleString()}`
+                              : "No timestamp available"}
                           </div>
                         </div>
                       ))}
@@ -922,63 +1366,54 @@ export default function DocumentDetailPage() {
             )
           ) : // Consolidated View - Single unified analysis
           consolidatedAnalysis ? (
-            <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <BrainCircuit className="mr-2 h-5 w-5 text-blue-600" />
-                  Consolidated Analysis
-                </h3>
-                <Badge variant="secondary" className="text-xs">
-                  {Object.keys(consolidatedAnalysis).length} sections
-                </Badge>
+            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 p-8 rounded-xl border border-indigo-200 shadow-lg">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-indigo-900 flex items-center mb-2">
+                    <BrainCircuit className="mr-3 h-7 w-7 text-indigo-600" />
+                    Unified Document Analysis
+                  </h3>
+                  <p className="text-indigo-700 text-sm">
+                    Complete analysis combining all document segments into a
+                    comprehensive overview
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <Badge
+                    variant="secondary"
+                    className="bg-indigo-100 text-indigo-800 px-3 py-1"
+                  >
+                    {Object.keys(consolidatedAnalysis).length} sections
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className="bg-white text-indigo-700 border-indigo-300"
+                  >
+                    ✓ Complete
+                  </Badge>
+                </div>
               </div>
-              <div className="space-y-6">
-                {Object.entries(consolidatedAnalysis).map(([key, value]) => (
-                  <div key={key} className="border-l-4 border-blue-200 pl-4">
-                    <h4 className="font-semibold text-gray-800 capitalize mb-3 text-lg">
-                      {key.replace(/_/g, " ")}
-                    </h4>
-                    {Array.isArray(value) ? (
-                      <ul className="space-y-2">
-                        {value.map((item, index) => (
-                          <li
-                            key={index}
-                            className="text-sm text-gray-600 bg-gray-50 p-3 rounded border"
-                          >
-                            {typeof item === "object" ? (
-                              <pre className="whitespace-pre-wrap text-xs">
-                                {JSON.stringify(item, null, 2)}
-                              </pre>
-                            ) : (
-                              String(item)
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : typeof value === "object" ? (
-                      <div className="bg-gray-50 p-4 rounded border">
-                        <pre className="whitespace-pre-wrap text-sm">
-                          {JSON.stringify(value, null, 2)}
-                        </pre>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-gray-600 bg-gray-50 p-3 rounded border">
-                        {String(value)}
-                      </p>
-                    )}
-                  </div>
-                ))}
+
+              <div className="max-h-96 overflow-y-auto">
+                {renderStructuredData(consolidatedAnalysis)}
               </div>
             </div>
           ) : (
-            <div className="text-center py-8 text-gray-500">
-              <BrainCircuit className="h-12 w-12 mx-auto mb-3 text-gray-400" />
-              <p className="text-lg font-medium">
-                No consolidated analysis available
+            <div className="text-center py-12 bg-gradient-to-br from-gray-50 to-blue-50 rounded-xl border border-gray-200">
+              <div className="bg-blue-100 rounded-full p-4 w-20 h-20 mx-auto mb-6 flex items-center justify-center">
+                <BrainCircuit className="h-10 w-10 text-blue-600" />
+              </div>
+              <h4 className="text-xl font-bold text-gray-900 mb-3">
+                Consolidated View Ready
+              </h4>
+              <p className="text-gray-600 mb-4 max-w-md mx-auto">
+                Generate a unified analysis that combines insights from all
+                analyzed document segments into a comprehensive overview.
               </p>
-              <p className="text-sm">
-                Click "Consolidated View" to generate a unified analysis.
-              </p>
+              <div className="flex items-center justify-center space-x-2 text-sm text-blue-600">
+                <CheckCircle className="h-4 w-4" />
+                <span>All segments analyzed and ready for consolidation</span>
+              </div>
             </div>
           )}
         </div>

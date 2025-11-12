@@ -47,9 +47,74 @@ def repair_json_response(response_text: str) -> str:
         if json_start != -1:
             cleaned = cleaned[json_start:]
     
-    # Fix missing commas between array elements or object properties
-    # Pattern: } followed by { (missing comma between objects)
+    # NEW: Try to find the end of the JSON object/array and remove extra content
     import re
+    
+    # For objects starting with {
+    if cleaned.startswith('{'):
+        brace_count = 0
+        json_end = -1
+        in_string = False
+        escape_next = False
+        
+        for i, char in enumerate(cleaned):
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+                
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+                
+            if not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_end = i + 1
+                        break
+        
+        if json_end != -1:
+            cleaned = cleaned[:json_end]
+    
+    # For arrays starting with [
+    elif cleaned.startswith('['):
+        bracket_count = 0
+        json_end = -1
+        in_string = False
+        escape_next = False
+        
+        for i, char in enumerate(cleaned):
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+                
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+                
+            if not in_string:
+                if char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        json_end = i + 1
+                        break
+        
+        if json_end != -1:
+            cleaned = cleaned[:json_end]
+    
+    # Fix missing commas between array elements or object properties
     cleaned = re.sub(r'}\s*{', '},{', cleaned)
     
     # Pattern: ] followed by { (missing comma between array and object)
@@ -61,7 +126,7 @@ def repair_json_response(response_text: str) -> str:
     # Pattern: ] followed by [ (missing comma between arrays)
     cleaned = re.sub(r']\s*\[', '],[', cleaned)
     
-    # Add missing closing braces (simple heuristic)
+    # Add missing closing braces (simple heuristic) - only if we didn't truncate above
     if cleaned.startswith('{'):
         open_braces = cleaned.count('{') - cleaned.count('}')
         if open_braces > 0:
@@ -82,7 +147,13 @@ class DocumentAnalysisEngine(LoggerMixin):
     def __init__(self):
         super().__init__()
         self._running_documents = set()  # Track documents currently being analyzed
+        self._api_call_counter = {}  # Track API calls per document
         self.logger.info("DocumentAnalysisEngine initialized")
+    
+    def _increment_api_calls(self, document_id: int):
+        """Helper method to increment API call counter for a document."""
+        if document_id in self._api_call_counter:
+            self._api_call_counter[document_id] += 1
     
     async def analyze_document(self, db: Session, document_id: int, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
         """
@@ -105,9 +176,10 @@ class DocumentAnalysisEngine(LoggerMixin):
                 details={"status": "already_running"}
             )
         
-        # Add document to running set
+        # Add document to running set and initialize API call counter
         self._running_documents.add(document_id)
-        self.logger.info(f"Starting multi-pass analysis for document_id: {document_id}")
+        self._api_call_counter[document_id] = 0
+        self.logger.info(f"📊 Starting multi-pass analysis for document_id: {document_id}")
         
         try:
             
@@ -124,7 +196,7 @@ class DocumentAnalysisEngine(LoggerMixin):
             try:
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
-                composition_analysis = await self._pass_1_composition_classification(document.raw_text)
+                composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
                 
                 # Save composition analysis to document
                 document.composition_analysis = composition_analysis
@@ -145,18 +217,29 @@ class DocumentAnalysisEngine(LoggerMixin):
                     self.logger.info(f"Document {document_id}: Learning mode enabled - feeding to BOE")
                     await self._feed_to_business_ontology(db, document_id)
                 
-                self.logger.info(f"Document {document_id}: Multi-pass analysis completed successfully")
+                # Log final API call summary
+                total_calls = self._api_call_counter.get(document_id, 0)
+                segments_count = total_calls - 2  # Subtract Pass 1 and Pass 2
+                estimated_cost = total_calls * 0.01  # Rough estimate: $0.01 per call
+                
+                self.logger.info(f"📊 ANALYSIS COMPLETE for document {document_id}")
+                self.logger.info(f"💰 TOTAL GEMINI API CALLS: {total_calls}")
+                self.logger.info(f"💡 Cost breakdown: Pass 1 (1) + Pass 2 (1) + Pass 3 ({segments_count}) = {total_calls} calls")
+                self.logger.info(f"💵 Estimated cost: ~${estimated_cost:.2f} (at $0.01/call)")
+                self.logger.warning(f"⚠️  OPTIMIZATION OPPORTUNITY: Consider batching segments to reduce API calls")
+                
                 return True
                 
             except Exception as e:
                 self.logger.error(f"Error during multi-pass analysis for document {document_id}: {e}")
                 return False
         finally:
-            # Always remove document from running set
+            # Always remove document from running set and cleanup counter
             self._running_documents.discard(document_id)
+            self._api_call_counter.pop(document_id, None)
             self.logger.debug(f"Released analysis lock for document {document_id}")
     
-    async def _pass_1_composition_classification(self, raw_text: str) -> Dict:
+    async def _pass_1_composition_classification(self, raw_text: str, document_id: int) -> Dict:
         """
         Pass 1: Analyzes document composition and classifies content types.
         Returns a JSON object identifying content types and their percentage distribution.
@@ -168,7 +251,8 @@ class DocumentAnalysisEngine(LoggerMixin):
             # Prepare the full prompt with the document text
             full_prompt = f"{prompt}\n\nDOCUMENT TEXT TO ANALYZE:\n{raw_text}"
             
-            self.logger.debug("Sending composition analysis request to Gemini")
+            self.logger.info("🔍 PASS 1: Starting composition analysis - 1 Gemini API call")
+            self._increment_api_calls(document_id)
             
             # Call Gemini API
             response = await gemini_service.generate_content(full_prompt)
@@ -251,7 +335,8 @@ class DocumentAnalysisEngine(LoggerMixin):
             {raw_text}
             """
             
-            self.logger.debug("Sending content segmentation request to Gemini")
+            self.logger.info("🔍 PASS 2: Starting content segmentation - 1 Gemini API call")
+            self._increment_api_calls(document_id)
             
             # Call Gemini API
             response = await gemini_service.generate_content(full_prompt)
@@ -329,6 +414,8 @@ class DocumentAnalysisEngine(LoggerMixin):
                 self.logger.warning(f"No segments found for document {document_id}")
                 return False
             
+            self.logger.info(f"🔍 PASS 3: Starting structured extraction - {len(segments)} Gemini API calls (1 per segment)")
+            
             # Use the prompt manager for structured extraction
             base_prompt = prompt_manager.get_prompt(PromptType.STRUCTURED_EXTRACTION)
             
@@ -352,7 +439,8 @@ class DocumentAnalysisEngine(LoggerMixin):
                     {segment_text}
                     """
                     
-                    self.logger.debug(f"Analyzing segment {segment.id} of type {segment.segment_type}")
+                    self.logger.info(f"🤖 Analyzing segment {segment.id} of type {segment.segment_type} - Gemini API call {segments.index(segment) + 1}/{len(segments)}")
+                    self._increment_api_calls(document_id)
                     
                     # Call Gemini API
                     response = await gemini_service.generate_content(full_prompt)

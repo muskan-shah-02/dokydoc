@@ -38,12 +38,20 @@ class GeminiService(LoggerMixin):
         Generate content with retry logic and error handling.
         """
         try:
-            self.logger.debug("Sending request to Gemini API")
+            # Enhanced logging for API call tracking
+            prompt_length = len(prompt)
+            self.logger.info(f"🤖 GEMINI API CALL - Prompt length: {prompt_length} chars")
+            self.logger.debug(f"Prompt preview: {prompt[:200]}...")
+            
             response = await self.model.generate_content_async(prompt, **kwargs)
-            self.logger.debug("Gemini API response received successfully")
+            
+            # Enhanced logging for response tracking
+            response_length = len(response.text) if response.text else 0
+            self.logger.info(f"✅ GEMINI API SUCCESS - Response length: {response_length} chars")
+            
             return response
         except Exception as e:
-            self.logger.error(f"Error calling Gemini API: {e}")
+            self.logger.error(f"❌ GEMINI API ERROR: {e}")
             raise
 
     @retry(
