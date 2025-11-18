@@ -1,0 +1,14 @@
+# Ignore directories
+__pycache__/
+.git/
+.idea/
+venv/
+alembic/versions/
+uploads/
+
+# Ignore files
+.env
+.env.backup
+.gitignore
+*.pyc
+*.log

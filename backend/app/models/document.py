@@ -1,4 +1,6 @@
 from typing import TYPE_CHECKING, List
+import enum
+from typing import TYPE_CHECKING, List, Optional
 from datetime import datetime
 
 from sqlalchemy import Integer, String, Text, ForeignKey, DateTime
@@ -9,13 +11,38 @@ from app.db.base_class import Base
 
 if TYPE_CHECKING:
     from .analysis_result import AnalysisResult  # noqa: F401
-    from .document_segment import DocumentSegment # noqa: F401
+    from .document_segment import DocumentSegment  # noqa: F401
+    from .user import User  # noqa: F401
+
+
+# --- Re-introducing Enums (required by the model) ---
+class DocumentStatus(str, enum.Enum):
+    UPLOADED = "uploaded"
+    PROCESSING = "processing"
+    PARSING = "parsing"
+    ANALYZING = "analyzing"
+    COMPLETED = "completed"
+    PARSING_FAILED = "parsing_failed"
+    ANALYSIS_FAILED = "analysis_failed"
+    UNKNOWN = "unknown"
+    # --- ADDED per architect plan (UX-02)  ---
+    PASS_1_COMPOSITION = "pass_1_composition"
+    PASS_2_SEGMENTING = "pass_2_segmenting"
+    PASS_3_EXTRACTION = "pass_3_extraction"
+
+
+class DocumentType(str, enum.Enum):
+    REQUIREMENTS = "requirements"
+    DESIGN = "design"
+    TEST_PLAN = "test_plan"
+    USER_MANUAL = "user_manual"
+    API_DOCS = "api_docs"
+    OTHER = "other"
+# --- End of Enums ---
 
 
 class Document(Base):
-    """
-    Database model for storing document metadata and content.
-    """
+    """Database model for storing document metadata and content."""
     __tablename__ = "documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -34,15 +61,17 @@ class Document(Base):
     storage_path: Mapped[str] = mapped_column(String, nullable=True)
     
     # The pristine, unmodified text content extracted from the document.
-    # All other analyses and segments will reference this single source of truth.
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     
     # Stores the output of Pass 1 (Composition & Classification).
     # Example: {"BRD": 80, "API_DOCS": 20}
     composition_analysis: Mapped[dict] = mapped_column(JSONB, nullable=True)
     
-    status: Mapped[str] = mapped_column(String, default="uploaded")
+    status: Mapped[str] = mapped_column(String, default=DocumentStatus.UPLOADED.value)  # Using enum default
     progress: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # --- NEW COLUMN FOR DAE-01 (Architect's Plan)  ---
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
     # File size in KB
     file_size_kb: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -59,6 +88,11 @@ class Document(Base):
     # all of its associated segments are also deleted.
     segments: Mapped[List["DocumentSegment"]] = relationship(
         "DocumentSegment", back_populates="document", cascade="all, delete-orphan"
+    )
+    
+    # --- ADDED: Missing relationship ---
+    analysis_results: Mapped[List["AnalysisResult"]] = relationship(
+        "AnalysisResult", back_populates="document", cascade="all, delete-orphan"
     )
     
     # Owner of the document

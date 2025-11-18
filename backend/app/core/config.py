@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = Field(default=["http://localhost:3000"], env="CORS_ORIGINS")
     CORS_ALLOW_CREDENTIALS: bool = Field(default=True, env="CORS_ALLOW_CREDENTIALS")
     
+    # --- NEW: ALLOWED_HOSTS (Fix for CONFIG-01) ---
+    ALLOWED_HOSTS: List[str] = Field(default=["localhost", "127.0.0.1"], env="ALLOWED_HOSTS")
+
     # --- AI Service Settings ---
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
     GEMINI_MODEL: str = Field(default="gemini-2.5-pro", env="GEMINI_MODEL")
@@ -51,10 +54,18 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
     UPLOAD_DIR: str = Field(default="/app/uploads", env="UPLOAD_DIR")
     ALLOWED_EXTENSIONS: List[str] = Field(default=[".pdf", ".docx", ".doc", ".txt"], env="ALLOWED_EXTENSIONS")
-    
-    # --- Cache Settings ---
-    REDIS_URL: Optional[str] = Field(default=None, env="REDIS_URL")
+
+    # --- Cache & Task Broker Settings ---
+    REDIS_URL: str = Field(default="redis://redis:6379", env="REDIS_URL")
     CACHE_TTL: int = Field(default=3600, env="CACHE_TTL")  # 1 hour
+    
+    # --- Celery Settings ---
+    CELERY_BROKER_URL: str = Field(default="redis://dokydoc_redis:6379/0", env="CELERY_BROKER_URL")
+    CELERY_RESULT_BACKEND: str = Field(default="redis://dokydoc_redis:6379/0", env="CELERY_RESULT_BACKEND")
+    CELERY_RESULT_BACKEND_URL: str = Field(default="redis://redis:6379/1", env="CELERY_RESULT_BACKEND_URL")
+    CELERY_TASK_TRACK_STARTED: bool = Field(default=True, env="CELERY_TASK_TRACK_STARTED")
+    CELERY_TASK_TIME_LIMIT: int = Field(default=30 * 60, env="CELERY_TASK_TIME_LIMIT")  # 30 minutes
+    CELERY_TASK_SOFT_TIME_LIMIT: int = Field(default=25 * 60, env="CELERY_TASK_SOFT_TIME_LIMIT")  # 25 minutes
     
     # --- Logging Settings ---
     LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
@@ -79,7 +90,16 @@ class Settings(BaseSettings):
         elif isinstance(v, list):
             return v
         return ["http://localhost:3000"]
-    
+        
+    # --- NEW: Validator for ALLOWED_HOSTS ---
+    @validator("ALLOWED_HOSTS", pre=True)
+    def parse_allowed_hosts(cls, v):
+        if isinstance(v, str):
+            if "," in v:
+                return [host.strip() for host in v.split(",")]
+            return [v.strip()]
+        return v
+
     @validator("ALLOWED_EXTENSIONS", pre=True)
     def parse_allowed_extensions(cls, v):
         if isinstance(v, str):
@@ -111,54 +131,13 @@ class Settings(BaseSettings):
         return v
     
     class Config:
-        # Disable .env file loading to avoid JSON parsing issues
-        env_file = None
+        # Let pydantic-settings handle environment variables automatically
+        env_file = ".env"
         env_file_encoding = 'utf-8'
         case_sensitive = True
 
-# Load environment variables manually to avoid pydantic-settings JSON parsing
-def load_env_vars():
-    """Load environment variables manually to avoid JSON parsing issues."""
-    env_vars = {}
-    
-    # Load from .env file if it exists
-    env_file_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
-    if os.path.exists(env_file_path):
-        with open(env_file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    env_vars[key] = value
-    
-    # Override with actual environment variables
-    for key, value in os.environ.items():
-        env_vars[key] = value
-    
-    return env_vars
-
-# Load environment variables
-env_vars = load_env_vars()
-
-# Create settings instance with manual environment variable handling
-settings = Settings(
-    DATABASE_URL=env_vars.get("DATABASE_URL"),
-    SECRET_KEY=env_vars.get("SECRET_KEY", "your-super-secret-key-here-make-it-at-least-32-characters-long"),
-    GEMINI_API_KEY=env_vars.get("GEMINI_API_KEY", ""),
-    CORS_ORIGINS=env_vars.get("CORS_ORIGINS", "http://localhost:3000"),
-    ALLOWED_EXTENSIONS=env_vars.get("ALLOWED_EXTENSIONS", ".pdf,.docx,.doc,.txt"),
-    ENVIRONMENT=env_vars.get("ENVIRONMENT", "development"),
-    DEBUG=env_vars.get("DEBUG", "true").lower() == "true",
-    LOG_LEVEL=env_vars.get("LOG_LEVEL", "INFO"),
-    REDIS_URL=env_vars.get("REDIS_URL", "redis://redis:6379"),
-)
-
-# Validate that required environment variables are set
-if not settings.DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is required")
-
-if not settings.GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is required")
+# Create settings instance - let pydantic-settings read Docker environment variables
+settings = Settings()
 
 # Environment-specific overrides
 if settings.ENVIRONMENT == "production":

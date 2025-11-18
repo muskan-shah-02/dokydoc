@@ -3,6 +3,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: dokydoc_db
+    # ... (rest of db config is unchanged)
     restart: unless-stopped
     environment:
       POSTGRES_DB: dokydoc
@@ -22,10 +23,11 @@ services:
       retries: 3
       start_period: 40s
 
-  # Redis Cache (for future use)
+  # Redis Cache & Celery Broker
   redis:
     image: redis:7-alpine
     container_name: dokydoc_redis
+    # ... (rest of redis config is unchanged)
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -53,11 +55,16 @@ services:
       - DEBUG=${DEBUG:-true}
       - DATABASE_URL=postgresql://postgres:simplepass@db:5432/dokydoc
       - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app                      # 1. Mount the code
+      - uploads_data:/app/uploads   # 2. Mount the (permission-safe) uploads volume
     depends_on:
       db:
         condition: service_healthy
@@ -80,10 +87,50 @@ services:
           memory: 1G
           cpus: '0.5'
 
+  # Celery Worker Service
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=${BUILD_ENV:-development}
+    container_name: dokydoc_worker
+    command: celery -A app.worker worker --loglevel=info
+    restart: unless-stopped
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-true}
+      - DATABASE_URL=postgresql://postgres:simplepass@db:5432/dokydoc
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - .:/app                      # 1. Mount the code
+      - uploads_data:/app/uploads   # 2. Mount the *same* uploads volume
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dokydoc_network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
   # Nginx Reverse Proxy (for production)
   nginx:
     image: nginx:alpine
     container_name: dokydoc_nginx
+    # ... (rest of nginx config is unchanged)
     restart: unless-stopped
     ports:
       - "80:80"
@@ -91,7 +138,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
-      - ./uploads:/var/www/uploads:ro
+      - uploads_data:/var/www/uploads:ro # <-- Also mount the named volume here
     depends_on:
       - app
     networks:
@@ -99,10 +146,13 @@ services:
     profiles:
       - production
 
+# --- Define our new named volume ---
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  uploads_data: # <--- HERE IT IS
     driver: local
 
 networks:
