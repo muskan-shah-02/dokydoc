@@ -330,3 +330,65 @@ async def analyze_document(
     
     logger.info(f"Analysis for document {document.id} has been scheduled (202 Accepted)")
     return {"message": "Document analysis has been scheduled"}
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> None:
+    """
+    Delete a document from the database and the filesystem.
+    """
+    document_endpoints.logger.info(f"Delete request for document {document_id} by user {current_user.id}")
+    
+    document = crud.document.get(db=db, id=document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if document.owner_id != current_user.id:
+        document_endpoints.logger.warning(f"User {current_user.id} attempted to delete document {document_id} owned by {document.owner_id}")
+        raise HTTPException(status_code=403, detail="Not authorized to delete this document")
+
+    # 1. Delete the file from disk
+    if document.storage_path:
+        file_path = Path(document.storage_path)
+        if file_path.exists():
+            try:
+                os.remove(file_path)
+                document_endpoints.logger.info(f"Deleted file: {file_path}")
+            except OSError as e:
+                document_endpoints.logger.error(f"Error deleting file {file_path}: {e}")
+                # We continue to delete the DB record even if file delete fails
+                # to prevent "ghost" records.
+
+    # 2. Delete from Database
+    # Note: Cascading deletes in your DB models should handle segments/results
+    crud.document.remove(db=db, id=document_id)
+    
+    document_endpoints.logger.info(f"Document {document_id} deleted successfully")
+    return None
+@router.post("/{document_id}/stop")
+def stop_document_analysis(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Signals the analysis engine to stop processing this document.
+    """
+    document = crud.document.get(db=db, id=document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    if document.status not in ["processing", "analyzing", "parsing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"]:
+        raise HTTPException(status_code=400, detail="Document is not currently running.")
+
+    # We set a special status. The worker loop will see this and exit.
+    crud.document.update(
+        db=db, 
+        db_obj=document, 
+        obj_in={"status": "stopping"} 
+    )
+    
+    return {"message": "Stop signal sent. Analysis will halt shortly."}

@@ -1,7 +1,5 @@
-# This is the content for your NEW file at:
-# backend/app/services/analysis_service.py
-
 import json
+import time
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 
@@ -17,12 +15,6 @@ from app.models import SegmentStatus, AnalysisResultStatus
 def repair_json_response(response_text: str) -> str:
     """
     Attempt to repair common JSON formatting issues from AI responses.
-    
-    Args:
-        response_text: Raw AI response that may contain JSON formatting issues
-        
-    Returns:
-        str: Cleaned JSON string
     """
     if not response_text:
         return "{}"
@@ -42,12 +34,11 @@ def repair_json_response(response_text: str) -> str:
     
     # Basic heuristics to fix common issues
     if not cleaned.startswith('{') and not cleaned.startswith('['):
-        # Try to find the first { or [
         json_start = max(cleaned.find('{'), cleaned.find('['))
         if json_start != -1:
             cleaned = cleaned[json_start:]
     
-    # NEW: Try to find the end of the JSON object/array and remove extra content
+    # Regex-based repairs (from your original code)
     import re
     
     # For objects starting with {
@@ -61,15 +52,12 @@ def repair_json_response(response_text: str) -> str:
             if escape_next:
                 escape_next = False
                 continue
-            
             if char == '\\':
                 escape_next = True
                 continue
-                
             if char == '"' and not escape_next:
                 in_string = not in_string
                 continue
-                
             if not in_string:
                 if char == '{':
                     brace_count += 1
@@ -78,7 +66,6 @@ def repair_json_response(response_text: str) -> str:
                     if brace_count == 0:
                         json_end = i + 1
                         break
-        
         if json_end != -1:
             cleaned = cleaned[:json_end]
     
@@ -93,15 +80,12 @@ def repair_json_response(response_text: str) -> str:
             if escape_next:
                 escape_next = False
                 continue
-            
             if char == '\\':
                 escape_next = True
                 continue
-                
             if char == '"' and not escape_next:
                 in_string = not in_string
                 continue
-                
             if not in_string:
                 if char == '[':
                     bracket_count += 1
@@ -110,23 +94,16 @@ def repair_json_response(response_text: str) -> str:
                     if bracket_count == 0:
                         json_end = i + 1
                         break
-        
         if json_end != -1:
             cleaned = cleaned[:json_end]
     
-    # Fix missing commas between array elements or object properties
+    # Fix missing commas
     cleaned = re.sub(r'}\s*{', '},{', cleaned)
-    
-    # Pattern: ] followed by { (missing comma between array and object)
     cleaned = re.sub(r']\s*{', '},{', cleaned)
-    
-    # Pattern: } followed by [ (missing comma between object and array)
     cleaned = re.sub(r'}\s*\[', '},[', cleaned)
-    
-    # Pattern: ] followed by [ (missing comma between arrays)
     cleaned = re.sub(r']\s*\[', '],[', cleaned)
     
-    # Add missing closing braces (simple heuristic) - only if we didn't truncate above
+    # Add missing closing braces
     if cleaned.startswith('{'):
         open_braces = cleaned.count('{') - cleaned.count('}')
         if open_braces > 0:
@@ -154,18 +131,26 @@ class DocumentAnalysisEngine(LoggerMixin):
         """Helper method to increment API call counter for a document."""
         if document_id in self._api_call_counter:
             self._api_call_counter[document_id] += 1
+
+    # --- NEW: Helper to check for stop signal ---
+    def _check_stop_signal(self, db: Session, document_id: int) -> bool:
+        """Checks if the user has requested to stop the analysis."""
+        # We must re-fetch the document from DB to see the latest status
+        doc = crud.document.get(db=db, id=document_id)
+        if doc and doc.status == "stopping":
+            self.logger.info(f"🛑 Analysis STOPPED by user for document {document_id}")
+            # Set final stopped state
+            crud.document.update(
+                db=db, 
+                db_obj=doc, 
+                obj_in={"status": "stopped", "error_message": "Analysis manually halted by user."}
+            )
+            return True
+        return False
     
     async def analyze_document(self, db: Session, document_id: int, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
         """
         Performs the complete multi-pass analysis on a document.
-        
-        Args:
-            db: Database session
-            document_id: ID of the document to analyze
-            learning_mode: If True, feeds extracted entities to the Business Ontology Engine
-            
-        Returns:
-            bool: True if analysis completed successfully, False otherwise
         """
         # Check if document is already being analyzed
         if document_id in self._running_documents:
@@ -182,7 +167,6 @@ class DocumentAnalysisEngine(LoggerMixin):
         self.logger.info(f"📊 Starting multi-pass analysis for document_id: {document_id}")
         
         try:
-            
             # Get the document
             document = crud.document.get(db=db, id=document_id)
             if not document:
@@ -194,6 +178,9 @@ class DocumentAnalysisEngine(LoggerMixin):
                 return False
             
             try:
+                # --- CHECK 1: Before Pass 1 ---
+                if self._check_stop_signal(db, document_id): return False
+
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
                 composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
@@ -202,16 +189,25 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document.composition_analysis = composition_analysis
                 db.commit()
                 
+                # --- CHECK 2: Before Pass 2 ---
+                if self._check_stop_signal(db, document_id): return False
+
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
                 segments_created = await self._pass_2_content_segmentation(
                     db, document_id, document.raw_text, composition_analysis, analysis_run_id
                 )
                 
+                # --- CHECK 3: Before Pass 3 ---
+                if self._check_stop_signal(db, document_id): return False
+
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
                 await self._pass_3_structured_extraction(db, document_id, analysis_run_id)
                 
+                # --- CHECK 4: Before Learning Mode ---
+                if self._check_stop_signal(db, document_id): return False
+
                 # Learning Mode: Feed to Business Ontology Engine
                 if learning_mode:
                     self.logger.info(f"Document {document_id}: Learning mode enabled - feeding to BOE")
@@ -219,326 +215,191 @@ class DocumentAnalysisEngine(LoggerMixin):
                 
                 # Log final API call summary
                 total_calls = self._api_call_counter.get(document_id, 0)
-                segments_count = total_calls - 2  # Subtract Pass 1 and Pass 2
-                estimated_cost = total_calls * 0.01  # Rough estimate: $0.01 per call
+                segments_count = total_calls - 2
+                estimated_cost = total_calls * 0.01
                 
                 self.logger.info(f"📊 ANALYSIS COMPLETE for document {document_id}")
                 self.logger.info(f"💰 TOTAL GEMINI API CALLS: {total_calls}")
-                self.logger.info(f"💡 Cost breakdown: Pass 1 (1) + Pass 2 (1) + Pass 3 ({segments_count}) = {total_calls} calls")
                 self.logger.info(f"💵 Estimated cost: ~${estimated_cost:.2f} (at $0.01/call)")
-                self.logger.warning(f"⚠️  OPTIMIZATION OPPORTUNITY: Consider batching segments to reduce API calls")
                 
+                # Final Success State (only update if we haven't stopped)
+                # Re-check status to be safe
+                final_check = crud.document.get(db=db, id=document_id)
+                if final_check.status != "stopped":
+                     crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100})
+
                 return True
                 
             except Exception as e:
                 self.logger.error(f"Error during multi-pass analysis for document {document_id}: {e}")
+                # Only set to failed if it wasn't a user stop
+                current_doc = crud.document.get(db=db, id=document_id)
+                if current_doc.status != "stopped":
+                    crud.document.update(db=db, db_obj=current_doc, obj_in={"status": "analysis_failed", "error_message": str(e)})
                 return False
         finally:
-            # Always remove document from running set and cleanup counter
             self._running_documents.discard(document_id)
             self._api_call_counter.pop(document_id, None)
             self.logger.debug(f"Released analysis lock for document {document_id}")
     
     async def _pass_1_composition_classification(self, raw_text: str, document_id: int) -> Dict:
-        """
-        Pass 1: Analyzes document composition and classifies content types.
-        Returns a JSON object identifying content types and their percentage distribution.
-        """
+        """Pass 1: Analyzes document composition."""
         try:
-            # Use the prompt manager instead of hardcoded prompts
             prompt = prompt_manager.get_prompt(PromptType.DOCUMENT_COMPOSITION)
-            
-            # Prepare the full prompt with the document text
-            full_prompt = f"{prompt}\n\nDOCUMENT TEXT TO ANALYZE:\n{raw_text}"
+            full_prompt = f"{prompt}\n\nDOCUMENT TEXT TO ANALYZE:\n{raw_text[:15000]}" # Truncate large texts for Pass 1 summary
             
             self.logger.info("🔍 PASS 1: Starting composition analysis - 1 Gemini API call")
             self._increment_api_calls(document_id)
             
-            # Call Gemini API
             response = await gemini_service.generate_content(full_prompt)
-            response_text = response.text
+            cleaned_response = repair_json_response(response.text)
             
-            # Debug: Log the actual response
-            self.logger.info(f"Gemini response length: {len(response_text) if response_text else 0}")
-            self.logger.debug(f"Gemini response content: {response_text[:500] if response_text else 'EMPTY'}")
-            
-            # Clean the response - remove markdown code block formatting
-            cleaned_response = response_text.strip()
-            if cleaned_response.startswith('```json'):
-                # Remove ```json from start and ``` from end
-                cleaned_response = cleaned_response[7:]  # Remove ```json
-                if cleaned_response.endswith('```'):
-                    cleaned_response = cleaned_response[:-3]  # Remove ```
-                cleaned_response = cleaned_response.strip()
-            elif cleaned_response.startswith('```'):
-                # Remove ``` from start and end
-                cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith('```'):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-            
-            # Parse the JSON response
             try:
-                composition_data = json.loads(cleaned_response)
-                self.logger.info("Composition analysis completed successfully")
-                return composition_data
+                return json.loads(cleaned_response)
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
-                self.logger.error(f"Raw response: {response_text}")
-                self.logger.error(f"Cleaned response: {cleaned_response}")
-                raise AIAnalysisException(
-                    message="Failed to parse composition analysis response",
-                    model="gemini",
-                    details={"response": response_text, "cleaned_response": cleaned_response, "error": str(e)}
-                )
+                raise AIAnalysisException("Failed to parse composition analysis response", model="gemini")
                 
         except Exception as e:
-            self.logger.error(f"Error in Pass 1 composition classification: {e}")
-            raise AIAnalysisException(
-                message="Composition classification failed",
-                model="gemini",
-                details={"error": str(e)}
-            )
+            self.logger.error(f"Error in Pass 1: {e}")
+            raise AIAnalysisException("Composition classification failed", model="gemini", details={"error": str(e)})
     
     async def _pass_2_content_segmentation(
         self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, analysis_run_id: int = None
     ) -> bool:
-        """
-        Pass 2: Creates document segments based on composition analysis.
-        """
+        """Pass 2: Creates document segments."""
         try:
-            # Clean up existing segments and their analysis results for this document
+            # Clean up existing segments
             self.logger.info(f"Cleaning up existing segments for document {document_id}")
-            
-            # Get existing segments
             existing_segments = crud.document_segment.get_multi_by_document(db=db, document_id=document_id)
-            
-            # Delete analysis results for existing segments
             for segment in existing_segments:
                 crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id)
-            
-            # Delete existing segments
             crud.document_segment.delete_by_document(db=db, document_id=document_id)
             
-            self.logger.info(f"Cleaned up {len(existing_segments)} existing segments and their analysis results")
-            # Use the prompt manager for segmentation
             prompt = prompt_manager.get_prompt(PromptType.CONTENT_SEGMENTATION)
-            
-            # Prepare the full prompt with context
-            full_prompt = f"""
-            {prompt}
-            
-            COMPOSITION ANALYSIS:
-            {json.dumps(composition_analysis, indent=2)}
-            
-            DOCUMENT TEXT:
-            {raw_text}
-            """
+            full_prompt = f"{prompt}\n\nCOMPOSITION ANALYSIS:\n{json.dumps(composition_analysis, indent=2)}\n\nDOCUMENT TEXT:\n{raw_text}"
             
             self.logger.info("🔍 PASS 2: Starting content segmentation - 1 Gemini API call")
             self._increment_api_calls(document_id)
             
-            # Call Gemini API
             response = await gemini_service.generate_content(full_prompt)
-            response_text = response.text
+            cleaned_response = repair_json_response(response.text)
             
-            # Clean and repair the JSON response
-            cleaned_response = repair_json_response(response_text)
-            
-            # Parse the JSON response
             try:
                 segmentation_data = json.loads(cleaned_response)
                 segments = segmentation_data.get("segments", [])
-                
-                # Filter segments to only include those with > 0% composition
                 composition = composition_analysis.get("composition", {})
+                
                 valid_segments = []
-                
                 for segment_info in segments:
-                    segment_type = segment_info["segment_type"]
-                    composition_percentage = composition.get(segment_type, 0)
-                    
-                    # Only create segments for document types that have > 0% composition
-                    if composition_percentage > 0:
+                    if composition.get(segment_info["segment_type"], 0) > 0:
                         valid_segments.append(segment_info)
-                        self.logger.debug(f"Creating segment for {segment_type} ({composition_percentage}% composition)")
-                    else:
-                        self.logger.debug(f"Skipping segment for {segment_type} (0% composition)")
                 
-                # Create document segments in the database
                 for segment_info in valid_segments:
-                    segment_data = {
-                        "segment_type": segment_info["segment_type"],
-                        "start_char_index": segment_info["start_char_index"],
-                        "end_char_index": segment_info["end_char_index"],
-                        "document_id": document_id,
-                        "analysis_run_id": analysis_run_id
-                    }
-                    
-                    # Create the segment
-                    crud.document_segment.create(db=db, obj_in=schemas.DocumentSegmentCreate(**segment_data))
+                    crud.document_segment.create(db=db, obj_in=schemas.DocumentSegmentCreate(
+                        segment_type=segment_info["segment_type"],
+                        start_char_index=segment_info["start_char_index"],
+                        end_char_index=segment_info["end_char_index"],
+                        document_id=document_id,
+                        analysis_run_id=analysis_run_id
+                    ))
                 
-                self.logger.info(f"Created {len(valid_segments)} document segments (filtered from {len(segments)} total)")
+                self.logger.info(f"Created {len(valid_segments)} document segments")
                 return True
                 
             except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse segmentation response as JSON: {e}")
-                self.logger.error(f"Raw response: {response_text}")
-                self.logger.error(f"Cleaned response: {cleaned_response}")
-                raise AIAnalysisException(
-                    message="Failed to parse segmentation response",
-                    model="gemini",
-                    details={"response": response_text, "cleaned_response": cleaned_response, "error": str(e)}
-                )
+                raise AIAnalysisException("Failed to parse segmentation response", model="gemini")
                 
         except Exception as e:
-            self.logger.error(f"Error in Pass 2 content segmentation: {e}")
-            raise DocumentProcessingException(
-                message="Content segmentation failed",
-                document_id=document_id,
-                details={"error": str(e)}
-            )
+            self.logger.error(f"Error in Pass 2: {e}")
+            raise DocumentProcessingException("Content segmentation failed", document_id=document_id, details={"error": str(e)})
     
     async def _pass_3_structured_extraction(self, db: Session, document_id: int, analysis_run_id: int = None) -> bool:
-        """
-        Pass 3: Performs structured extraction on each document segment.
-        """
+        """Pass 3: Performs structured extraction on each document segment."""
         try:
-            # Initialize run service if we have an analysis_run_id
             run_service = AnalysisRunService() if analysis_run_id else None
-            
-            # Get all segments for this document
             segments = crud.document_segment.get_by_document(db=db, document_id=document_id)
             
             if not segments:
                 self.logger.warning(f"No segments found for document {document_id}")
                 return False
             
-            self.logger.info(f"🔍 PASS 3: Starting structured extraction - {len(segments)} Gemini API calls (1 per segment)")
-            
-            # Use the prompt manager for structured extraction
+            self.logger.info(f"🔍 PASS 3: Starting structured extraction - {len(segments)} segments")
             base_prompt = prompt_manager.get_prompt(PromptType.STRUCTURED_EXTRACTION)
-            
-            for segment in segments:
+            document = crud.document.get(db=db, id=document_id)
+
+            for i, segment in enumerate(segments):
+                # --- CRITICAL: Check stop signal inside the loop ---
+                if self._check_stop_signal(db, document_id): 
+                    return False
+                
+                # --- Rate Limit Throttle (Fix for 429 Error) ---
+                # Wait 4 seconds between segments to respect 15 RPM limit
+                time.sleep(4) 
+
                 try:
-                    # Update segment status to PROCESSING
                     segment.status = SegmentStatus.PROCESSING
                     db.commit()
-                    db.refresh(segment)
                     
-                    # Get the segment text from the parent document
-                    document = crud.document.get(db=db, id=document_id)
                     segment_text = document.raw_text[segment.start_char_index:segment.end_char_index]
+                    full_prompt = f"{base_prompt}\n\nSEGMENT TYPE: {segment.segment_type}\nSEGMENT TEXT:\n{segment_text}"
                     
-                    # Prepare the full prompt for this segment
-                    full_prompt = f"""
-                    {base_prompt}
-                    
-                    SEGMENT TYPE: {segment.segment_type}
-                    SEGMENT TEXT:
-                    {segment_text}
-                    """
-                    
-                    self.logger.info(f"🤖 Analyzing segment {segment.id} of type {segment.segment_type} - Gemini API call {segments.index(segment) + 1}/{len(segments)}")
+                    self.logger.info(f"🤖 Analyzing segment {segment.id} ({i+1}/{len(segments)})")
                     self._increment_api_calls(document_id)
                     
-                    # Call Gemini API
                     response = await gemini_service.generate_content(full_prompt)
-                    response_text = response.text
                     
-                    # Parse the JSON response with repair logic
                     try:
-                        # First attempt with basic cleaning
-                        cleaned_response = response_text.strip()
-                        if cleaned_response.startswith('```json'):
-                            cleaned_response = cleaned_response[7:]
-                        elif cleaned_response.startswith('```'):
-                            cleaned_response = cleaned_response[3:]
-                        if cleaned_response.endswith('```'):
-                            cleaned_response = cleaned_response[:-3]
-                        cleaned_response = cleaned_response.strip()
-                        
-                        structured_data = json.loads(cleaned_response)
-                        
-                    except json.JSONDecodeError as e:
-                        # Attempt repair on first failure
-                        self.logger.warning(f"Initial JSON parse failed for segment {segment.id}, attempting repair")
+                        structured_data = json.loads(repair_json_response(response.text))
+                    except json.JSONDecodeError:
+                        # Double repair attempt
                         try:
-                            repaired_response = repair_json_response(response_text)
-                            structured_data = json.loads(repaired_response)
-                            self.logger.info(f"Successfully repaired JSON for segment {segment.id}")
-                        except json.JSONDecodeError as repair_error:
-                            self.logger.error(f"JSON repair also failed for segment {segment.id}: {repair_error}")
-                            self.logger.error(f"Raw response: {response_text}")
-                            self.logger.error(f"Cleaned response: {cleaned_response}")
-                            self.logger.error(f"Repaired response: {repaired_response}")
-                            # Skip this segment - don't create empty result
+                            structured_data = json.loads(repair_json_response(repair_json_response(response.text)))
+                        except:
+                            self.logger.error(f"Failed to parse JSON for segment {segment.id}")
                             continue
                     
-                    # Debug logging for structured data
-                    self.logger.debug(f"Segment {segment.id} structured_data type: {type(structured_data)}, value: {structured_data}")
-                    
-                    # Only create analysis result if we have valid structured data
-                    if structured_data and (isinstance(structured_data, dict) or isinstance(structured_data, list)):
-                        analysis_result_data = {
-                            "segment_id": segment.id,
-                            "document_id": document_id,
-                            "structured_data": structured_data,
-                            "status": AnalysisResultStatus.SUCCESS
-                        }
-                        
-                        crud.analysis_result.create_for_document(db=db, obj_in=schemas.AnalysisResultCreate(**analysis_result_data))
-                        
-                        # Update segment status to COMPLETED
+                    if structured_data:
+                        crud.analysis_result.create_for_document(db=db, obj_in=schemas.AnalysisResultCreate(
+                            segment_id=segment.id,
+                            document_id=document_id,
+                            structured_data=structured_data,
+                            status=AnalysisResultStatus.SUCCESS
+                        ))
                         segment.status = SegmentStatus.COMPLETED
-                        db.commit()
-                        
-                        self.logger.info(f"Created analysis result for segment {segment.id}")
                     else:
-                        self.logger.warning(f"Skipping empty structured data for segment {segment.id}")
-                        # Update segment status to FAILED
                         segment.status = SegmentStatus.FAILED
                         segment.last_error = "Empty structured data"
-                        db.commit()
-                        continue
-                        
+                    
+                    db.commit()
+                    
+                    # Update progress
+                    progress = int(((i + 1) / len(segments)) * 100)
+                    total_progress = 50 + int(progress / 2)
+                    crud.document.update(db=db, db_obj=document, obj_in={"progress": total_progress, "status": "pass_3_extraction"})
+                    
+                    if run_service and analysis_run_id:
+                        run_service.update_run_progress(db=db, run_id=analysis_run_id)
+
                 except Exception as e:
                     self.logger.error(f"Error processing segment {segment.id}: {e}")
-                    # Update segment status to FAILED
                     segment.status = SegmentStatus.FAILED
                     segment.last_error = str(e)
                     db.commit()
-                    # Continue with other segments
                     continue
             
-            # Update run progress if we have a run service
-            if run_service and analysis_run_id:
-                run_service.update_run_progress(db=db, run_id=analysis_run_id)
-            
-            self.logger.info(f"Completed structured extraction for {len(segments)} segments")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error in Pass 3 structured extraction: {e}")
-            raise DocumentProcessingException(
-                message="Structured extraction failed",
-                document_id=document_id,
-                details={"error": str(e)}
-            )
+            self.logger.error(f"Error in Pass 3: {e}")
+            raise DocumentProcessingException("Structured extraction failed", document_id=document_id, details={"error": str(e)})
     
     async def _feed_to_business_ontology(self, db: Session, document_id: int) -> bool:
-        """
-        Feeds extracted entities to the Business Ontology Engine (placeholder for future implementation).
-        """
+        """Feeds extracted entities to the Business Ontology Engine."""
         try:
             self.logger.info(f"Feeding document {document_id} to Business Ontology Engine")
-            
-            # TODO: Implement Business Ontology Engine integration
-            # This is a placeholder for future implementation
-            
-            self.logger.info(f"Successfully fed document {document_id} to Business Ontology Engine")
+            # Placeholder for BOE integration
             return True
-            
         except Exception as e:
             self.logger.error(f"Error feeding to Business Ontology Engine: {e}")
             return False
@@ -546,10 +407,5 @@ class DocumentAnalysisEngine(LoggerMixin):
 # Create a global instance
 dae = DocumentAnalysisEngine()
 
-# Legacy function for backward compatibility
 async def run_initial_analysis(db: Session, document_id: int):
-    """
-    Legacy function that now delegates to the new DAE.
-    """
     return await dae.analyze_document(db, document_id)
-

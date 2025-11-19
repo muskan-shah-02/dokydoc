@@ -1,3 +1,9 @@
+/*
+  frontend/app/dashboard/documents/[id]/page.tsx
+  -----------------------------------------------
+  Status: FINAL MASTER
+  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal
+*/
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
@@ -10,43 +16,49 @@ import {
 } from "@/components/ui/collapsible";
 import {
   FileText,
-  Tag,
   GitCommit,
   Clock,
   AlertCircle,
   BrainCircuit,
-  ListChecks,
   ChevronDown,
-  ChevronRight,
-  Activity,
   FileCode,
   BookOpen,
-  Settings,
   Database,
-  Shield,
-  Zap,
-  Palette,
-  TestTube,
   HelpCircle,
   Loader2,
-  History,
-  Timer,
-  PlayCircle,
-  PauseCircle,
   CheckCircle,
+  PlayCircle,
+  Terminal,
+  Cpu,
+  ScanLine,
+  Split,
+  Sparkles,
+  Download,
+  Share2,
+  RefreshCw,
+  LayoutDashboard,
+  ArrowRight,
+  StopCircle,
+  Activity,
+  List,
   XCircle,
-  Globe,
-  Layers,
+  PauseCircle,
+  ShieldAlert,
+  AlertTriangle,
+  Target,
+  Printer,
 } from "lucide-react";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
+  CardDescription,
 } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-// --- Interface Definitions ---
+// --- 1. Types ---
+
 interface Document {
   id: number;
   filename: string;
@@ -54,9 +66,11 @@ interface Document {
   version: string;
   created_at: string;
   raw_text: string | null;
-  composition_analysis: Record<string, number> | null;
+  composition_analysis: any | null;
   status: string | null;
+  progress: number | null;
   file_size_kb?: number | null;
+  error_message?: string | null;
 }
 
 interface DocumentSegment {
@@ -65,1370 +79,970 @@ interface DocumentSegment {
   start_char_index: number;
   end_char_index: number;
   document_id: number;
+  created_at: string;
 }
 
 interface AnalysisResult {
   id: number;
   segment_id: number;
-  document_id: number;
-  structured_data: Record<string, any>;
+  document_id: number | null;
+  structured_data: any;
   created_at: string;
 }
 
-// --- Segment Type Icons ---
-const getSegmentTypeIcon = (segmentType: string) => {
-  switch (segmentType) {
-    case "BRD":
-      return BookOpen;
-    case "SRS":
-      return FileCode;
-    case "API_DOCS":
-      return Database;
-    case "USER_STORIES":
-      return FileText;
-    case "TECHNICAL_SPECS":
-      return Settings;
-    case "PROCESS_FLOWS":
-      return Zap;
-    case "DATA_MODELS":
-      return Database;
-    case "SECURITY_REQUIREMENTS":
-      return Shield;
-    case "PERFORMANCE_REQUIREMENTS":
-      return Zap;
-    case "UI_UX_SPECS":
-      return Palette;
-    case "TEST_CASES":
-      return TestTube;
-    default:
-      return HelpCircle;
-  }
-};
-
-const getSegmentTypeColor = (segmentType: string) => {
-  switch (segmentType) {
-    case "BRD":
-      return "bg-blue-100 text-blue-800 border-blue-200";
-    case "SRS":
-      return "bg-green-100 text-green-800 border-green-200";
-    case "API_DOCS":
-      return "bg-purple-100 text-purple-800 border-purple-200";
-    case "USER_STORIES":
-      return "bg-orange-100 text-orange-800 border-orange-200";
-    case "TECHNICAL_SPECS":
-      return "bg-indigo-100 text-indigo-800 border-indigo-200";
-    case "PROCESS_FLOWS":
-      return "bg-yellow-100 text-yellow-800 border-yellow-200";
-    case "DATA_MODELS":
-      return "bg-teal-100 text-teal-800 border-teal-200";
-    case "SECURITY_REQUIREMENTS":
-      return "bg-red-100 text-red-800 border-red-200";
-    case "PERFORMANCE_REQUIREMENTS":
-      return "bg-pink-100 text-pink-800 border-pink-200";
-    case "UI_UX_SPECS":
-      return "bg-cyan-100 text-cyan-800 border-cyan-200";
-    case "TEST_CASES":
-      return "bg-lime-100 text-lime-800 border-lime-200";
-    default:
-      return "bg-gray-100 text-gray-800 border-gray-200";
-  }
-};
-
-// --- Enhanced Segment Analysis Display Component ---
-const SegmentAnalysisCard = ({
-  segment,
-  analysisResult,
-  isLoading,
-}: {
+interface AnalyzedSegment {
   segment: DocumentSegment;
-  analysisResult: AnalysisResult | null;
-  isLoading: boolean;
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const IconComponent = getSegmentTypeIcon(segment.segment_type);
-  const colorClasses = getSegmentTypeColor(segment.segment_type);
+  analysis_result: AnalysisResult | null;
+  status: "analyzed" | "pending" | "failed";
+}
 
-  if (isLoading) {
-    return (
-      <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-        <div className="animate-pulse">
-          <div className="h-4 bg-gray-200 rounded w-1/3 mb-2"></div>
-          <div className="h-3 bg-gray-200 rounded w-1/2"></div>
-        </div>
-      </div>
-    );
-  }
+// --- 2. Helpers ---
+
+const getStatusStep = (status: string | null) => {
+  if (!status) return 0;
+  if (status === "uploaded") return 1;
+  if (status === "parsing") return 2;
+  if (status === "analyzing" || status === "pass_1_composition") return 3;
+  if (status === "pass_2_segmenting") return 4;
+  if (status === "pass_3_extraction") return 5;
+  if (status === "completed") return 6;
+  if (status === "stopped") return -2;
+  if (status.includes("failed")) return -1;
+  return 1;
+};
+
+const ACTIVE_STATES = [
+  "uploaded",
+  "processing",
+  "parsing",
+  "analyzing",
+  "pass_1_composition",
+  "pass_2_segmenting",
+  "pass_3_extraction",
+];
+
+// --- 3. Components ---
+
+// A. Pipeline Node (Pulse & Predict)
+const PipelineStepNode = ({
+  step,
+  currentStep,
+  isComplete,
+  isFailed,
+  isStopped,
+}: {
+  step: any;
+  currentStep: number;
+  isComplete: boolean;
+  isFailed: boolean;
+  isStopped: boolean;
+}) => {
+  const isActive = currentStep === step.id;
+  const isPast = currentStep > step.id || isComplete;
+  const Icon = step.icon;
 
   return (
-    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <CollapsibleTrigger className="w-full">
-        <div
-          className={`bg-white p-6 rounded-xl border-2 shadow-sm hover:shadow-lg transition-all duration-300 ${colorClasses} ${
-            isOpen ? "border-blue-300 shadow-md" : "hover:border-gray-300"
-          }`}
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div
-                className={`p-3 rounded-lg ${
-                  colorClasses.includes("bg-blue")
-                    ? "bg-blue-100"
-                    : colorClasses.includes("bg-green")
-                    ? "bg-green-100"
-                    : "bg-gray-100"
-                }`}
-              >
-                <IconComponent className="h-7 w-7" />
-              </div>
-              <div className="flex-1">
-                <h3 className="font-bold text-xl text-gray-900 mb-1">
-                  {segment.segment_type.replace(/_/g, " ")}
-                </h3>
-                <div className="flex items-center space-x-3 text-sm text-gray-600">
-                  <span className="flex items-center">
-                    <span className="font-medium">Range:</span>
-                    <span className="ml-1">
-                      {segment.start_char_index.toLocaleString()} -{" "}
-                      {segment.end_char_index.toLocaleString()}
-                    </span>
-                  </span>
-                  <span className="bg-gray-100 px-3 py-1 rounded-full text-xs font-medium">
-                    {(
-                      segment.end_char_index - segment.start_char_index
-                    ).toLocaleString()}{" "}
-                    chars
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center space-x-3">
-              <Badge
-                variant="outline"
-                className={`px-3 py-1 font-medium ${
-                  isLoading
-                    ? "bg-yellow-100 text-yellow-800 border-yellow-300"
-                    : analysisResult
-                    ? "bg-green-100 text-green-800 border-green-300"
-                    : "bg-gray-100 text-gray-600 border-gray-300"
-                }`}
-              >
-                {isLoading ? (
-                  <span className="flex items-center">
-                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-yellow-800 mr-2"></div>
-                    Analyzing...
-                  </span>
-                ) : analysisResult ? (
-                  "✓ Analyzed"
-                ) : (
-                  "Pending"
-                )}
-              </Badge>
-              <div
-                className={`p-2 rounded-lg transition-transform duration-200 ${
-                  isOpen ? "rotate-180 bg-blue-100" : "hover:bg-gray-100"
-                }`}
-              >
-                <ChevronDown className="h-5 w-5 text-gray-500" />
-              </div>
-            </div>
+    <div className="relative flex flex-col items-center group cursor-default z-10 w-12">
+      {/* Tooltip */}
+      <div className="absolute bottom-full mb-3 opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-y-2 group-hover:translate-y-0 pointer-events-none min-w-[140px] left-1/2 -translate-x-1/2 z-50">
+        <div className="bg-slate-900 text-white text-xs rounded-lg p-3 shadow-xl border border-slate-700 relative">
+          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-slate-900 rotate-45 border-b border-r border-slate-700"></div>
+          <div className="font-semibold mb-1 flex items-center gap-2">
+            <Icon className="w-3 h-3 text-blue-400" /> {step.label}
+          </div>
+          <div className="text-slate-400 mb-1.5 border-b border-slate-800 pb-1">
+            {isActive
+              ? "Processing now..."
+              : isPast
+              ? "Completed"
+              : isFailed
+              ? "Failed here"
+              : "Waiting..."}
+          </div>
+          <div className="flex items-center justify-between text-[10px] font-mono">
+            <span className="text-slate-500">Est. Time:</span>
+            <span className="text-green-400">{step.estTime}</span>
           </div>
         </div>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-4">
-        <div className="bg-gradient-to-br from-gray-50 to-white p-6 rounded-xl border border-gray-200 shadow-sm">
-          {analysisResult ? (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between pb-4 border-b border-gray-200">
-                <h4 className="font-bold text-gray-900 text-xl flex items-center">
-                  <span className="w-3 h-3 bg-blue-500 rounded-full mr-3"></span>
-                  Analysis Results
-                </h4>
-                <div className="flex items-center space-x-2">
-                  <Badge
-                    variant="secondary"
-                    className="bg-blue-100 text-blue-800 px-3 py-1"
-                  >
-                    {Object.keys(analysisResult.structured_data || {}).length}{" "}
-                    fields
-                  </Badge>
-                  <Badge
-                    variant="outline"
-                    className="bg-green-50 text-green-700 border-green-200"
-                  >
-                    ✓ Complete
-                  </Badge>
-                </div>
-              </div>
-              <div className="max-h-96 overflow-y-auto">
-                {renderStructuredData(analysisResult.structured_data)}
-              </div>
-            </div>
-          ) : (
-            <div className="text-center py-12 text-gray-500">
-              <div className="bg-gray-100 rounded-full p-4 w-20 h-20 mx-auto mb-4 flex items-center justify-center">
-                <BrainCircuit className="h-10 w-10 text-gray-400" />
-              </div>
-              <h4 className="text-lg font-semibold text-gray-700 mb-2">
-                No Analysis Available
-              </h4>
-              <p className="text-sm text-gray-600">
-                This segment hasn't been analyzed yet or the analysis failed.
-              </p>
-            </div>
-          )}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
+      </div>
+
+      {/* Pulse Ring */}
+      {isActive && !isFailed && !isStopped && (
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-10 h-10 bg-blue-400/30 rounded-full animate-ping -z-10"></div>
+      )}
+
+      {/* Icon Circle */}
+      <div
+        className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all duration-500 bg-white ${
+          isActive
+            ? "border-blue-600 text-blue-600 shadow-[0_0_15px_rgba(37,99,235,0.3)] scale-110"
+            : isPast
+            ? "border-green-500 bg-green-50 text-green-600"
+            : "border-gray-200 text-gray-300"
+        } ${isFailed && isActive ? "border-red-500 text-red-500" : ""} ${
+          isStopped && isActive ? "border-orange-500 text-orange-500" : ""
+        }`}
+      >
+        {isPast ? (
+          <CheckCircle className="w-5 h-5" />
+        ) : isFailed && isActive ? (
+          <XCircle className="w-5 h-5" />
+        ) : isStopped && isActive ? (
+          <PauseCircle className="w-5 h-5" />
+        ) : isActive ? (
+          <Icon className="w-5 h-5 animate-pulse" />
+        ) : (
+          <Icon className="w-5 h-5" />
+        )}
+      </div>
+
+      {/* Label */}
+      <span
+        className={`mt-3 text-[10px] font-bold uppercase tracking-wider transition-colors duration-300 text-center ${
+          isActive
+            ? "text-blue-700 scale-105"
+            : isPast
+            ? "text-green-600"
+            : "text-gray-400"
+        }`}
+      >
+        {step.label}
+      </span>
+    </div>
   );
 };
 
-// Smart data renderer for user-friendly display
-const renderStructuredData = (data: any) => {
-  if (!data || typeof data !== "object") {
-    return (
-      <div className="text-gray-500 italic">No structured data available</div>
-    );
-  }
+// B. Interactive Pipeline
+const InteractivePipeline = ({
+  status,
+  progress,
+}: {
+  status: string | null;
+  progress: number;
+}) => {
+  const currentStep = getStatusStep(status);
+  const isComplete = currentStep === 6;
+  const isFailed = currentStep === -1;
+  const isStopped = currentStep === -2;
+  const displayStep =
+    isFailed || isStopped
+      ? status?.includes("parsing")
+        ? 2
+        : status?.includes("analyzing")
+        ? 3
+        : 4
+      : currentStep;
 
-  // Smart renderer that creates user-friendly displays based on content type
-  const renderSmartContent = (obj: any): React.JSX.Element => {
-    // Handle endpoints specifically for API_DOCS
-    if (obj.endpoints && Array.isArray(obj.endpoints)) {
-      return (
-        <div className="space-y-4">
-          <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-lg p-4">
-            <h4 className="font-semibold text-green-900 mb-2 flex items-center">
-              <Globe className="w-4 h-4 mr-2" />
-              API Endpoints
-            </h4>
-            <p className="text-green-800 text-sm">
-              This section contains {obj.endpoints.length} API endpoint(s) with
-              their specifications.
-            </p>
-          </div>
+  const steps = [
+    { id: 1, label: "Queued", icon: Clock, estTime: "< 1s" },
+    { id: 2, label: "Parsing", icon: ScanLine, estTime: "~5-10s" },
+    { id: 3, label: "Classify", icon: BrainCircuit, estTime: "~2-4s" },
+    { id: 4, label: "Segment", icon: Split, estTime: "~3-5s" },
+    { id: 5, label: "Extract", icon: Cpu, estTime: "~20s+" },
+    { id: 6, label: "Ready", icon: CheckCircle, estTime: "Done" },
+  ];
 
-          <div className="grid gap-4">
-            {obj.endpoints.map((endpoint: any, index: number) => (
-              <div
-                key={index}
-                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
-              >
-                <div className="flex items-center space-x-3 mb-3">
-                  <Badge className="bg-blue-100 text-blue-800">
-                    {endpoint.method || "GET"}
-                  </Badge>
-                  <code className="bg-gray-100 px-2 py-1 rounded text-sm font-mono">
-                    {endpoint.path || endpoint.url || "No path specified"}
-                  </code>
-                </div>
-
-                {endpoint.description && (
-                  <p className="text-gray-700 mb-3">{endpoint.description}</p>
-                )}
-
-                {endpoint.parameters && endpoint.parameters.length > 0 && (
-                  <div className="mb-3">
-                    <h6 className="font-medium text-gray-800 mb-2">
-                      Parameters:
-                    </h6>
-                    <div className="space-y-1">
-                      {endpoint.parameters.map((param: any, i: number) => (
-                        <div
-                          key={i}
-                          className="flex items-center space-x-2 text-sm"
-                        >
-                          <code className="bg-gray-100 px-2 py-1 rounded">
-                            {param.name || param}
-                          </code>
-                          {param.type && (
-                            <span className="text-gray-500">
-                              ({param.type})
-                            </span>
-                          )}
-                          {param.required && (
-                            <Badge variant="outline" className="text-xs">
-                              Required
-                            </Badge>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {endpoint.response && (
-                  <div>
-                    <h6 className="font-medium text-gray-800 mb-1">
-                      Response:
-                    </h6>
-                    <p className="text-sm text-gray-600">{endpoint.response}</p>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
+  return (
+    <div className="w-full py-6 px-4">
+      <div className="relative">
+        <div className="absolute top-5 left-0 w-full h-0.5 bg-gray-100 -z-20 rounded-full" />
+        <div
+          className={`absolute top-5 left-0 h-0.5 transition-all duration-1000 ease-out -z-10 rounded-full ${
+            isFailed
+              ? "bg-red-500"
+              : isStopped
+              ? "bg-orange-500"
+              : "bg-gradient-to-r from-blue-600 via-blue-400 to-blue-600 bg-[length:200%_100%] animate-[shimmer_2s_infinite_linear]"
+          }`}
+          style={{ width: `${Math.min(((displayStep - 1) / 5) * 100, 100)}%` }}
+        />
+        <div className="flex justify-between w-full">
+          {steps.map((step) => (
+            <PipelineStepNode
+              key={step.id}
+              step={step}
+              currentStep={displayStep}
+              isComplete={isComplete}
+              isFailed={isFailed}
+              isStopped={isStopped}
+            />
+          ))}
         </div>
-      );
-    }
+      </div>
+    </div>
+  );
+};
 
-    // Handle architecture for TECHNICAL_SPECS
-    if (obj.architecture && typeof obj.architecture === "object") {
-      return (
-        <div className="space-y-4">
-          <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg p-4">
-            <h4 className="font-semibold text-purple-900 mb-2 flex items-center">
-              <Layers className="w-4 h-4 mr-2" />
-              System Architecture
-            </h4>
-            <p className="text-purple-800 text-sm">
-              Technical architecture and system design specifications.
-            </p>
-          </div>
+// C. Live Terminal
+const LiveTerminal = ({
+  status,
+  progress,
+  error,
+}: {
+  status: string | null;
+  progress: number;
+  error?: string | null;
+}) => {
+  const currentStep = getStatusStep(status);
+  const logs = useMemo(() => {
+    if (error) return [{ time: "ERROR", msg: error, type: "error" }];
+    const l = [];
+    if (currentStep >= 1)
+      l.push({ time: "00:00", msg: "Document upload verified.", type: "info" });
+    if (currentStep >= 2)
+      l.push({ time: "00:02", msg: "Initializing Parser...", type: "info" });
+    if (currentStep === 2)
+      l.push({
+        time: "00:05",
+        msg: `Reading stream... ${progress}%`,
+        type: "process",
+      });
+    if (currentStep >= 3)
+      l.push({ time: "00:12", msg: "AI Classification: Started", type: "ai" });
+    if (currentStep >= 4)
+      l.push({ time: "00:18", msg: "Segmentation: Active", type: "ai" });
+    if (currentStep >= 5)
+      l.push({ time: "00:25", msg: "Extraction: Running...", type: "ai" });
+    if (currentStep === 6)
+      l.push({
+        time: "00:32",
+        msg: "Completed Successfully.",
+        type: "success",
+      });
+    return l;
+  }, [currentStep, progress, error]);
 
-          {obj.architecture.core_services && (
-            <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-              <h5 className="font-medium text-gray-800 mb-3">Core Services</h5>
-              <div className="grid gap-3">
-                {obj.architecture.core_services.map(
-                  (service: any, index: number) => (
-                    <div
-                      key={index}
-                      className="border-l-4 border-blue-200 pl-4 py-2"
-                    >
-                      <div className="flex items-center space-x-2 mb-1">
-                        <h6 className="font-medium text-blue-900">
-                          {service.name}
-                        </h6>
-                        {service.technology && (
-                          <Badge variant="outline" className="text-xs">
-                            {service.technology}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-gray-700">
-                        {service.description}
-                      </p>
-                    </div>
-                  )
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    // Handle security requirements
-    if (obj.security_requirements && Array.isArray(obj.security_requirements)) {
-      return (
-        <div className="space-y-4">
-          <div className="bg-gradient-to-r from-red-50 to-orange-50 border border-red-200 rounded-lg p-4">
-            <h4 className="font-semibold text-red-900 mb-2 flex items-center">
-              <Shield className="w-4 h-4 mr-2" />
-              Security Requirements
-            </h4>
-            <p className="text-red-800 text-sm">
-              Security specifications and compliance requirements.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {obj.security_requirements.map((req: any, index: number) => (
-              <div
-                key={index}
-                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
-              >
-                <h6 className="font-medium text-gray-800 mb-2">
-                  {req.requirement || `Requirement ${index + 1}`}
-                </h6>
-                {req.details && typeof req.details === "object" && (
-                  <div className="space-y-2">
-                    {Object.entries(req.details).map(([key, value]) => (
-                      <div
-                        key={key}
-                        className="border-l-4 border-orange-200 pl-3"
-                      >
-                        <div className="font-medium text-sm text-orange-900 capitalize">
-                          {key.replace(/_/g, " ")}
-                        </div>
-                        <div className="text-sm text-gray-700">
-                          {String(value)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    }
-
-    // Handle UI/UX specifications
-    if (obj.modules && Array.isArray(obj.modules)) {
-      return (
-        <div className="space-y-4">
-          <div className="bg-gradient-to-r from-pink-50 to-rose-50 border border-pink-200 rounded-lg p-4">
-            <h4 className="font-semibold text-pink-900 mb-2 flex items-center">
-              <Palette className="w-4 h-4 mr-2" />
-              UI/UX Specifications
-            </h4>
-            <p className="text-pink-800 text-sm">
-              User interface and user experience design specifications.
-            </p>
-          </div>
-
-          <div className="grid gap-4">
-            {obj.modules.map((module: any, index: number) => (
-              <div
-                key={index}
-                className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
-              >
-                <h6 className="font-medium text-gray-800 mb-2">
-                  {module.module_name || `Module ${index + 1}`}
-                </h6>
-                {module.features && Array.isArray(module.features) && (
-                  <div>
-                    <p className="text-sm text-gray-600 mb-2">Features:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {module.features.map((feature: string, i: number) => (
-                        <Badge key={i} variant="outline" className="text-xs">
-                          {feature}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      );
-    }
-
-    // Generic fallback for other data types
-    return renderGenericContent(obj);
-  };
-
-  // Generic content renderer for unstructured data
-  const renderGenericContent = (obj: any): React.JSX.Element => {
-    return (
-      <div className="space-y-4">
-        {Object.entries(obj).map(([key, value]) => (
+  return (
+    <div className="bg-slate-950 rounded-lg border border-slate-800 p-4 font-mono text-xs h-48 overflow-y-auto shadow-inner custom-scrollbar">
+      <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
+        <Terminal className="w-3 h-3 text-slate-400" />
+        <span className="text-slate-400 font-semibold uppercase tracking-wider">
+          System Log
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        {logs.map((log, idx) => (
           <div
-            key={key}
-            className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm"
+            key={idx}
+            className="flex gap-3 animate-in fade-in slide-in-from-left-2 duration-300"
           >
-            <h6 className="font-medium text-gray-800 mb-3 capitalize flex items-center">
-              <span className="w-2 h-2 bg-gray-400 rounded-full mr-2"></span>
-              {key.replace(/_/g, " ")}
-            </h6>
-
-            {Array.isArray(value) ? (
-              <div className="space-y-2">
-                {value.map((item, index) => (
-                  <div
-                    key={index}
-                    className="border-l-4 border-gray-200 pl-3 py-1"
-                  >
-                    <div className="text-sm text-gray-700">
-                      {typeof item === "object"
-                        ? JSON.stringify(item, null, 2)
-                        : String(item)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : typeof value === "object" && value !== null ? (
-              <div className="bg-gray-50 p-3 rounded">
-                <pre className="text-sm text-gray-700 whitespace-pre-wrap">
-                  {JSON.stringify(value, null, 2)}
-                </pre>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-700">{String(value)}</p>
-            )}
+            <span className="text-slate-600 flex-shrink-0">[{log.time}]</span>
+            <span
+              className={`${
+                log.type === "success"
+                  ? "text-emerald-400 font-bold"
+                  : log.type === "error"
+                  ? "text-red-400 font-bold"
+                  : log.type === "ai"
+                  ? "text-purple-400"
+                  : log.type === "process"
+                  ? "text-yellow-400 animate-pulse"
+                  : "text-blue-300"
+              }`}
+            >
+              {log.type === "success"
+                ? "✓ "
+                : log.type === "error"
+                ? "✗ "
+                : "> "}
+              {log.msg}
+            </span>
           </div>
         ))}
       </div>
-    );
-  };
+    </div>
+  );
+};
 
-  // Extract summary if available
-  const summary = data.summary;
-  const remainingData = { ...data };
-  delete remainingData.summary;
+// D. Analysis HUD Wrapper
+const AnalysisStatusHUD = ({
+  doc,
+  onStop,
+}: {
+  doc: Document;
+  onStop: () => void;
+}) => {
+  const [showTerminal, setShowTerminal] = useState(false);
+  const isProcessing = ACTIVE_STATES.includes(doc.status || "");
+  const isFailed = doc.status?.includes("failed");
+  const isStopped = doc.status === "stopped";
+  const isComplete = doc.status === "completed";
+
+  useEffect(() => {
+    if (isProcessing) setShowTerminal(true);
+  }, [isProcessing]);
 
   return (
-    <div className="space-y-6">
-      {/* Summary Section */}
-      {summary && (
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-4">
-          <h4 className="font-semibold text-blue-900 mb-2 flex items-center">
-            <span className="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>
-            Summary
-          </h4>
-          <p className="text-blue-800 text-sm leading-relaxed">{summary}</p>
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8 print:hidden">
+      <div className="p-6 bg-gradient-to-r from-white via-gray-50/30 to-white">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              {isComplete ? (
+                <span className="text-green-600 flex items-center">
+                  <CheckCircle className="w-5 h-5 mr-2" /> Analysis Complete
+                </span>
+              ) : isStopped ? (
+                <span className="text-orange-600 flex items-center">
+                  <PauseCircle className="w-5 h-5 mr-2" /> Analysis Stopped
+                </span>
+              ) : isFailed ? (
+                <span className="text-red-600 flex items-center">
+                  <AlertCircle className="w-5 h-5 mr-2" /> Analysis Failed
+                </span>
+              ) : (
+                <span className="text-blue-600 flex items-center">
+                  <Activity className="w-5 h-5 mr-2 animate-pulse" />{" "}
+                  Processing...
+                </span>
+              )}
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              {isStopped
+                ? "User halted the process."
+                : doc.error_message ||
+                  "Orchestrating multi-pass AI analysis pipeline..."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowTerminal(!showTerminal)}
+              className={showTerminal ? "bg-slate-100" : ""}
+            >
+              <Terminal className="w-4 h-4 mr-2" />{" "}
+              {showTerminal ? "Hide Logs" : "Show Logs"}
+            </Button>
+            {isProcessing && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={onStop}
+                className="shadow-sm hover:bg-red-600"
+              >
+                <StopCircle className="w-4 h-4 mr-2" /> Stop
+              </Button>
+            )}
+          </div>
         </div>
-      )}
-
-      {/* Smart Content Rendering */}
-      {Object.keys(remainingData).length > 0 ? (
-        renderSmartContent(remainingData)
-      ) : (
-        <div className="text-gray-500 italic text-center py-8">
-          No detailed analysis data available
+        <InteractivePipeline status={doc.status} progress={doc.progress || 0} />
+      </div>
+      {showTerminal && (
+        <div className="bg-slate-50 p-4 border-t border-gray-100 animate-in slide-in-from-top-2 duration-200">
+          <LiveTerminal
+            status={doc.status}
+            progress={doc.progress || 0}
+            error={doc.error_message}
+          />
         </div>
       )}
     </div>
   );
 };
 
-// Helper function to format elapsed time
-const formatElapsedTime = (seconds: number): string => {
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
-};
-
-// --- Main Document Detail Page Component ---
-export default function DocumentDetailPage() {
-  const [document, setDocument] = useState<Document | null>(null);
-  const [segments, setSegments] = useState<DocumentSegment[]>([]);
-  const [analysisResults, setAnalysisResults] = useState<
-    Record<number, AnalysisResult>
-  >({});
-  const [loadingSegments, setLoadingSegments] = useState<
-    Record<number, boolean>
-  >({});
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [documentId, setDocumentId] = useState<string | null>(null);
-  const [analysisStats, setAnalysisStats] = useState({
-    successful: 0,
-    failed: 0,
-    notAttempted: 0,
-  });
-  const [viewMode, setViewMode] = useState<"separated" | "consolidated">(
-    "separated"
+// E. Vital Signs Bar (Replaces Big Tabs)
+const VitalSignsBar = ({
+  segments,
+  composition,
+}: {
+  segments: AnalyzedSegment[];
+  composition: any;
+}) => {
+  const analyzedCount = segments.filter((s) => s.analysis_result).length;
+  const totalCount = segments.length;
+  const insightsCount = segments.reduce(
+    (acc, s) =>
+      acc +
+      (s.analysis_result?.structured_data
+        ? Object.keys(s.analysis_result.structured_data).length
+        : 0),
+    0
   );
-  const [consolidatedAnalysis, setConsolidatedAnalysis] = useState<any>(null);
-  const [isGeneratingConsolidated, setIsGeneratingConsolidated] =
-    useState(false);
-  const [analysisRuns, setAnalysisRuns] = useState<any[]>([]);
-  const [activeRun, setActiveRun] = useState<any>(null);
-  const [isLoadingRuns, setIsLoadingRuns] = useState(false);
-  const [analysisStartTime, setAnalysisStartTime] = useState<Date | null>(null);
-  const [elapsedTime, setElapsedTime] = useState(0);
-  const [showRunHistory, setShowRunHistory] = useState(false);
+  const coverage =
+    totalCount > 0 ? Math.round((analyzedCount / totalCount) * 100) : 0;
 
-  // Memoize progress calculation to prevent unnecessary re-renders
-  const progressPercentage = useMemo(() => {
-    return Math.min(100, Math.round((elapsedTime / 300) * 100));
-  }, [elapsedTime]);
-
-  // Get the document ID from the URL
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const pathParts = window.location.pathname.split("/");
-      const id = pathParts.pop() || "";
-      setDocumentId(id);
-    }
-  }, []);
-
-  // Timer effect for tracking analysis progress
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-
-    if (isAnalyzing && analysisStartTime) {
-      interval = setInterval(() => {
-        const now = new Date();
-        const elapsed = Math.floor(
-          (now.getTime() - analysisStartTime.getTime()) / 1000
-        );
-        // Only update if the elapsed time has actually changed (reduces unnecessary re-renders)
-        setElapsedTime((prevElapsed) =>
-          prevElapsed !== elapsed ? elapsed : prevElapsed
-        );
-      }, 1000);
-    } else {
-      setElapsedTime(0);
-    }
-
-    return () => {
-      if (interval) {
-        clearInterval(interval);
+  let dominantType = "Unknown";
+  let maxVal = 0;
+  if (composition?.composition) {
+    Object.entries(composition.composition).forEach(([k, v]: any) => {
+      if (v > maxVal) {
+        maxVal = v;
+        dominantType = k;
       }
-    };
-  }, [isAnalyzing, analysisStartTime]);
-
-  // Fetch document details and segments
-  const fetchData = useCallback(async () => {
-    if (!documentId) return;
-
-    setIsLoading(true);
-    setError(null);
-
-    const token = localStorage.getItem("accessToken");
-
-    if (!token) {
-      setError("Authentication token not found.");
-      setIsLoading(false);
-      return;
-    }
-
-    try {
-      // Use the new combined analysis endpoint - single request gets everything!
-      const analysisRes = await fetch(
-        `http://localhost:8000/api/v1/documents/${documentId}/analysis`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      if (!analysisRes.ok) {
-        const errData = await analysisRes.json();
-        throw new Error(errData.detail || "Failed to fetch document analysis.");
-      }
-
-      const analysisData = await analysisRes.json();
-
-      // Set document data
-      setDocument(analysisData.document);
-
-      // Extract segments and analysis results from the combined response
-      const segmentsWithAnalysis = analysisData.segments || [];
-      const segments: DocumentSegment[] = [];
-      const newAnalysisResults: Record<number, AnalysisResult> = {};
-
-      // Process the combined data - no more N+1 queries or 404s!
-      segmentsWithAnalysis.forEach((item: any) => {
-        segments.push(item.segment);
-        if (item.analysis_result) {
-          newAnalysisResults[item.segment.id] = item.analysis_result;
-        }
-      });
-
-      setSegments(segments);
-      setAnalysisResults(newAnalysisResults);
-
-      // Set analysis stats from the backend response
-      const stats = analysisData.stats || { analyzed: 0, failed: 0, total: 0 };
-      setAnalysisStats({
-        successful: stats.analyzed,
-        failed: stats.failed,
-        notAttempted: stats.total - stats.analyzed - stats.failed,
-      });
-
-      console.log(
-        `Analysis Statistics: ${stats.analyzed} successful, ${
-          stats.failed
-        } failed, ${stats.total - stats.analyzed - stats.failed} not attempted`
-      );
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [documentId]);
-
-  // Fetch analysis runs for this document
-  const fetchAnalysisRuns = useCallback(async () => {
-    if (!documentId) return;
-
-    setIsLoadingRuns(true);
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      setIsLoadingRuns(false);
-      return;
-    }
-
-    try {
-      // Fetch all runs
-      const runsResponse = await fetch(
-        `http://localhost:8000/api/v1/analysis/document/${documentId}/runs`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      if (runsResponse.ok) {
-        try {
-          const runsData = await runsResponse.json();
-          setAnalysisRuns(runsData.runs || []);
-        } catch {
-          setAnalysisRuns([]);
-        }
-      } else {
-        setAnalysisRuns([]);
-      }
-
-      // Fetch active run
-      try {
-        const activeResponse = await fetch(
-          `http://localhost:8000/api/v1/analysis/document/${documentId}/runs/active`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
-        );
-
-        if (activeResponse.ok) {
-          try {
-            const activeData = await activeResponse.json();
-            setActiveRun(activeData.active_run || null);
-          } catch {
-            setActiveRun(null);
-          }
-        } else {
-          setActiveRun(null);
-        }
-      } catch (activeErr) {
-        // Swallow network/server errors for the active endpoint to avoid UI crashes
-        setActiveRun(null);
-      }
-    } catch (err) {
-      console.error("Error fetching analysis runs:", err);
-    } finally {
-      setIsLoadingRuns(false);
-    }
-  }, [documentId]);
-
-  useEffect(() => {
-    fetchData();
-    fetchAnalysisRuns();
-  }, [fetchData, fetchAnalysisRuns]);
-
-  const handleRunAnalysis = async () => {
-    if (!documentId) return;
-
-    setIsAnalyzing(true);
-    setError(null);
-    setAnalysisStartTime(new Date());
-
-    const token = localStorage.getItem("accessToken");
-
-    if (!token) {
-      setError("Authentication token not found.");
-      setIsAnalyzing(false);
-      setAnalysisStartTime(null);
-      return;
-    }
-
-    try {
-      const response = await fetch(
-        `http://localhost:8000/api/v1/analysis/document/${documentId}/run`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.detail || "Failed to start analysis.");
-      }
-
-      // Start periodic polling for updates (optimized to reduce page blinking)
-      const pollInterval = setInterval(async () => {
-        try {
-          // Only check if analysis is complete, don't refetch all data every time
-          const activeRunResponse = await fetch(
-            `http://localhost:8000/api/v1/analysis/document/${documentId}/runs/active`,
-            { headers: { Authorization: `Bearer ${token}` } }
-          );
-
-          if (activeRunResponse.ok) {
-            const activeRunData = await activeRunResponse.json();
-            if (!activeRunData || activeRunData.length === 0) {
-              // No active run, analysis is complete - now fetch updated data
-              setIsAnalyzing(false);
-              setAnalysisStartTime(null);
-              clearInterval(pollInterval);
-
-              // Only fetch data when analysis is actually complete
-              await fetchData();
-              await fetchAnalysisRuns();
-            }
-          }
-        } catch (pollErr) {
-          console.error("Error polling for updates:", pollErr);
-        }
-      }, 3000); // Reduced frequency from 2s to 3s
-
-      // Stop polling after 10 minutes maximum
-      setTimeout(() => {
-        clearInterval(pollInterval);
-        setIsAnalyzing(false);
-        setAnalysisStartTime(null);
-      }, 600000);
-    } catch (err) {
-      setError((err as Error).message);
-      setIsAnalyzing(false);
-      setAnalysisStartTime(null);
-    }
-  };
-
-  const loadConsolidatedAnalysis = async (): Promise<boolean> => {
-    if (!documentId) return false;
-    const token = localStorage.getItem("accessToken");
-    if (!token) return false;
-    try {
-      const resp = await fetch(
-        `http://localhost:8000/api/v1/analysis/document/${documentId}/consolidated`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!resp.ok) return false;
-      const data = await resp.json();
-      setConsolidatedAnalysis(data);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const generateConsolidatedAnalysis = async () => {
-    if (!documentId || Object.keys(analysisResults).length === 0) return;
-
-    setIsGeneratingConsolidated(true);
-    setError(null);
-
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      setError("Authentication token not found.");
-      setIsGeneratingConsolidated(false);
-      return;
-    }
-
-    try {
-      // Collect all analysis results
-      const allAnalysisData = Object.values(analysisResults).map((result) => ({
-        segment_type: segments.find((s) => s.id === result.segment_id)
-          ?.segment_type,
-        structured_data: result.structured_data,
-      }));
-
-      const response = await fetch(
-        `http://localhost:8000/api/v1/analysis/document/${documentId}/consolidate`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ analysis_data: allAnalysisData, save: true }),
-        }
-      );
-
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(
-          errData.detail || "Failed to generate consolidated analysis."
-        );
-      }
-
-      const consolidatedData = await response.json();
-      setConsolidatedAnalysis(consolidatedData);
-      setViewMode("consolidated");
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setIsGeneratingConsolidated(false);
-    }
-  };
-
-  if (isLoading) {
-    return <div className="p-6">Loading document details...</div>;
-  }
-
-  if (error) {
-    return (
-      <div className="p-6 text-red-500 bg-red-100 rounded-lg flex items-center">
-        <AlertCircle className="mr-2" /> Error: {error}
-      </div>
-    );
-  }
-
-  if (!document) {
-    return <div className="p-6">Document not found.</div>;
+    });
   }
 
   return (
-    <div className="p-2 sm:p-4 space-y-6">
-      {/* Document Header */}
-      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight flex items-center">
-              <FileText className="mr-3 h-8 w-8 text-gray-500" />
-              {document.filename}
-            </h1>
-            <div className="flex items-center gap-4 mt-2 text-sm text-gray-600">
-              <span className="flex items-center">
-                <Tag className="mr-1.5 h-4 w-4" /> {document.document_type}
-              </span>
-              <span className="flex items-center">
-                <GitCommit className="mr-1.5 h-4 w-4" /> Version{" "}
-                {document.version}
-              </span>
-              <span className="flex items-center">
-                <Clock className="mr-1.5 h-4 w-4" /> Uploaded on{" "}
-                {new Date(document.created_at).toLocaleDateString()}
-              </span>
-              {document.file_size_kb && (
-                <span className="flex items-center">
-                  <FileText className="mr-1.5 h-4 w-4" />{" "}
-                  {document.file_size_kb} KB
-                </span>
-              )}
-            </div>
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8 print:hidden">
+      <div className="bg-white p-3 rounded-xl border border-gray-200 flex items-center gap-3 shadow-sm">
+        <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
+          <BrainCircuit className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-xs text-gray-500 font-medium uppercase">
+            Type
           </div>
-          <Badge
-            variant={document.status === "completed" ? "default" : "secondary"}
-            className={
-              document.status === "completed"
-                ? "bg-green-100 text-green-800"
-                : ""
-            }
-          >
-            Status: {document.status}
-          </Badge>
+          <div className="text-sm font-bold text-gray-900">
+            {dominantType}{" "}
+            <span className="text-xs font-normal text-gray-400">
+              ({maxVal}%)
+            </span>
+          </div>
         </div>
       </div>
-
-      {/* Composition Analysis Summary */}
-      {document.composition_analysis && (
-        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-          <h2 className="text-xl font-semibold mb-4 flex items-center">
-            <BrainCircuit className="mr-3 h-6 w-6 text-blue-600" />
-            Document Composition Analysis
-          </h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {document.composition_analysis.composition &&
-              Object.entries(document.composition_analysis.composition).map(
-                ([type, percentage]) => (
-                  <div
-                    key={type}
-                    className="text-center p-3 bg-gray-50 rounded-lg"
-                  >
-                    <div className="text-2xl font-bold text-blue-600">
-                      {percentage}%
-                    </div>
-                    <div className="text-sm text-gray-600">{type}</div>
-                  </div>
-                )
-              )}
-          </div>
-          {document.composition_analysis.confidence && (
-            <div className="mt-4 p-3 bg-blue-50 rounded-lg">
-              <div className="text-sm text-blue-800">
-                <strong>Confidence:</strong>{" "}
-                {document.composition_analysis.confidence}
-              </div>
-            </div>
-          )}
+      <div className="bg-white p-3 rounded-xl border border-gray-200 flex items-center gap-3 shadow-sm">
+        <div className="p-2 bg-purple-50 text-purple-600 rounded-lg">
+          <Sparkles className="w-5 h-5" />
         </div>
-      )}
-
-      {/* Document Segments Section */}
-      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h2 className="text-xl font-semibold flex items-center">
-              <FileCode className="mr-3 h-6 w-6 text-green-600" />
-              Document Analysis
-            </h2>
-            {segments.length > 0 && (
-              <div className="mt-2 text-sm text-gray-600">
-                {analysisStats.successful} of{" "}
-                {analysisStats.successful +
-                  analysisStats.failed +
-                  analysisStats.notAttempted}{" "}
-                segments analyzed
-                {analysisStats.failed > 0 && (
-                  <span className="text-red-600 ml-2">
-                    ({analysisStats.failed} failed)
-                  </span>
-                )}
-                {analysisStats.notAttempted > 0 && (
-                  <span className="text-gray-500 ml-2">
-                    ({analysisStats.notAttempted} not attempted)
-                  </span>
-                )}
-              </div>
-            )}
-            {document?.composition_analysis?.composition && (
-              <div className="mt-2 text-xs text-gray-500">
-                Document composition:{" "}
-                {Object.entries(document.composition_analysis.composition)
-                  .filter(([_, percentage]) => percentage > 0)
-                  .map(([type, percentage]) => `${type}: ${percentage}%`)
-                  .join(", ")}
-              </div>
-            )}
+        <div>
+          <div className="text-xs text-gray-500 font-medium uppercase">
+            Insights
           </div>
-          <div className="flex items-center space-x-3">
-            {Object.keys(analysisResults).length > 0 && (
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant={viewMode === "separated" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setViewMode("separated")}
-                >
-                  <FileCode className="mr-2 h-4 w-4" />
-                  Separated View
-                </Button>
-                <Button
-                  variant={viewMode === "consolidated" ? "default" : "outline"}
-                  size="sm"
-                  onClick={async () => {
-                    // Try loading saved consolidated first; if not found, generate and save
-                    const loaded = await loadConsolidatedAnalysis();
-                    if (!loaded) {
-                      await generateConsolidatedAnalysis();
-                    } else {
-                      setViewMode("consolidated");
-                    }
-                  }}
-                  disabled={isGeneratingConsolidated}
-                >
-                  <BrainCircuit className="mr-2 h-4 w-4" />
-                  {isGeneratingConsolidated
-                    ? "Generating..."
-                    : "Consolidated View"}
-                </Button>
-              </div>
-            )}
-            <Button
-              onClick={handleRunAnalysis}
-              disabled={isAnalyzing}
-              className="bg-blue-600 hover:bg-blue-700"
-            >
-              {isAnalyzing ? (
-                <div className="flex items-center">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Processing...
+          <div className="text-sm font-bold text-gray-900">
+            {insightsCount}{" "}
+            <span className="text-xs font-normal text-gray-400">Points</span>
+          </div>
+        </div>
+      </div>
+      <div className="bg-white p-3 rounded-xl border border-gray-200 flex items-center gap-3 shadow-sm">
+        <div className="p-2 bg-green-50 text-green-600 rounded-lg">
+          <Activity className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-xs text-gray-500 font-medium uppercase">
+            Coverage
+          </div>
+          <div className="text-sm font-bold text-gray-900">
+            {coverage}%{" "}
+            <span className="text-xs font-normal text-gray-400">
+              ({analyzedCount}/{totalCount})
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="bg-white p-3 rounded-xl border border-gray-200 flex items-center gap-3 shadow-sm">
+        <div className="p-2 bg-orange-50 text-orange-600 rounded-lg">
+          <ShieldAlert className="w-5 h-5" />
+        </div>
+        <div>
+          <div className="text-xs text-gray-500 font-medium uppercase">
+            Risk Scan
+          </div>
+          <div className="text-sm font-bold text-gray-900">
+            Pass{" "}
+            <span className="text-xs font-normal text-gray-400">(Auto)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// F. Narrative Section & Report (The Human Readability Layer)
+const NarrativeSection = ({
+  title,
+  data,
+  type,
+}: {
+  title: string;
+  data: any;
+  type: "list" | "text" | "risk" | "kv";
+}) => {
+  if (!data) return null;
+  const cleanKey = (k: string) =>
+    k.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
+
+  return (
+    <div className="mb-8 break-inside-avoid">
+      <h3 className="text-lg font-bold text-gray-800 mb-3 border-b border-gray-100 pb-2 flex items-center gap-2">
+        {type === "risk" && <AlertTriangle className="w-5 h-5 text-red-500" />}
+        {type === "list" && <List className="w-5 h-5 text-blue-500" />}
+        {type === "kv" && <Target className="w-5 h-5 text-purple-500" />}
+        {title}
+      </h3>
+      <div className="text-sm text-gray-600 leading-relaxed">
+        {type === "text" && <p>{String(data)}</p>}
+        {type === "list" && Array.isArray(data) && (
+          <ul className="space-y-2">
+            {data.map((item: any, i: number) => (
+              <li key={i} className="flex items-start gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 flex-shrink-0" />
+                <span>
+                  {typeof item === "object" ? JSON.stringify(item) : item}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {type === "risk" && Array.isArray(data) && (
+          <div className="grid gap-3">
+            {data.map((item: any, i: number) => (
+              <div
+                key={i}
+                className="bg-red-50 border border-red-100 p-3 rounded-lg text-red-800 flex gap-3"
+              >
+                <ShieldAlert className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  {typeof item === "object" ? JSON.stringify(item) : item}
                 </div>
-              ) : (
-                "Run Multi-Pass Analysis"
-              )}
+              </div>
+            ))}
+          </div>
+        )}
+        {type === "kv" && typeof data === "object" && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {Object.entries(data).map(([k, v], i) => (
+              <div
+                key={i}
+                className="bg-gray-50 p-3 rounded-lg border border-gray-100"
+              >
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">
+                  {cleanKey(k)}
+                </div>
+                <div className="font-medium text-gray-900">{String(v)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ExecutiveReport = ({ segments }: { segments: AnalyzedSegment[] }) => {
+  const businessReqs: any[] = [];
+  const techSpecs: any[] = [];
+  const risks: any[] = [];
+  const summaries: string[] = [];
+
+  segments.forEach((s) => {
+    const data = s.analysis_result?.structured_data;
+    if (!data) return;
+    Object.entries(data).forEach(([key, value]) => {
+      const lowerKey = key.toLowerCase();
+      if (
+        lowerKey.includes("requirement") ||
+        lowerKey.includes("business") ||
+        lowerKey.includes("feature")
+      ) {
+        if (Array.isArray(value)) businessReqs.push(...value);
+        else businessReqs.push(value);
+      } else if (
+        lowerKey.includes("risk") ||
+        lowerKey.includes("security") ||
+        lowerKey.includes("compliance")
+      ) {
+        if (Array.isArray(value)) risks.push(...value);
+        else risks.push(value);
+      } else if (
+        lowerKey.includes("summary") ||
+        lowerKey.includes("description")
+      ) {
+        summaries.push(String(value));
+      } else {
+        if (typeof value === "object") techSpecs.push({ [key]: value });
+      }
+    });
+  });
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card className="border-0 shadow-lg print:shadow-none print:border-0">
+        <CardHeader className="bg-gray-50 border-b border-gray-100 print:hidden">
+          <div className="flex justify-between items-center">
+            <div>
+              <CardTitle className="text-xl">
+                Comprehensive Analysis Report
+              </CardTitle>
+              <CardDescription>
+                Auto-generated executive summary
+              </CardDescription>
+            </div>
+            <Button onClick={handlePrint} variant="outline" className="gap-2">
+              <Printer className="w-4 h-4" /> Print / Save as PDF
             </Button>
           </div>
-        </div>
-
-        {/* Processing Status Section */}
-        {isAnalyzing && (
-          <Card className="border-blue-200 bg-blue-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center space-x-3">
-                  <div className="bg-blue-100 p-2 rounded-full">
-                    <Timer className="h-5 w-5 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold text-blue-900">
-                      Analysis in Progress
-                    </h3>
-                    <p className="text-sm text-blue-700">
-                      Multi-pass document analysis is running. This typically
-                      takes 3-5 minutes.
-                    </p>
-                  </div>
+        </CardHeader>
+        <CardContent className="p-8 md:p-12 min-h-[600px] bg-white">
+          <div className="max-w-3xl mx-auto">
+            {summaries.length > 0 && (
+              <div className="mb-10">
+                <h2 className="text-2xl font-bold text-gray-900 mb-4">
+                  Executive Summary
+                </h2>
+                <div className="prose text-gray-600">
+                  <p>{summaries[0]}</p>
                 </div>
-                <div className="text-right">
-                  <div className="text-2xl font-bold text-blue-900">
-                    {formatElapsedTime(elapsedTime)}
-                  </div>
-                  <div className="text-xs text-blue-600">Elapsed Time</div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-blue-700">
-                    Estimated completion time:
-                  </span>
-                  <span className="font-medium text-blue-900">3-5 minutes</span>
-                </div>
-
-                <div className="w-full bg-blue-200 rounded-full h-2">
-                  <div
-                    className="bg-blue-600 h-2 rounded-full transition-all duration-500"
-                    style={{
-                      width: `${progressPercentage}%`,
-                    }}
-                  ></div>
-                </div>
-
-                <div className="flex items-center justify-between text-xs text-blue-600">
-                  <span>0 min</span>
-                  <span className="flex items-center">
-                    <PlayCircle className="h-3 w-3 mr-1" />
-                    Processing segments...
-                  </span>
-                  <span>5 min</span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Analysis Runs Section */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Activity className="h-5 w-5" />
-                  Analysis Runs
-                </CardTitle>
-                <CardDescription>
-                  Track the progress and history of analysis runs for this
-                  document
-                </CardDescription>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowRunHistory(!showRunHistory)}
-                className="flex items-center gap-2"
-              >
-                <History className="h-4 w-4" />
-                {showRunHistory ? "Hide History" : "Show History"}
-                <ChevronDown
-                  className={`h-4 w-4 transition-transform ${
-                    showRunHistory ? "rotate-180" : ""
-                  }`}
-                />
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {isLoadingRuns ? (
-              <div className="flex items-center justify-center p-4">
-                <Loader2 className="h-6 w-6 animate-spin" />
-                <span className="ml-2">Loading analysis runs...</span>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {/* Active Run */}
-                {activeRun && (
-                  <div className="border rounded-lg p-4 bg-blue-50 border-blue-200">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h4 className="font-medium text-blue-900">
-                          Active Analysis
-                        </h4>
-                        <p className="text-sm text-blue-700">
-                          Run #{activeRun.id} - {activeRun.status}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm text-blue-700">
-                          {activeRun.completed_segments || 0} /{" "}
-                          {activeRun.total_segments || 0} segments
-                        </div>
-                        <div className="text-xs text-blue-600">
-                          {activeRun.progress_percentage?.toFixed(1) || 0}%
-                          complete
-                        </div>
-                      </div>
-                    </div>
-                    {activeRun.total_segments > 0 && (
-                      <div className="mt-2">
-                        <div className="w-full bg-blue-200 rounded-full h-2">
-                          <div
-                            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                            style={{
-                              width: `${activeRun.progress_percentage || 0}%`,
-                            }}
-                          ></div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Run History */}
-                {showRunHistory && analysisRuns.length > 0 && (
-                  <div>
-                    <h4 className="font-medium mb-2">Previous Runs</h4>
-                    <div className="space-y-2">
-                      {analysisRuns.slice(0, 5).map((run) => (
-                        <div
-                          key={run.id}
-                          className={`border rounded-lg p-3 ${
-                            run.status === "COMPLETED"
-                              ? "bg-green-50 border-green-200"
-                              : run.status === "FAILED"
-                              ? "bg-red-50 border-red-200"
-                              : "bg-gray-50 border-gray-200"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <span className="font-medium">Run #{run.id}</span>
-                              <span
-                                className={`ml-2 px-2 py-1 rounded text-xs ${
-                                  run.status === "COMPLETED"
-                                    ? "bg-green-100 text-green-800"
-                                    : run.status === "FAILED"
-                                    ? "bg-red-100 text-red-800"
-                                    : "bg-gray-100 text-gray-800"
-                                }`}
-                              >
-                                {run.status}
-                              </span>
-                            </div>
-                            <div className="text-sm text-gray-600">
-                              {run.completed_segments || 0} /{" "}
-                              {run.total_segments || 0} segments
-                              {run.failed_segments > 0 && (
-                                <span className="text-red-600 ml-2">
-                                  ({run.failed_segments} failed)
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          {run.error_message && (
-                            <div className="mt-2 text-sm text-red-600">
-                              Error: {run.error_message}
-                            </div>
-                          )}
-                          <div className="mt-1 text-xs text-gray-500">
-                            {run.status === "COMPLETED" && run.completed_at
-                              ? `Completed: ${new Date(
-                                  run.completed_at
-                                ).toLocaleString()}`
-                              : run.status === "RUNNING" && run.started_at
-                              ? `Started: ${new Date(
-                                  run.started_at
-                                ).toLocaleString()}`
-                              : run.status === "FAILED" && run.started_at
-                              ? `Failed: ${new Date(
-                                  run.started_at
-                                ).toLocaleString()}`
-                              : run.created_at
-                              ? `Created: ${new Date(
-                                  run.created_at
-                                ).toLocaleString()}`
-                              : "No timestamp available"}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {analysisRuns.length === 0 && !activeRun && (
-                  <div className="text-center py-4 text-gray-500">
-                    No analysis runs found. Click "Run Multi-Pass Analysis" to
-                    start.
-                  </div>
-                )}
               </div>
             )}
-          </CardContent>
-        </Card>
-
-        <div className="space-y-4">
-          {viewMode === "separated" ? (
-            // Separated View - Individual segment cards
-            segments.length > 0 ? (
-              segments.map((segment) => {
-                const hasAnalysis = analysisResults[segment.id];
-                const isLoading = loadingSegments[segment.id] || false;
-
-                // Only show segments that have successful analysis or are currently loading
-                // Hide segments that failed analysis or were not attempted
-                if (!hasAnalysis && !isLoading) {
-                  return null;
-                }
-
-                return (
-                  <SegmentAnalysisCard
-                    key={segment.id}
-                    segment={segment}
-                    analysisResult={hasAnalysis || null}
-                    isLoading={isLoading}
-                  />
-                );
-              })
-            ) : (
-              <div className="text-center py-8 text-gray-500">
-                <FileCode className="h-12 w-12 mx-auto mb-3 text-gray-400" />
-                <p>
-                  No segments have been created yet. Run the multi-pass analysis
-                  to generate document segments.
-                </p>
-              </div>
-            )
-          ) : // Consolidated View - Single unified analysis
-          consolidatedAnalysis ? (
-            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 p-8 rounded-xl border border-indigo-200 shadow-lg">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h3 className="text-2xl font-bold text-indigo-900 flex items-center mb-2">
-                    <BrainCircuit className="mr-3 h-7 w-7 text-indigo-600" />
-                    Unified Document Analysis
-                  </h3>
-                  <p className="text-indigo-700 text-sm">
-                    Complete analysis combining all document segments into a
-                    comprehensive overview
-                  </p>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <Badge
-                    variant="secondary"
-                    className="bg-indigo-100 text-indigo-800 px-3 py-1"
-                  >
-                    {Object.keys(consolidatedAnalysis).length} sections
-                  </Badge>
-                  <Badge
-                    variant="outline"
-                    className="bg-white text-indigo-700 border-indigo-300"
-                  >
-                    ✓ Complete
-                  </Badge>
+            {risks.length > 0 && (
+              <NarrativeSection
+                title="Risks & Compliance"
+                data={risks}
+                type="risk"
+              />
+            )}
+            {businessReqs.length > 0 && (
+              <NarrativeSection
+                title="Key Business Requirements"
+                data={businessReqs}
+                type="list"
+              />
+            )}
+            {techSpecs.length > 0 && (
+              <div className="mt-8 pt-8 border-t border-gray-100">
+                <h3 className="text-lg font-bold text-gray-800 mb-4">
+                  Technical Appendices
+                </h3>
+                <div className="grid grid-cols-1 gap-4">
+                  {techSpecs.slice(0, 6).map((spec, i) => (
+                    <NarrativeSection
+                      key={i}
+                      title={Object.keys(spec)[0].replace(/_/g, " ")}
+                      data={Object.values(spec)[0]}
+                      type="kv"
+                    />
+                  ))}
                 </div>
               </div>
-
-              <div className="max-h-96 overflow-y-auto">
-                {renderStructuredData(consolidatedAnalysis)}
+            )}
+            {summaries.length === 0 && businessReqs.length === 0 && (
+              <div className="text-center py-12 text-gray-400">
+                <FileText className="w-12 h-12 mx-auto mb-4 opacity-20" />
+                <p>No structured insights extracted yet.</p>
               </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+// G. Segment Card (Technical View)
+const SegmentCard = ({
+  item,
+  index,
+}: {
+  item: AnalyzedSegment;
+  index: number;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const { segment, analysis_result } = item;
+
+  const renderRawData = (data: any) => {
+    if (typeof data !== "object" || data === null) return String(data);
+    return (
+      <ul className="pl-4 border-l border-gray-200 space-y-1 mt-1">
+        {Object.entries(data).map(([k, v], i) => (
+          <li key={i} className="text-xs font-mono">
+            <span className="text-blue-600">{k}:</span>{" "}
+            <span className="text-gray-600">
+              {typeof v === "object" ? renderRawData(v) : String(v)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    );
+  };
+
+  const getIcon = (type: string) => {
+    switch (type) {
+      case "BRD":
+        return BookOpen;
+      case "SRS":
+        return FileCode;
+      case "API_DOCS":
+        return Database;
+      default:
+        return HelpCircle;
+    }
+  };
+  const Icon = getIcon(segment.segment_type);
+
+  return (
+    <Collapsible
+      open={isOpen}
+      onOpenChange={setIsOpen}
+      className="border rounded-xl bg-white overflow-hidden"
+    >
+      <CollapsibleTrigger className="w-full flex items-center justify-between p-4 bg-gray-50/50 hover:bg-gray-100 text-left">
+        <div className="flex items-center gap-4">
+          <div className="p-2 bg-white rounded border">
+            <Icon className="w-4 h-4 text-gray-500" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="bg-white">
+                {segment.segment_type}
+              </Badge>
+              <span className="text-xs font-mono text-gray-400">
+                Seg #{index + 1}
+              </span>
             </div>
+          </div>
+          {analysis_result ? (
+            <span className="text-xs text-green-600 font-medium flex items-center">
+              <CheckCircle className="w-3 h-3 mr-1" /> Analyzed
+            </span>
           ) : (
-            <div className="text-center py-12 bg-gradient-to-br from-gray-50 to-blue-50 rounded-xl border border-gray-200">
-              <div className="bg-blue-100 rounded-full p-4 w-20 h-20 mx-auto mb-6 flex items-center justify-center">
-                <BrainCircuit className="h-10 w-10 text-blue-600" />
-              </div>
-              <h4 className="text-xl font-bold text-gray-900 mb-3">
-                Consolidated View Ready
-              </h4>
-              <p className="text-gray-600 mb-4 max-w-md mx-auto">
-                Generate a unified analysis that combines insights from all
-                analyzed document segments into a comprehensive overview.
-              </p>
-              <div className="flex items-center justify-center space-x-2 text-sm text-blue-600">
-                <CheckCircle className="h-4 w-4" />
-                <span>All segments analyzed and ready for consolidation</span>
-              </div>
-            </div>
+            <span className="text-xs text-gray-400 flex items-center">
+              <Clock className="w-3 h-3 mr-1" /> Pending
+            </span>
           )}
         </div>
-      </div>
+        <ChevronDown
+          className={`w-4 h-4 text-gray-400 transition-transform ${
+            isOpen ? "rotate-180" : ""
+          }`}
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="p-6 border-t border-gray-100">
+        {analysis_result ? (
+          <div className="overflow-x-auto">
+            {renderRawData(analysis_result.structured_data)}
+            <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end gap-2">
+              <Button variant="outline" size="sm" className="h-8 text-xs">
+                <Download className="w-3 h-3 mr-2" /> Export JSON
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center text-gray-400 italic">
+            Data pending...
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
 
-      {/* Raw Text Section */}
-      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-        <h2 className="text-xl font-semibold mb-4">Raw Document Text</h2>
-        <div className="prose max-w-none bg-gray-50 p-4 rounded-md h-96 overflow-y-auto border">
-          <pre className="whitespace-pre-wrap break-words text-sm">
-            {document.raw_text ||
-              "No content was extracted, or parsing is still in progress."}
-          </pre>
+// --- 4. Main Page Logic ---
+export default function DocumentDetailPage() {
+  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [doc, setDoc] = useState<Document | null>(null);
+  const [segments, setSegments] = useState<AnalyzedSegment[]>([]);
+  const [isLive, setIsLive] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const parts = window.location.pathname.split("/");
+      setDocumentId(parts[parts.length - 1]);
+    }
+  }, []);
+
+  const fetchFullAnalysis = useCallback(async () => {
+    if (!documentId) return;
+    const token = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/v1/documents/${documentId}/analysis`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setDoc(data.document);
+        setSegments(data.segments || []);
+        if (ACTIVE_STATES.includes(data.document.status)) setIsLive(true);
+        else setIsLive(false);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  }, [documentId]);
+
+  useEffect(() => {
+    fetchFullAnalysis();
+  }, [fetchFullAnalysis]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isLive && documentId) {
+      interval = setInterval(async () => {
+        const token = localStorage.getItem("accessToken");
+        try {
+          const res = await fetch(
+            `http://localhost:8000/api/v1/documents/${documentId}/status`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (res.ok) {
+            const statusData = await res.json();
+            setDoc((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: statusData.status,
+                    progress: statusData.progress,
+                    error_message: statusData.error_message,
+                  }
+                : null
+            );
+            if (!ACTIVE_STATES.includes(statusData.status)) {
+              setIsLive(false);
+              fetchFullAnalysis();
+            }
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }, 3000);
+    }
+    return () => clearInterval(interval);
+  }, [isLive, documentId, fetchFullAnalysis]);
+
+  const handleRunAnalysis = async () => {
+    if (!documentId) return;
+    const token = localStorage.getItem("accessToken");
+    setIsLive(true);
+    setDoc((prev) =>
+      prev ? { ...prev, status: "processing", progress: 0 } : null
+    );
+    await fetch(
+      `http://localhost:8000/api/v1/documents/${documentId}/analyze`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } }
+    );
+  };
+
+  const handleStopAnalysis = async () => {
+    if (!documentId) return;
+    const token = localStorage.getItem("accessToken");
+    try {
+      await fetch(`http://localhost:8000/api/v1/documents/${documentId}/stop`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setDoc((prev) => (prev ? { ...prev, status: "stopping" } : null));
+    } catch (e) {
+      alert("Failed to stop");
+    }
+  };
+
+  if (loading)
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <Loader2 className="w-10 h-10 animate-spin text-blue-600" />
+      </div>
+    );
+  if (!doc) return <div className="p-8 text-center">Document not found</div>;
+
+  return (
+    <div className="min-h-screen bg-gray-50/30 p-6 max-w-7xl mx-auto space-y-8">
+      <div className="flex items-center justify-between print:hidden">
+        <div className="flex items-center gap-4">
+          <div className="p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
+            <FileText className="w-8 h-8 text-blue-600" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">{doc.filename}</h1>
+            <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
+              <Badge variant="outline">{doc.document_type}</Badge>
+              <span className="flex items-center">
+                <GitCommit className="w-3 h-3 mr-1" /> v{doc.version}
+              </span>
+              <span className="flex items-center">
+                <Clock className="w-3 h-3 mr-1" />{" "}
+                {new Date(doc.created_at).toLocaleDateString()}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div>
+          {!isLive && (
+            <Button
+              onClick={handleRunAnalysis}
+              className="bg-blue-600 hover:bg-blue-700 shadow-md"
+            >
+              {doc.status === "completed" ? (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              ) : (
+                <PlayCircle className="w-4 h-4 mr-2" />
+              )}
+              {doc.status === "completed"
+                ? "Re-Run Analysis"
+                : "Start Analysis"}
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            className="text-gray-500 ml-2"
+            onClick={() => window.history.back()}
+          >
+            <ArrowRight className="w-4 h-4 mr-2" /> Back
+          </Button>
         </div>
       </div>
+
+      <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
+
+      <Tabs defaultValue="executive" className="space-y-6">
+        <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
+          <TabsTrigger
+            value="executive"
+            className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6"
+          >
+            <LayoutDashboard className="w-4 h-4 mr-2" /> Executive Summary
+          </TabsTrigger>
+          <TabsTrigger
+            value="technical"
+            className="data-[state=active]:bg-gray-100 h-10 px-6"
+          >
+            <Database className="w-4 h-4 mr-2" /> Technical Details
+          </TabsTrigger>
+          <TabsTrigger
+            value="raw"
+            className="data-[state=active]:bg-gray-100 h-10 px-6"
+          >
+            <FileCode className="w-4 h-4 mr-2" /> Raw Text
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="executive">
+          <VitalSignsBar
+            segments={segments}
+            composition={doc.composition_analysis}
+          />
+          <ExecutiveReport segments={segments} />
+        </TabsContent>
+
+        <TabsContent value="technical">
+          <Card className="border-gray-200 shadow-sm">
+            <CardHeader>
+              <CardTitle className="flex items-center">
+                <List className="w-5 h-5 mr-2" /> Segment Analysis Breakdown
+              </CardTitle>
+              <CardDescription>
+                Detailed view of all {segments.length} identified document
+                segments.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {segments.length > 0 ? (
+                segments.map((item, idx) => (
+                  <SegmentCard key={idx} index={idx} item={item} />
+                ))
+              ) : (
+                <div className="text-center py-12 text-gray-400 border-2 border-dashed rounded-xl">
+                  No segments found. Run analysis to populate this list.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="raw">
+          <div className="bg-slate-900 text-slate-300 p-6 rounded-xl font-mono text-xs h-96 overflow-y-auto shadow-inner">
+            {doc.raw_text || "No text extracted."}
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

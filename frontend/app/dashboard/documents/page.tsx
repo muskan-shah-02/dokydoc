@@ -1,7 +1,3 @@
-/*
-  This is the complete and corrected content for your file at:
-  frontend/app/dashboard/documents/page.tsx
-*/
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
@@ -32,6 +28,11 @@ import {
   AlertCircle,
   Link as LinkIcon,
   Unlink,
+  Loader2,
+  CheckCircle,
+  XCircle,
+  Download,
+  Trash2,
 } from "lucide-react";
 
 // --- Interface Definitions ---
@@ -43,6 +44,7 @@ interface Document {
   created_at: string;
   status: string;
   progress: number;
+  error_message?: string | null;
   link_count?: number;
 }
 
@@ -53,12 +55,38 @@ interface CodeComponent {
   version: string;
 }
 
+// --- Helper: Format Status Text ---
+const formatStatus = (status: string) => {
+  switch (status) {
+    case "uploaded":
+      return "Queued";
+    case "processing":
+      return "Starting...";
+    case "parsing":
+      return "Extracting Text...";
+    case "analyzing":
+      return "AI Analysis...";
+    case "pass_1_composition":
+      return "Classifying...";
+    case "pass_2_segmenting":
+      return "Segmenting...";
+    case "pass_3_extraction":
+      return "Extracting Data...";
+    case "completed":
+      return "Completed";
+    default:
+      return status;
+  }
+};
+
 // --- Upload Dialog Component ---
 const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [version, setVersion] = useState("");
   const [documentType, setDocumentType] = useState("BRD");
-  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStep, setUploadStep] = useState<
+    "idle" | "uploading" | "triggering" | "done"
+  >("idle");
   const [error, setError] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -68,20 +96,24 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
     }
   };
 
-  const handleUpload = async () => {
+  const handleUploadAndAnalyze = async () => {
     if (!selectedFile || !version || !documentType) {
       setError("All fields are required.");
       return;
     }
-    setIsUploading(true);
-    setError(null);
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-    formData.append("version", version);
-    formData.append("document_type", documentType);
+
     const token = localStorage.getItem("accessToken");
+    setError(null);
+
     try {
-      const response = await fetch(
+      // --- Step 1: Upload ---
+      setUploadStep("uploading");
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      formData.append("version", version);
+      formData.append("document_type", documentType);
+
+      const uploadRes = await fetch(
         "http://localhost:8000/api/v1/documents/upload",
         {
           method: "POST",
@@ -89,19 +121,42 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
           body: formData,
         }
       );
-      if (!response.ok) {
-        const errData = await response.json();
+
+      if (!uploadRes.ok) {
+        const errData = await uploadRes.json();
         throw new Error(errData.detail || "Upload failed");
       }
+
+      const docData = await uploadRes.json();
+
+      // --- Step 2: Trigger Analysis ---
+      setUploadStep("triggering");
+      const analyzeRes = await fetch(
+        `http://localhost:8000/api/v1/documents/${docData.id}/analyze`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!analyzeRes.ok) {
+        console.error("Failed to trigger analysis automatically");
+      }
+
+      // Success
+      setUploadStep("done");
       onUploadSuccess();
-      setIsOpen(false);
-      setSelectedFile(null);
-      setVersion("");
-      setDocumentType("BRD");
+
+      // Reset form after a short delay
+      setTimeout(() => {
+        setIsOpen(false);
+        setUploadStep("idle");
+        setSelectedFile(null);
+        setVersion("");
+      }, 1000);
     } catch (err) {
       setError((err as Error).message);
-    } finally {
-      setIsUploading(false);
+      setUploadStep("idle");
     }
   };
 
@@ -116,14 +171,18 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
         <DialogHeader>
           <DialogTitle>Upload New Document</DialogTitle>
           <DialogDescription>
-            Select a file and provide its metadata. Click upload when you're
-            done.
+            Select a file to upload. Analysis will start automatically.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid w-full max-w-sm items-center gap-1.5">
             <Label htmlFor="file">Document File</Label>
-            <Input id="file" type="file" onChange={handleFileChange} />
+            <Input
+              id="file"
+              type="file"
+              onChange={handleFileChange}
+              disabled={uploadStep !== "idle"}
+            />
           </div>
           <div className="grid w-full max-w-sm items-center gap-1.5">
             <Label htmlFor="version">Version</Label>
@@ -132,6 +191,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
               value={version}
               onChange={(e) => setVersion(e.target.value)}
               placeholder="e.g., v1.0"
+              disabled={uploadStep !== "idle"}
             />
           </div>
           <div className="grid w-full max-w-sm items-center gap-1.5">
@@ -141,6 +201,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
               value={documentType}
               onChange={(e) => setDocumentType(e.target.value)}
               className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm"
+              disabled={uploadStep !== "idle"}
             >
               <option value="BRD">BRD</option>
               <option value="SRS">SRS</option>
@@ -151,8 +212,26 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
           {error && <p className="text-red-500 text-sm">{error}</p>}
         </div>
         <DialogFooter>
-          <Button onClick={handleUpload} disabled={isUploading}>
-            {isUploading ? "Uploading..." : "Upload"}
+          <Button
+            onClick={handleUploadAndAnalyze}
+            disabled={uploadStep !== "idle"}
+          >
+            {uploadStep === "idle" && "Upload & Analyze"}
+            {uploadStep === "uploading" && (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Uploading...
+              </>
+            )}
+            {uploadStep === "triggering" && (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Starting AI...
+              </>
+            )}
+            {uploadStep === "done" && (
+              <>
+                <CheckCircle className="mr-2 h-4 w-4" /> Done!
+              </>
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -186,7 +265,9 @@ const ManageLinksDialog = ({
     try {
       const componentsRes = await fetch(
         "http://localhost:8000/api/v1/code-components/",
-        { headers: { Authorization: `Bearer ${token}` } }
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
       );
       if (!componentsRes.ok)
         throw new Error("Failed to fetch code components.");
@@ -195,7 +276,9 @@ const ManageLinksDialog = ({
 
       const linkedRes = await fetch(
         `http://localhost:8000/api/v1/links/document/${document.id}`,
-        { headers: { Authorization: `Bearer ${token}` } }
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
       );
       if (!linkedRes.ok) throw new Error("Failed to fetch existing links.");
       const linkedComps: CodeComponent[] = await linkedRes.json();
@@ -244,7 +327,7 @@ const ManageLinksDialog = ({
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm">
-          <LinkIcon className="mr-2 h-4 w-4" /> Manage Links (
+          <LinkIcon className="mr-2 h-4 w-4" /> Link Code (
           {document.link_count || 0})
         </Button>
       </DialogTrigger>
@@ -296,7 +379,7 @@ const ManageLinksDialog = ({
   );
 };
 
-// --- Document Status Cell Component ---
+// --- Document Status Cell Component (With Live Polling) ---
 const DocumentStatusCell = ({
   doc,
   onUpdate,
@@ -306,9 +389,21 @@ const DocumentStatusCell = ({
 }) => {
   const [status, setStatus] = useState(doc.status);
   const [progress, setProgress] = useState(doc.progress);
+  const [errorMessage, setErrorMessage] = useState(doc.error_message);
 
   useEffect(() => {
-    if (status === "processing") {
+    // Define active states that require polling
+    const activeStates = [
+      "uploaded",
+      "processing",
+      "parsing",
+      "analyzing",
+      "pass_1_composition",
+      "pass_2_segmenting",
+      "pass_3_extraction",
+    ];
+
+    if (activeStates.includes(status)) {
       const intervalId = setInterval(async () => {
         const token = localStorage.getItem("accessToken");
         try {
@@ -316,38 +411,73 @@ const DocumentStatusCell = ({
             `http://localhost:8000/api/v1/documents/${doc.id}/status`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
-          if (!response.ok) {
-            clearInterval(intervalId);
-            setStatus("failed");
-            return;
-          }
+
+          if (!response.ok) return; // Skip this poll if error
+
           const data = await response.json();
-          setProgress(data.progress);
-          setStatus(data.status);
-          if (data.status === "completed" || data.status === "failed") {
+
+          // Only update if something changed
+          if (data.status !== status || data.progress !== progress) {
+            setStatus(data.status);
+            setProgress(data.progress);
+            setErrorMessage(data.error_message);
+
+            if (data.status === "completed" || data.status.includes("failed")) {
+              onUpdate({
+                ...doc,
+                status: data.status,
+                progress: data.progress,
+                error_message: data.error_message,
+              });
+            }
+          }
+
+          // Stop polling if done or failed
+          if (data.status === "completed" || data.status.includes("failed")) {
             clearInterval(intervalId);
-            onUpdate({ ...doc, status: data.status, progress: data.progress });
           }
         } catch (error) {
           console.error("Polling error:", error);
-          clearInterval(intervalId);
-          setStatus("failed");
         }
-      }, 2000);
+      }, 3000); // Poll every 3 seconds
+
       return () => clearInterval(intervalId);
     }
-  }, [status, doc.id, onUpdate, doc]);
+  }, [status, doc.id, onUpdate, doc, progress]);
 
   if (status === "completed") {
-    return <span className="text-green-600 font-medium">Completed</span>;
+    return (
+      <span className="flex items-center text-green-600 font-medium">
+        <CheckCircle className="w-4 h-4 mr-1" /> Completed
+      </span>
+    );
   }
-  if (status === "failed") {
-    return <span className="text-red-600 font-medium">Failed</span>;
+
+  if (status.includes("failed") || status.includes("error")) {
+    return (
+      <div className="flex flex-col">
+        <span className="flex items-center text-red-600 font-medium">
+          <XCircle className="w-4 h-4 mr-1" /> Failed
+        </span>
+        {errorMessage && (
+          <span
+            className="text-xs text-red-500 max-w-[150px] truncate"
+            title={errorMessage}
+          >
+            {errorMessage}
+          </span>
+        )}
+      </div>
+    );
   }
+
   return (
-    <div className="flex items-center gap-2">
-      <Progress value={progress} className="w-24" />
-      <span className="text-sm text-gray-500">{progress}%</span>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+        <span>{formatStatus(status)}</span>
+        <span>{progress}%</span>
+      </div>
+      <Progress value={progress} className="w-24 h-2" />
     </div>
   );
 };
@@ -357,6 +487,7 @@ export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const fetchDocuments = useCallback(async () => {
     setIsLoading(true);
@@ -376,6 +507,8 @@ export default function DocumentsPage() {
         throw new Error(errData.detail || "Failed to fetch documents.");
       }
       const data: Document[] = await response.json();
+
+      // Fetch link counts
       const documentsWithLinkCounts = await Promise.all(
         data.map(async (doc) => {
           try {
@@ -391,6 +524,12 @@ export default function DocumentsPage() {
             return { ...doc, link_count: 0 };
           }
         })
+      );
+
+      // Sort by newest first
+      documentsWithLinkCounts.sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
       setDocuments(documentsWithLinkCounts);
     } catch (err) {
@@ -410,6 +549,60 @@ export default function DocumentsPage() {
     );
   };
 
+  // Helper for download
+  const handleDownload = (docId: number, filename: string) => {
+    const token = localStorage.getItem("accessToken");
+    fetch(`http://localhost:8000/api/v1/documents/${docId}/download`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((response) => response.blob())
+      .then((blob) => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      })
+      .catch((err) => console.error("Download failed", err));
+  };
+
+  // --- Delete Handler ---
+  const handleDelete = async (id: number, filename: string) => {
+    if (
+      !confirm(
+        `Are you sure you want to delete "${filename}"? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingId(id);
+    const token = localStorage.getItem("accessToken");
+
+    try {
+      const response = await fetch(
+        `http://localhost:8000/api/v1/documents/${id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to delete document");
+      }
+
+      // Remove from UI immediately
+      setDocuments((docs) => docs.filter((d) => d.id !== id));
+    } catch (err) {
+      alert("Error deleting document: " + (err as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return (
     <div className="p-2 sm:p-4">
       <div className="flex items-center justify-between mb-6">
@@ -419,9 +612,14 @@ export default function DocumentsPage() {
         <UploadDialog onUploadSuccess={fetchDocuments} />
       </div>
 
-      {isLoading && <p className="text-center p-10">Loading documents...</p>}
+      {isLoading && (
+        <div className="flex justify-center p-10">
+          <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+        </div>
+      )}
+
       {error && (
-        <div className="text-red-500 bg-red-100 p-4 rounded-lg flex items-center">
+        <div className="text-red-500 bg-red-100 p-4 rounded-lg flex items-center mb-4">
           <AlertCircle className="mr-2" /> Error: {error}
         </div>
       )}
@@ -443,15 +641,29 @@ export default function DocumentsPage() {
                 documents.map((doc) => (
                   <TableRow key={doc.id}>
                     <TableCell className="font-medium">
-                      <a
-                        href={`/dashboard/documents/${doc.id}`}
-                        className="flex items-center text-blue-600 hover:underline"
-                      >
-                        <FileText className="h-4 w-4 mr-2 text-gray-500" />
-                        {doc.filename}
-                      </a>
+                      <div className="flex items-center">
+                        <FileText className="h-4 w-4 mr-2 text-blue-500" />
+                        <a
+                          href={`/dashboard/documents/${doc.id}`}
+                          className="text-blue-600 hover:underline font-semibold"
+                        >
+                          {doc.filename}
+                        </a>
+                        {/* Download Button */}
+                        <button
+                          onClick={() => handleDownload(doc.id, doc.filename)}
+                          className="ml-2 text-gray-400 hover:text-gray-700"
+                          title="Download Original"
+                        >
+                          <Download className="h-3 w-3" />
+                        </button>
+                      </div>
                     </TableCell>
-                    <TableCell>{doc.document_type}</TableCell>
+                    <TableCell>
+                      <span className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80">
+                        {doc.document_type}
+                      </span>
+                    </TableCell>
                     <TableCell>{doc.version}</TableCell>
                     <TableCell>
                       <DocumentStatusCell
@@ -460,16 +672,37 @@ export default function DocumentsPage() {
                       />
                     </TableCell>
                     <TableCell className="text-right">
-                      <ManageLinksDialog
-                        document={doc}
-                        onLinksChanged={fetchDocuments}
-                      />
+                      <div className="flex justify-end items-center gap-2">
+                        <ManageLinksDialog
+                          document={doc}
+                          onLinksChanged={fetchDocuments}
+                        />
+
+                        {/* Delete Button */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => handleDelete(doc.id, doc.filename)}
+                          disabled={deletingId === doc.id}
+                          title="Delete Document"
+                        >
+                          {deletingId === doc.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center h-24">
+                  <TableCell
+                    colSpan={5}
+                    className="text-center h-24 text-muted-foreground"
+                  >
                     No documents found. Upload your first document to get
                     started.
                   </TableCell>

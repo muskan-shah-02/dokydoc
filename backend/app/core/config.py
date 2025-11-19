@@ -45,8 +45,8 @@ class Settings(BaseSettings):
 
     # --- AI Service Settings ---
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
-    GEMINI_MODEL: str = Field(default="gemini-2.5-pro", env="GEMINI_MODEL")
-    GEMINI_VISION_MODEL: str = Field(default="gemini-2.5-pro", env="GEMINI_VISION_MODEL")
+    GEMINI_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL")
+    GEMINI_VISION_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_VISION_MODEL")
     GEMINI_MAX_RETRIES: int = Field(default=3, env="GEMINI_MAX_RETRIES")
     GEMINI_TIMEOUT: int = Field(default=60, env="GEMINI_TIMEOUT")
     
