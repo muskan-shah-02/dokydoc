@@ -12,6 +12,7 @@ class DocumentCodeLink(Base):
     __tablename__ = "document_code_links"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
 
     document_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id"), nullable=False)
     code_component_id: Mapped[int] = mapped_column(Integer, ForeignKey("code_components.id"), nullable=False)

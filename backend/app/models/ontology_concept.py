@@ -15,6 +15,7 @@ class OntologyConcept(Base):
     __tablename__ = "ontology_concepts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     concept_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., "FEATURE", "TECHNOLOGY", "PROCESS"
     description: Mapped[str] = mapped_column(Text, nullable=True)

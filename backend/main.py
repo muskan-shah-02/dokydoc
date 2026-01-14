@@ -13,8 +13,8 @@ from app.core.logging import logger, setup_logging
 from app.core.exceptions import DokyDocException, handle_dokydoc_exception, create_error_response
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
-    login, dashboard, documents, code_components, 
-    document_code_links, analysis_results, validation
+    login, dashboard, documents, code_components,
+    document_code_links, analysis_results, validation, billing
 )
 
 # Setup logging
@@ -249,9 +249,15 @@ app.include_router(
 )
 
 app.include_router(
-    validation.router, 
-    prefix=f"/api/{settings.API_VERSION}/validation", 
+    validation.router,
+    prefix=f"/api/{settings.API_VERSION}/validation",
     tags=["Validation"]
+)
+
+app.include_router(
+    billing.router,
+    prefix=f"/api/{settings.API_VERSION}/billing",
+    tags=["Billing"]
 )
 
 # --- Startup Event (Legacy support) ---

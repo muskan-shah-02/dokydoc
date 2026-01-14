@@ -15,6 +15,7 @@ class OntologyRelationship(Base):
     __tablename__ = "ontology_relationships"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     source_concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("ontology_concepts.id"), nullable=False)
     target_concept_id: Mapped[int] = mapped_column(Integer, ForeignKey("ontology_concepts.id"), nullable=False)
     relationship_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., "implements", "depends_on", "conflicts_with"

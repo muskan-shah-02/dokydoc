@@ -12,11 +12,51 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
     def __init__(self, model: Type[ModelType]):
         self.model = model
 
-    def get(self, db: Session, id: Any) -> Optional[ModelType]:
-        return db.query(self.model).filter(self.model.id == id).first()
+    def _has_tenant_id(self) -> bool:
+        """Check if model has tenant_id column for multi-tenancy support."""
+        return hasattr(self.model, 'tenant_id')
 
-    def get_multi(self, db: Session, *, skip: int = 0, limit: int = 100) -> List[ModelType]:
-        return db.query(self.model).offset(skip).limit(limit).all()
+    def get(self, db: Session, id: Any, *, tenant_id: Optional[int] = None) -> Optional[ModelType]:
+        """
+        Get a single record by ID, optionally filtered by tenant_id.
+
+        Args:
+            db: Database session
+            id: Record ID
+            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+        """
+        query = db.query(self.model).filter(self.model.id == id)
+
+        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
+        if tenant_id is not None and self._has_tenant_id():
+            query = query.filter(self.model.tenant_id == tenant_id)
+
+        return query.first()
+
+    def get_multi(
+        self,
+        db: Session,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        tenant_id: Optional[int] = None
+    ) -> List[ModelType]:
+        """
+        Get multiple records with pagination, optionally filtered by tenant_id.
+
+        Args:
+            db: Database session
+            skip: Number of records to skip (pagination offset)
+            limit: Maximum number of records to return
+            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+        """
+        query = db.query(self.model)
+
+        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
+        if tenant_id is not None and self._has_tenant_id():
+            query = query.filter(self.model.tenant_id == tenant_id)
+
+        return query.offset(skip).limit(limit).all()
 
     def create(self, db: Session, *, obj_in: CreateSchemaType) -> ModelType:
         obj_in_data = obj_in.model_dump()
@@ -64,7 +104,27 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         db.commit()
         return obj
     
-    def get_multi_by_ids(self, db: Session, *, ids: List[int]) -> List[ModelType]:
-        return db.query(self.model).filter(self.model.id.in_(ids)).all()
+    def get_multi_by_ids(
+        self,
+        db: Session,
+        *,
+        ids: List[int],
+        tenant_id: Optional[int] = None
+    ) -> List[ModelType]:
+        """
+        Get multiple records by IDs, optionally filtered by tenant_id.
+
+        Args:
+            db: Database session
+            ids: List of record IDs to fetch
+            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+        """
+        query = db.query(self.model).filter(self.model.id.in_(ids))
+
+        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
+        if tenant_id is not None and self._has_tenant_id():
+            query = query.filter(self.model.tenant_id == tenant_id)
+
+        return query.all()
     
     

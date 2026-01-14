@@ -17,7 +17,8 @@ class CodeComponent(Base):
     __tablename__ = "code_components"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
+
     # A user-friendly name for the component
     name: Mapped[str] = mapped_column(String, index=True, nullable=False)
     

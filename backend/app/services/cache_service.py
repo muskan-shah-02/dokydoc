@@ -16,13 +16,13 @@ logger = get_logger("cache_service")
 
 class CacheService:
     """
-    Content-based caching service using Redis.
+    Content-based caching service using Redis with multi-tenancy support.
 
     Cache Key Strategy:
-        analysis:{content_hash}:{prompt_type}
+        analysis:{tenant_id}:{content_hash}:{prompt_type}
 
     Example:
-        "analysis:8f7d9a2c3e5b...:code_analysis"
+        "analysis:1:8f7d9a2c3e5b...:code_analysis"
     """
 
     def __init__(self):
@@ -53,14 +53,15 @@ class CacheService:
         """
         return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]  # First 16 chars
 
-    def _build_cache_key(self, content_hash: str, analysis_type: str) -> str:
-        """Build cache key from content hash and analysis type."""
-        return f"analysis:{content_hash}:{analysis_type}"
+    def _build_cache_key(self, content_hash: str, analysis_type: str, tenant_id: int = 1) -> str:
+        """Build cache key from content hash, analysis type, and tenant ID for isolation."""
+        return f"analysis:{tenant_id}:{content_hash}:{analysis_type}"
 
     def get_cached_analysis(
         self,
         content: str,
-        analysis_type: str
+        analysis_type: str,
+        tenant_id: int = 1
     ) -> Optional[dict]:
         """
         Retrieve cached analysis result if exists.
@@ -68,6 +69,7 @@ class CacheService:
         Args:
             content: The text content being analyzed
             analysis_type: Type of analysis (e.g., "code_analysis", "document_segmentation")
+            tenant_id: Tenant ID for multi-tenancy isolation (default: 1)
 
         Returns:
             Cached result dict or None if cache miss
@@ -77,7 +79,7 @@ class CacheService:
 
         try:
             content_hash = self.generate_content_hash(content)
-            cache_key = self._build_cache_key(content_hash, analysis_type)
+            cache_key = self._build_cache_key(content_hash, analysis_type, tenant_id)
 
             cached_data = self.redis_client.get(cache_key)
 
@@ -97,7 +99,8 @@ class CacheService:
         content: str,
         analysis_type: str,
         result: dict,
-        ttl_seconds: int = 2592000  # 30 days default
+        ttl_seconds: int = 2592000,  # 30 days default
+        tenant_id: int = 1
     ) -> bool:
         """
         Cache analysis result with TTL.
@@ -107,6 +110,7 @@ class CacheService:
             analysis_type: Type of analysis
             result: Analysis result to cache (must be JSON-serializable)
             ttl_seconds: Time to live in seconds (default: 30 days)
+            tenant_id: Tenant ID for multi-tenancy isolation (default: 1)
 
         Returns:
             True if cached successfully, False otherwise
@@ -116,7 +120,7 @@ class CacheService:
 
         try:
             content_hash = self.generate_content_hash(content)
-            cache_key = self._build_cache_key(content_hash, analysis_type)
+            cache_key = self._build_cache_key(content_hash, analysis_type, tenant_id)
 
             # Serialize result to JSON
             cached_value = json.dumps(result)
@@ -135,13 +139,14 @@ class CacheService:
             logger.error(f"Cache storage error: {e}")
             return False  # Fail gracefully
 
-    def invalidate_cache(self, content: str, analysis_type: str) -> bool:
+    def invalidate_cache(self, content: str, analysis_type: str, tenant_id: int = 1) -> bool:
         """
         Invalidate specific cached analysis.
 
         Args:
             content: The text content
             analysis_type: Type of analysis to invalidate
+            tenant_id: Tenant ID for multi-tenancy isolation (default: 1)
 
         Returns:
             True if deleted, False otherwise
@@ -151,7 +156,7 @@ class CacheService:
 
         try:
             content_hash = self.generate_content_hash(content)
-            cache_key = self._build_cache_key(content_hash, analysis_type)
+            cache_key = self._build_cache_key(content_hash, analysis_type, tenant_id)
 
             result = self.redis_client.delete(cache_key)
 
