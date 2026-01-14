@@ -12,6 +12,10 @@ from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
 
+# Configuration: Context window for segment analysis (characters)
+# Provides surrounding text to AI for better understanding
+SEGMENT_CONTEXT_SIZE = 1500  # Tunable: increase for more context, decrease for cost savings
+
 def repair_json_response(response_text: str) -> str:
     """
     Attempt to repair common JSON formatting issues from AI responses.
@@ -341,8 +345,33 @@ class DocumentAnalysisEngine(LoggerMixin):
                     segment.status = SegmentStatus.PROCESSING
                     db.commit()
                     
+                    # Extract segment with surrounding context for better AI understanding
+                    doc_length = len(document.raw_text)
+
+                    # Calculate context boundaries (handle document edges safely)
+                    context_start = max(0, segment.start_char_index - SEGMENT_CONTEXT_SIZE)
+                    context_end = min(doc_length, segment.end_char_index + SEGMENT_CONTEXT_SIZE)
+
+                    # Extract text sections
+                    before_context = document.raw_text[context_start:segment.start_char_index]
                     segment_text = document.raw_text[segment.start_char_index:segment.end_char_index]
-                    full_prompt = f"{base_prompt}\n\nSEGMENT TYPE: {segment.segment_type}\nSEGMENT TEXT:\n{segment_text}"
+                    after_context = document.raw_text[segment.end_char_index:context_end]
+
+                    # Build enhanced prompt with context markers
+                    full_prompt = f"""{base_prompt}
+
+SEGMENT TYPE: {segment.segment_type}
+
+--- CONTEXT BEFORE (for reference only) ---
+{before_context}
+
+--- PRIMARY SEGMENT TO ANALYZE ---
+{segment_text}
+
+--- CONTEXT AFTER (for reference only) ---
+{after_context}
+
+INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surrounding context to understand references, dependencies, and relationships."""
                     
                     self.logger.info(f"🤖 Analyzing segment {segment.id} ({i+1}/{len(segments)})")
                     self._increment_api_calls(document_id)

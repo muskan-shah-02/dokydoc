@@ -8,6 +8,7 @@ from app import crud
 from app.db.session import SessionLocal
 # We will create this function in our next step (Task 1.C)
 from app.services.ai.gemini import call_gemini_for_code_analysis
+from app.services.cache_service import cache_service
 from app.core.logging import LoggerMixin
 from app.core.exceptions import DocumentProcessingException, AIAnalysisException
 
@@ -49,9 +50,30 @@ class CodeAnalysisService(LoggerMixin):
                 response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
                 code_content = response.text
 
-            # 3. Call the Gemini API for a structured analysis (we build this function next)
-            self.logger.info(f"Sending code for component {component_id} to Gemini for analysis...")
-            analysis_result = await call_gemini_for_code_analysis(code_content)
+            # 3. Try to get cached analysis first (80% cost savings!)
+            self.logger.info(f"Checking cache for component {component_id}...")
+            cached_result = cache_service.get_cached_analysis(
+                content=code_content,
+                analysis_type="code_analysis"
+            )
+
+            if cached_result:
+                # Cache HIT - use cached result (no AI cost!)
+                self.logger.info(f"✅ Using cached analysis for component {component_id}")
+                analysis_result = cached_result
+            else:
+                # Cache MISS - call Gemini API
+                self.logger.info(f"❌ Cache miss. Sending code for component {component_id} to Gemini for analysis...")
+                analysis_result = await call_gemini_for_code_analysis(code_content)
+
+                # Store result in cache for future use
+                cache_service.set_cached_analysis(
+                    content=code_content,
+                    analysis_type="code_analysis",
+                    result=analysis_result,
+                    ttl_seconds=2592000  # 30 days
+                )
+                self.logger.info(f"💾 Cached analysis result for component {component_id}")
 
             # 4. Prepare the data and update the component in the database
             update_data = {
