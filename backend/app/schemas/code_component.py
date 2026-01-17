@@ -49,7 +49,8 @@ class CodeComponentInDBBase(CodeComponentBase):
     class Config:
         # This vital setting allows Pydantic to read data directly from
         # a SQLAlchemy ORM model instance.
-        orm_mode = True
+        # Pydantic V2: renamed from 'orm_mode' to 'from_attributes'
+        from_attributes = True
 
 # --- Main API Response Schema ---
 # This is the final schema that will be used when returning data from the API.
