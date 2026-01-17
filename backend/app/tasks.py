@@ -6,6 +6,7 @@ from app.db.session import SessionLocal
 from app import crud
 from app.services.document_parser import MultiModalDocumentParser
 from app.services.analysis_service import DocumentAnalysisEngine
+from app.services.lock_service import lock_service
 from app.core.logging import logger
 
 @celery_app.task(name="process_document_pipeline")
@@ -13,38 +14,54 @@ def process_document_pipeline(document_id: int, storage_path: str):
     """
     Celery task to orchestrate the full document pipeline.
     This runs in a separate worker process.
+
+    FLAW-10 FIX: Uses distributed locks to prevent race conditions
+    when multiple workers try to process the same document.
     """
     logger.info(f"CELERY_TASK started for document_id: {document_id}")
 
-    # --- Senior Dev Step: Session Management ---
-    # A Celery task MUST manage its own DB session.
-    db = SessionLocal()
-    
-    document = crud.document.get(db=db, id=document_id)
-    if not document:
-        logger.error(f"Celery task could not find document_id: {document_id}")
-        db.close()
-        return
+    # FLAW-10 FIX: Acquire distributed lock to prevent concurrent processing
+    # Use context manager for automatic lock release
+    with lock_service.lock_document_processing(document_id, timeout=600) as acquired:
+        if not acquired:
+            # Another worker is already processing this document
+            logger.warning(
+                f"⏭️ Document {document_id} is already being processed by another worker. Skipping."
+            )
+            return
 
-    try:
-        # We use asyncio.run() to execute our async pipeline
-        # from within this synchronous Celery task.
-        asyncio.run(
-            _run_async_pipeline(db, document, storage_path, document_id)
-        )
-    except Exception as e:
-        # Top-level safety net
-        logger.error(f"A critical unhandled error occurred in the async pipeline: {e}")
-        crud.document.update(db=db, db_obj=document, obj_in={
-            "status": "analysis_failed",
-            "progress": 100,
-            "error_message": f"Critical task failure: {str(e)}"
-        })
-    finally:
+        logger.info(f"🔒 Lock acquired for document_id: {document_id}")
+
         # --- Senior Dev Step: Session Management ---
-        # Always close the session in a finally block
-        db.close()
-        logger.info(f"CELERY_TASK finished for document_id: {document_id}")
+        # A Celery task MUST manage its own DB session.
+        db = SessionLocal()
+
+        document = crud.document.get(db=db, id=document_id)
+        if not document:
+            logger.error(f"Celery task could not find document_id: {document_id}")
+            db.close()
+            return
+
+        try:
+            # We use asyncio.run() to execute our async pipeline
+            # from within this synchronous Celery task.
+            asyncio.run(
+                _run_async_pipeline(db, document, storage_path, document_id)
+            )
+        except Exception as e:
+            # Top-level safety net
+            logger.error(f"A critical unhandled error occurred in the async pipeline: {e}")
+            crud.document.update(db=db, db_obj=document, obj_in={
+                "status": "analysis_failed",
+                "progress": 100,
+                "error_message": f"Critical task failure: {str(e)}"
+            })
+        finally:
+            # --- Senior Dev Step: Session Management ---
+            # Always close the session in a finally block
+            db.close()
+            logger.info(f"CELERY_TASK finished for document_id: {document_id}")
+            # Lock is automatically released by context manager
 
 async def _run_async_pipeline(db, document, storage_path, document_id):
     """

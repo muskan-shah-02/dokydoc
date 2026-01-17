@@ -1,5 +1,5 @@
 from datetime import timedelta
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Any
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from app.api import deps
 from app.core.security import create_access_token, verify_password
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AuthenticationException, ValidationException
+from app.middleware.rate_limiter import limiter, RateLimits
 
 class LoginEndpoints(LoggerMixin):
     """Login endpoints with enhanced logging and error handling."""
@@ -22,13 +23,17 @@ login_endpoints = LoginEndpoints()
 router = APIRouter()
 
 @router.post("/users/", response_model=schemas.user.User, status_code=201)
+@limiter.limit(RateLimits.AUTH)  # API-01 FIX: Prevent account creation abuse (5/min, 20/hour)
 def create_user(
+    request: Request,  # API-01 FIX: Required for rate limiter
     *,
     db: Session = Depends(deps.get_db),
     user_in: schemas.user.UserCreate,
 ) -> Any:
     """
     Create a new user.
+
+    Rate Limit: 5 registrations/minute, 20/hour per IP (prevents spam)
     """
     logger = login_endpoints.logger
     logger.info(f"Creating new user with email: {user_in.email}")
@@ -47,12 +52,16 @@ def create_user(
 
 
 @router.post("/login/access-token", response_model=schemas.token.Token)
+@limiter.limit(RateLimits.AUTH)  # API-01 FIX: Prevent brute force (5/min, 20/hour)
 def login_for_access_token(
+    request: Request,  # API-01 FIX: Required for rate limiter
     db: Session = Depends(deps.get_db),
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
     """
     OAuth2 compatible token login, get an access token for future requests.
+
+    Rate Limit: 5 login attempts/minute, 20/hour per IP (prevents brute force)
     """
     logger = login_endpoints.logger
     logger.info(f"Login attempt for user: {form_data.username}")

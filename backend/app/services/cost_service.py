@@ -35,9 +35,15 @@ class CostService:
         self.cost_per_1k_input_usd = Decimal("0.00001875")
         self.cost_per_1k_output_usd = Decimal("0.000075")
 
-        # Exchange rate (USD to INR)
-        # TODO: Fetch from API (https://api.exchangerate-api.com/v4/latest/USD)
-        self.usd_to_inr = Decimal("84.0")
+        # CONFIG-01 FIX: Exchange rate (USD to INR) with automatic updates
+        self.usd_to_inr = Decimal("84.0")  # Fallback if API fetch fails
+
+        # CONFIG-01 FIX: Try to fetch latest exchange rate on initialization
+        if not self.update_exchange_rate():
+            logger.warning(
+                f"⚠️ Using fallback exchange rate: $1 = ₹{self.usd_to_inr}. "
+                f"Automatic updates will retry later."
+            )
 
     def count_tokens(self, text: str) -> int:
         """

@@ -7,14 +7,16 @@ from typing import List, Any
 import uuid
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request
 from fastapi.responses import FileResponse # Added for download endpoint
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
 from app.api import deps
+from app.core.config import settings
 from app.core.logging import LoggerMixin
 from app.core.exceptions import DocumentProcessingException, ValidationException
+from app.middleware.rate_limiter import limiter, RateLimits
 
 # --- NEW: Import our Celery task ---
 # The "Import could not be resolved" error is OK, it will work in Docker
@@ -209,7 +211,9 @@ def download_document(
 
 
 @router.post("/upload", response_model=schemas.Document)
+@limiter.limit(RateLimits.UPLOAD)  # API-01 FIX: Rate limit uploads (10/min, 50/hour)
 async def upload_document(
+    request: Request,  # API-01 FIX: Required for rate limiter
     *,
     db: Session = Depends(deps.get_db),
     document_type: str = Form(...),
@@ -221,16 +225,19 @@ async def upload_document(
     Upload a new document. This only saves the file and creates the
     database record. It does NOT trigger the analysis.
     This endpoint is fast and will not time out. (Fix for A-01)
+
+    Rate Limit: 10 uploads/minute, 50 uploads/hour per user
     """
     logger = document_endpoints.logger
     
     try:
         if not file.filename:
             raise ValidationException("No filename provided")
-        
+
         file_extension = Path(file.filename).suffix.lower()
-        allowed_extensions = ['.pdf', '.docx', '.doc', '.txt'] # TODO: Use settings.ALLOWED_EXTENSIONS
-        
+        # CONFIG-01 FIX: Use settings instead of hardcoded extensions
+        allowed_extensions = settings.ALLOWED_EXTENSIONS
+
         if file_extension not in allowed_extensions:
             raise ValidationException(f"File type {file_extension} not supported. Allowed types: {', '.join(allowed_extensions)}")
         
