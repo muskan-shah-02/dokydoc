@@ -47,7 +47,7 @@ def upgrade() -> None:
         'ontology_concepts',
         'ontology_relationships',
         'analysis_runs',
-        'consolidated_analysis'
+        'consolidated_analyses'  # Fixed: was 'consolidated_analysis'
     ]
 
     for table in tables_to_update:
@@ -138,7 +138,7 @@ def downgrade() -> None:
 
     # Remove tenant_id from all tables
     tables_to_revert = [
-        'consolidated_analysis',
+        'consolidated_analyses',  # Fixed: was 'consolidated_analysis'
         'analysis_runs',
         'ontology_relationships',
         'ontology_concepts',
