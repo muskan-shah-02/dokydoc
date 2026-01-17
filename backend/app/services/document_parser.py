@@ -124,15 +124,18 @@ class MultiModalDocumentParser(LoggerMixin):
         stop=stop_after_attempt(6),
         wait=wait_exponential(multiplier=2, min=4, max=60)
     )
-    async def _process_with_gemini(self, file_path: str, mime_type: str, prompt: str) -> str:
+    async def _process_with_gemini(self, file_path: str, mime_type: str, prompt: str) -> tuple[str, int, int]:
         """
         Process a file with Gemini API with retry logic.
         FIXED: Uses asyncio.to_thread to handle synchronous SDK calls.
+
+        Returns:
+            Tuple[str, int, int]: (text, input_tokens, output_tokens)
         """
         try:
             with open(file_path, 'rb') as f:
                 file_data = f.read()
-            
+
             # Prepare arguments for the sync call
             args = []
             if mime_type.startswith("text/"):
@@ -150,51 +153,76 @@ class MultiModalDocumentParser(LoggerMixin):
             # This allows 'await' to work correctly without crashing the worker
             response = await asyncio.to_thread(self.model.generate_content, args)
             # --- CRITICAL FIX END ---
-            
-            return response.text
-                
+
+            # Extract token counts from usage_metadata
+            input_tokens = 0
+            output_tokens = 0
+            if hasattr(response, 'usage_metadata'):
+                input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+                output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+
+                self.logger.info(
+                    f"📊 Token usage: {input_tokens} input + {output_tokens} output = "
+                    f"{input_tokens + output_tokens} total tokens"
+                )
+
+            return response.text, input_tokens, output_tokens
+
         except Exception as e:
             self.logger.error(f"Error processing file {file_path} with Gemini: {e}")
             raise
 
-    async def parse_with_images(self, file_path: str) -> str:
+    async def parse_with_images(self, file_path: str) -> tuple[str, int, int]:
         """
         Main orchestration method.
+
+        Returns:
+            Tuple[str, int, int]: (text, input_tokens, output_tokens)
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
-        
+
         file_path = str(file_path)
         extension = self._get_file_extension(file_path)
         self.logger.info(f"Starting parsing for: {file_path}")
-        
+
         try:
             if self._requires_conversion(file_path):
                 self.logger.info(f"Converting {extension} file to text")
-                if extension == ".docx": return self._convert_docx_to_text(file_path)
-                elif extension == ".doc": return self._convert_doc_to_text(file_path)
-            
+                if extension == ".docx":
+                    # Conversion doesn't use Gemini, so 0 tokens
+                    return self._convert_docx_to_text(file_path), 0, 0
+                elif extension == ".doc":
+                    return self._convert_doc_to_text(file_path), 0, 0
+
             elif self._is_supported_directly(file_path):
                 mime_type = SUPPORTED_MIME_TYPES[extension]
-                
+
                 if extension == ".pdf":
                     images = self._extract_images_from_pdf(file_path)
                     image_descriptions = []
+                    vision_input_tokens = 0
+                    vision_output_tokens = 0
+
                     if images:
                         self.logger.info(f"Found {len(images)} images in PDF.")
                         for i, img in enumerate(images):
                             desc = await self._analyze_image_with_vision(img['data'], i)
                             image_descriptions.append(desc)
-                    
-                    pdf_text = await self._process_with_gemini(file_path, mime_type, "Extract all text content.")
-                    if image_descriptions: pdf_text += "\n\n" + "\n".join(image_descriptions)
-                    return pdf_text
-                
+                            # Note: Vision API token tracking would need separate implementation
+
+                    pdf_text, input_tokens, output_tokens = await self._process_with_gemini(
+                        file_path, mime_type, "Extract all text content."
+                    )
+                    if image_descriptions:
+                        pdf_text += "\n\n" + "\n".join(image_descriptions)
+                    return pdf_text, input_tokens + vision_input_tokens, output_tokens + vision_output_tokens
+
                 return await self._process_with_gemini(file_path, mime_type, "Extract all text content.")
-            
+
             else:
                 raise ValueError(f"Unsupported file type: {extension}")
-                
+
         except Exception as e:
             self.logger.error(f"Error parsing document: {e}")
             raise
