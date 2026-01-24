@@ -4,8 +4,11 @@ from typing import Optional
 class Token(BaseModel):
     """
     Defines the response model for a JWT token.
+
+    BE-04/AUTH-01 FIX: Now includes refresh_token for session persistence.
     """
     access_token: str
+    refresh_token: str  # BE-04 FIX: Added refresh token
     token_type: str
 
 

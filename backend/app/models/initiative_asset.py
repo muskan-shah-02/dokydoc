@@ -15,6 +15,7 @@ class InitiativeAsset(Base):
     __tablename__ = "initiative_assets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     initiative_id: Mapped[int] = mapped_column(Integer, ForeignKey("initiatives.id"), nullable=False)
     asset_type: Mapped[str] = mapped_column(String(50), nullable=False)  # "DOCUMENT" or "REPOSITORY"
     asset_id: Mapped[int] = mapped_column(Integer, nullable=False)  # ID of the document or repository

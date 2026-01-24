@@ -36,19 +36,26 @@ class GeminiService(LoggerMixin):
     async def generate_content(self, prompt: str, **kwargs) -> genai.types.GenerateContentResponse:
         """
         Generate content with retry logic and error handling.
+        Returns the full response object including usage_metadata for token tracking.
         """
         try:
             # Enhanced logging for API call tracking
             prompt_length = len(prompt)
             self.logger.info(f"🤖 GEMINI API CALL - Prompt length: {prompt_length} chars")
             self.logger.debug(f"Prompt preview: {prompt[:200]}...")
-            
+
             response = await self.model.generate_content_async(prompt, **kwargs)
-            
-            # Enhanced logging for response tracking
+
+            # Enhanced logging for response tracking with token counts
             response_length = len(response.text) if response.text else 0
-            self.logger.info(f"✅ GEMINI API SUCCESS - Response length: {response_length} chars")
-            
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+
+            self.logger.info(
+                f"✅ GEMINI API SUCCESS - Response: {response_length} chars | "
+                f"Tokens: {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} total"
+            )
+
             return response
         except Exception as e:
             self.logger.error(f"❌ GEMINI API ERROR: {e}")

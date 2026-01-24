@@ -8,9 +8,14 @@ from app.services.document_parser import MultiModalDocumentParser
 from app.services.ai.gemini import gemini_service
 from app.services.ai.prompt_manager import prompt_manager, PromptType
 from app.services.analysis_run_service import AnalysisRunService
+from app.services.cost_service import cost_service  # ✅ SPRINT 1 PHASE 2 FIX
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
+
+# Configuration: Context window for segment analysis (characters)
+# Provides surrounding text to AI for better understanding
+SEGMENT_CONTEXT_SIZE = 1500  # Tunable: increase for more context, decrease for cost savings
 
 def repair_json_response(response_text: str) -> str:
     """
@@ -125,6 +130,7 @@ class DocumentAnalysisEngine(LoggerMixin):
         super().__init__()
         self._running_documents = set()  # Track documents currently being analyzed
         self._api_call_counter = {}  # Track API calls per document
+        self._cost_tracker = {}  # ✅ Track real costs per document: {doc_id: {pass_name: {cost_inr, tokens}}}
         self.logger.info("DocumentAnalysisEngine initialized")
     
     def _increment_api_calls(self, document_id: int):
@@ -161,9 +167,10 @@ class DocumentAnalysisEngine(LoggerMixin):
                 details={"status": "already_running"}
             )
         
-        # Add document to running set and initialize API call counter
+        # Add document to running set and initialize API call counter + cost tracker
         self._running_documents.add(document_id)
         self._api_call_counter[document_id] = 0
+        self._cost_tracker[document_id] = {}  # ✅ Initialize cost tracking
         self.logger.info(f"📊 Starting multi-pass analysis for document_id: {document_id}")
         
         try:
@@ -212,21 +219,41 @@ class DocumentAnalysisEngine(LoggerMixin):
                 if learning_mode:
                     self.logger.info(f"Document {document_id}: Learning mode enabled - feeding to BOE")
                     await self._feed_to_business_ontology(db, document_id)
-                
-                # Log final API call summary
+
+                # ✅ SPRINT 1 PHASE 2: Calculate REAL costs from tracked token usage
+                cost_breakdown = self._cost_tracker.get(document_id, {})
+                total_cost_inr = sum(pass_data.get('cost_inr', 0) for pass_data in cost_breakdown.values())
+                total_input_tokens = sum(pass_data.get('input_tokens', 0) for pass_data in cost_breakdown.values())
+                total_output_tokens = sum(pass_data.get('output_tokens', 0) for pass_data in cost_breakdown.values())
+                total_tokens = total_input_tokens + total_output_tokens
                 total_calls = self._api_call_counter.get(document_id, 0)
-                segments_count = total_calls - 2
-                estimated_cost = total_calls * 0.01
-                
+
                 self.logger.info(f"📊 ANALYSIS COMPLETE for document {document_id}")
                 self.logger.info(f"💰 TOTAL GEMINI API CALLS: {total_calls}")
-                self.logger.info(f"💵 Estimated cost: ~${estimated_cost:.2f} (at $0.01/call)")
-                
+                self.logger.info(f"📊 TOTAL TOKENS: {total_tokens:,} ({total_input_tokens:,} input + {total_output_tokens:,} output)")
+                self.logger.info(f"💵 ACTUAL COST: ₹{total_cost_inr:.4f} INR (~${total_cost_inr/84:.4f} USD)")
+                self.logger.info(f"📋 Cost Breakdown by Pass:")
+                for pass_name, pass_data in cost_breakdown.items():
+                    self.logger.info(
+                        f"   - {pass_name}: ₹{pass_data.get('cost_inr', 0):.4f} "
+                        f"({pass_data.get('input_tokens', 0):,} in + {pass_data.get('output_tokens', 0):,} out)"
+                    )
+
                 # Final Success State (only update if we haven't stopped)
-                # Re-check status to be safe
                 final_check = crud.document.get(db=db, id=document_id)
                 if final_check.status != "stopped":
-                     crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100})
+                    crud.document.update(
+                        db=db,
+                        db_obj=document,
+                        obj_in={
+                            "status": "completed",
+                            "progress": 100,
+                            "ai_cost_inr": total_cost_inr,  # ✅ Real cost tracking
+                            "token_count_input": total_input_tokens,
+                            "token_count_output": total_output_tokens,
+                            "cost_breakdown": cost_breakdown  # ✅ Detailed breakdown
+                        }
+                    )
 
                 return True
                 
@@ -240,6 +267,7 @@ class DocumentAnalysisEngine(LoggerMixin):
         finally:
             self._running_documents.discard(document_id)
             self._api_call_counter.pop(document_id, None)
+            self._cost_tracker.pop(document_id, None)  # ✅ Cleanup cost tracker
             self.logger.debug(f"Released analysis lock for document {document_id}")
     
     async def _pass_1_composition_classification(self, raw_text: str, document_id: int) -> Dict:
@@ -247,19 +275,31 @@ class DocumentAnalysisEngine(LoggerMixin):
         try:
             prompt = prompt_manager.get_prompt(PromptType.DOCUMENT_COMPOSITION)
             full_prompt = f"{prompt}\n\nDOCUMENT TEXT TO ANALYZE:\n{raw_text[:15000]}" # Truncate large texts for Pass 1 summary
-            
+
             self.logger.info("🔍 PASS 1: Starting composition analysis - 1 Gemini API call")
             self._increment_api_calls(document_id)
-            
+
             response = await gemini_service.generate_content(full_prompt)
+
+            # ✅ SPRINT 1 PHASE 2: Extract token counts and calculate real cost
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+
+            cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            self._cost_tracker[document_id]['pass_1_composition'] = {
+                'cost_inr': cost_data['cost_inr'],
+                'input_tokens': input_tokens or cost_data['input_tokens'],  # Use real count if available
+                'output_tokens': output_tokens or cost_data['output_tokens']
+            }
+
             cleaned_response = repair_json_response(response.text)
-            
+
             try:
                 return json.loads(cleaned_response)
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
                 raise AIAnalysisException("Failed to parse composition analysis response", model="gemini")
-                
+
         except Exception as e:
             self.logger.error(f"Error in Pass 1: {e}")
             raise AIAnalysisException("Composition classification failed", model="gemini", details={"error": str(e)})
@@ -278,11 +318,23 @@ class DocumentAnalysisEngine(LoggerMixin):
             
             prompt = prompt_manager.get_prompt(PromptType.CONTENT_SEGMENTATION)
             full_prompt = f"{prompt}\n\nCOMPOSITION ANALYSIS:\n{json.dumps(composition_analysis, indent=2)}\n\nDOCUMENT TEXT:\n{raw_text}"
-            
+
             self.logger.info("🔍 PASS 2: Starting content segmentation - 1 Gemini API call")
             self._increment_api_calls(document_id)
-            
+
             response = await gemini_service.generate_content(full_prompt)
+
+            # ✅ SPRINT 1 PHASE 2: Extract token counts and calculate real cost
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+
+            cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            self._cost_tracker[document_id]['pass_2_segmentation'] = {
+                'cost_inr': cost_data['cost_inr'],
+                'input_tokens': input_tokens or cost_data['input_tokens'],
+                'output_tokens': output_tokens or cost_data['output_tokens']
+            }
+
             cleaned_response = repair_json_response(response.text)
             
             try:
@@ -328,6 +380,11 @@ class DocumentAnalysisEngine(LoggerMixin):
             base_prompt = prompt_manager.get_prompt(PromptType.STRUCTURED_EXTRACTION)
             document = crud.document.get(db=db, id=document_id)
 
+            # ✅ SPRINT 1 PHASE 2: Initialize Pass 3 cost tracking
+            pass_3_cost_inr = 0
+            pass_3_input_tokens = 0
+            pass_3_output_tokens = 0
+
             for i, segment in enumerate(segments):
                 # --- CRITICAL: Check stop signal inside the loop ---
                 if self._check_stop_signal(db, document_id): 
@@ -341,14 +398,48 @@ class DocumentAnalysisEngine(LoggerMixin):
                     segment.status = SegmentStatus.PROCESSING
                     db.commit()
                     
+                    # Extract segment with surrounding context for better AI understanding
+                    doc_length = len(document.raw_text)
+
+                    # Calculate context boundaries (handle document edges safely)
+                    context_start = max(0, segment.start_char_index - SEGMENT_CONTEXT_SIZE)
+                    context_end = min(doc_length, segment.end_char_index + SEGMENT_CONTEXT_SIZE)
+
+                    # Extract text sections
+                    before_context = document.raw_text[context_start:segment.start_char_index]
                     segment_text = document.raw_text[segment.start_char_index:segment.end_char_index]
-                    full_prompt = f"{base_prompt}\n\nSEGMENT TYPE: {segment.segment_type}\nSEGMENT TEXT:\n{segment_text}"
+                    after_context = document.raw_text[segment.end_char_index:context_end]
+
+                    # Build enhanced prompt with context markers
+                    full_prompt = f"""{base_prompt}
+
+SEGMENT TYPE: {segment.segment_type}
+
+--- CONTEXT BEFORE (for reference only) ---
+{before_context}
+
+--- PRIMARY SEGMENT TO ANALYZE ---
+{segment_text}
+
+--- CONTEXT AFTER (for reference only) ---
+{after_context}
+
+INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surrounding context to understand references, dependencies, and relationships."""
                     
                     self.logger.info(f"🤖 Analyzing segment {segment.id} ({i+1}/{len(segments)})")
                     self._increment_api_calls(document_id)
-                    
+
                     response = await gemini_service.generate_content(full_prompt)
-                    
+
+                    # ✅ SPRINT 1 PHASE 2: Track cost for this segment
+                    input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+                    output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+
+                    cost_data = cost_service.calculate_cost(full_prompt, response.text)
+                    pass_3_cost_inr += cost_data['cost_inr']
+                    pass_3_input_tokens += input_tokens or cost_data['input_tokens']
+                    pass_3_output_tokens += output_tokens or cost_data['output_tokens']
+
                     try:
                         structured_data = json.loads(repair_json_response(response.text))
                     except json.JSONDecodeError:
@@ -387,7 +478,15 @@ class DocumentAnalysisEngine(LoggerMixin):
                     segment.last_error = str(e)
                     db.commit()
                     continue
-            
+
+            # ✅ SPRINT 1 PHASE 2: Save accumulated Pass 3 costs
+            self._cost_tracker[document_id]['pass_3_extraction'] = {
+                'cost_inr': pass_3_cost_inr,
+                'input_tokens': pass_3_input_tokens,
+                'output_tokens': pass_3_output_tokens,
+                'segments_analyzed': len(segments)
+            }
+
             return True
             
         except Exception as e:

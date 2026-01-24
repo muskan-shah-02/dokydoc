@@ -13,9 +13,11 @@ from app.core.logging import logger, setup_logging
 from app.core.exceptions import DokyDocException, handle_dokydoc_exception, create_error_response
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
-    login, dashboard, documents, code_components, 
-    document_code_links, analysis_results, validation
+    login, dashboard, documents, code_components,
+    document_code_links, analysis_results, validation, billing
 )
+from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
+from slowapi.errors import RateLimitExceeded
 
 # Setup logging
 setup_logging()
@@ -53,6 +55,10 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.DEBUG else None,
     lifespan=lifespan
 )
+
+# API-01 FIX: Add rate limiter state to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
 
 # --- Middleware Configuration ---
 
@@ -151,19 +157,53 @@ async def dokydoc_exception_handler(request: Request, exc: DokyDocException):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle all other exceptions."""
+    """
+    Handle all other exceptions.
+    BE-01 FIX: Provides actionable error messages in production without exposing sensitive details.
+    """
     logger.error(
         f"Unhandled exception in {request.method} {request.url.path}: {str(exc)}\n"
         f"Traceback: {traceback.format_exc()}"
     )
-    
+
+    # BE-01 FIX: Categorize errors and provide actionable messages
+    error_type = type(exc).__name__
+    error_message = str(exc)
+
+    # Provide user-friendly messages based on error type
+    if "Database" in error_type or "sqlalchemy" in str(type(exc).__module__).lower():
+        user_message = "Database operation failed. Please try again in a few moments."
+        error_code = "DATABASE_ERROR"
+    elif "Connection" in error_type or "Timeout" in error_type:
+        user_message = "Service temporarily unavailable. Please try again."
+        error_code = "CONNECTION_ERROR"
+    elif "Permission" in error_type or "Access" in error_type:
+        user_message = "Access denied. Please check your permissions."
+        error_code = "PERMISSION_ERROR"
+    elif "File" in error_type or "IO" in error_type:
+        user_message = "File operation failed. Please check your file and try again."
+        error_code = "FILE_ERROR"
+    elif "Value" in error_type or "Type" in error_type:
+        user_message = "Invalid data provided. Please check your input."
+        error_code = "DATA_ERROR"
+    else:
+        user_message = "An unexpected error occurred. Our team has been notified."
+        error_code = "INTERNAL_ERROR"
+
+    # In debug mode, include full error details
+    if settings.DEBUG:
+        user_message = f"{user_message} (Debug: {error_type}: {error_message})"
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=create_error_response(
-            error_code="INTERNAL_ERROR",
-            message="An unexpected error occurred" if not settings.DEBUG else str(exc),
+            error_code=error_code,
+            message=user_message,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            details={"traceback": traceback.format_exc()} if settings.DEBUG else None
+            details={
+                "error_type": error_type,
+                "traceback": traceback.format_exc()
+            } if settings.DEBUG else {"error_type": error_type}  # Still provide error type in production
         )
     )
 
@@ -249,9 +289,15 @@ app.include_router(
 )
 
 app.include_router(
-    validation.router, 
-    prefix=f"/api/{settings.API_VERSION}/validation", 
+    validation.router,
+    prefix=f"/api/{settings.API_VERSION}/validation",
     tags=["Validation"]
+)
+
+app.include_router(
+    billing.router,
+    prefix=f"/api/{settings.API_VERSION}/billing",
+    tags=["Billing"]
 )
 
 # --- Startup Event (Legacy support) ---

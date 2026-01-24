@@ -24,6 +24,7 @@ class AnalysisResultStatus(str, Enum):
 
 class AnalysisResult(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     
     # The structured JSON output from Pass 3 of the analysis.
     structured_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)

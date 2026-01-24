@@ -3,7 +3,7 @@ import enum
 from typing import TYPE_CHECKING, List, Optional
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, Numeric
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,6 +46,7 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     filename: Mapped[str] = mapped_column(String, index=True, nullable=False)
     
     # Document type classification (e.g., "BRD", "API_DOCS", "TECHNICAL_SPECS")
@@ -75,7 +76,18 @@ class Document(Base):
     
     # File size in KB
     file_size_kb: Mapped[int] = mapped_column(Integer, nullable=True)
-    
+
+    # --- Cost Tracking Fields (Sprint 1: BE-COST-02) ---
+    # Total AI cost for this document in INR (Indian Rupees)
+    ai_cost_inr: Mapped[float] = mapped_column(Numeric(10, 4), default=0.0, nullable=False)
+
+    # Token counts for cost calculation
+    token_count_input: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    token_count_output: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Cost breakdown by analysis pass: {"pass1": 0.001, "pass2": 0.003, "pass3": 0.005}
+    cost_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=True)
+
     # Legacy content field for backward compatibility
     content: Mapped[str] = mapped_column(Text, nullable=True)
     

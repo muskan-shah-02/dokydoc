@@ -57,7 +57,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
-      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      # CONFIG-01 FIX: No default SECRET_KEY (SECURITY RISK) - Must be set in .env file
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY environment variable is required}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
@@ -104,7 +105,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
-      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      # CONFIG-01 FIX: No default SECRET_KEY (SECURITY RISK) - Must be set in .env file
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY environment variable is required}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -125,6 +127,24 @@ services:
         reservations:
           memory: 1G
           cpus: '0.5'
+
+  # FLAW-18 FIX: Flower - Celery Monitoring Dashboard
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dokydoc_flower
+    command: celery -A app.worker flower --port=5555 --broker=redis://redis:6379/0
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    networks:
+      - dokydoc_network
+    restart: unless-stopped
 
   # Nginx Reverse Proxy (for production)
   nginx:

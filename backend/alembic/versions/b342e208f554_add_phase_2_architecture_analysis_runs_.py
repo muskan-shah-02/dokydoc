@@ -21,25 +21,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # ### Strategy 1: Smart Default Migration ###
-    
+
     # Step 1: Create enums if they don't exist
     connection = op.get_bind()
-    
-    # Check and create enums safely
-    try:
-        op.execute("CREATE TYPE analysisrunstatus AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')")
-    except Exception:
-        pass  # Enum already exists
-    
-    try:
-        op.execute("CREATE TYPE analysisresultstatus AS ENUM ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED')")
-    except Exception:
-        pass  # Enum already exists
-        
-    try:
-        op.execute("CREATE TYPE segmentstatus AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED')")
-    except Exception:
-        pass  # Enum already exists
+
+    # Check and create enums safely using PostgreSQL IF NOT EXISTS
+    # Note: DO $$ blocks allow us to check for existence without causing transaction errors
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE analysisrunstatus AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE analysisresultstatus AS ENUM ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE segmentstatus AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
     
     # Step 2: Create the analysis_runs table first
     op.create_table('analysis_runs',

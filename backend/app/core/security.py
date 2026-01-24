@@ -54,8 +54,34 @@ def create_access_token(subject: Union[str, Any], expires_delta: timedelta = Non
         expire = datetime.now(timezone.utc) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
-    
-    to_encode = {"exp": expire, "sub": str(subject)}
+
+    # BE-04/AUTH-01 FIX: Add token type to differentiate access vs refresh tokens
+    to_encode = {"exp": expire, "sub": str(subject), "type": "access"}
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+
+def create_refresh_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+    """
+    Creates a new JWT refresh token for long-lived sessions.
+
+    BE-04/AUTH-01 FIX: Refresh tokens allow users to get new access tokens
+    without re-authenticating, preventing session loss during long document processing.
+
+    :param subject: The subject of the token (e.g., user's email or ID).
+    :param expires_delta: The lifespan of the token. If not provided, it defaults
+                          to REFRESH_TOKEN_EXPIRE_DAYS from settings.
+    :return: The encoded JWT refresh token as a string.
+    """
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(
+            days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+
+    # Mark this as a refresh token (prevents using refresh token as access token)
+    to_encode = {"exp": expire, "sub": str(subject), "type": "refresh"}
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 

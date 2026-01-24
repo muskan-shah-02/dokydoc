@@ -11,3 +11,4 @@ from .ontology_concept import OntologyConcept
 from .ontology_relationship import OntologyRelationship
 from .initiative import Initiative
 from .initiative_asset import InitiativeAsset
+from .tenant_billing import TenantBilling

@@ -28,13 +28,26 @@ def get_current_user(
 ) -> User:
     """
     Dependency function to decode a JWT token and get the current user from the database.
+
+    BE-04/AUTH-01 FIX: Now validates token type to ensure only access tokens are accepted.
     """
     logger.debug("Validating user token")
-    
+
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
+
+        # BE-04/AUTH-01 FIX: Validate token type
+        token_type = payload.get("type")
+        if token_type != "access":
+            logger.warning(f"Invalid token type: {token_type} (expected 'access')")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid token type. Please use an access token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         token_data = token_schema.TokenData(email=payload.get("sub"))
         if token_data.email is None:
             logger.warning("Token validation failed - no email in token")
@@ -46,12 +59,12 @@ def get_current_user(
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     user = crud.user.get_user_by_email(db, email=token_data.email)
     if not user:
         logger.warning(f"User not found for email: {token_data.email}")
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     logger.debug(f"User {user.email} authenticated successfully")
     return user
 
