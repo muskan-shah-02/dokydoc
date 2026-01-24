@@ -34,6 +34,7 @@ router = APIRouter()
 def get_current_costs(
     request: Request,  # API-01 FIX: Required for rate limiter
     *,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
@@ -48,11 +49,13 @@ def get_current_costs(
         - Low balance alert
 
     Rate Limit: 30 requests/minute, 200/hour per user
+
+    SPRINT 2: Uses tenant_id dependency injection for consistency.
     """
-    logger.info(f"Fetching billing summary for user {current_user.email}, tenant {current_user.tenant_id}")
+    logger.info(f"Fetching billing summary for user {current_user.email}, tenant {tenant_id}")
 
     # Get or create billing record for this tenant
-    billing = crud.tenant_billing.get_or_create(db, tenant_id=current_user.tenant_id)
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
 
     # Calculate remaining budget
     limit_remaining = None
@@ -82,9 +85,10 @@ def get_current_costs(
 @router.get("/documents/{document_id}/cost", response_model=schemas.billing.DocumentCostResponse)
 def get_document_cost(
     *,
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user),
-    document_id: int
+    current_user: User = Depends(deps.get_current_user)
 ):
     """
     Get cost breakdown for a specific document.
@@ -97,25 +101,20 @@ def get_document_cost(
         - Total AI cost in INR
         - Token counts (input/output)
         - Cost breakdown by analysis pass
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
-    logger.info(f"Fetching cost for document {document_id}, user {current_user.email}")
+    logger.info(f"Fetching cost for document {document_id}, user {current_user.email} (tenant_id={tenant_id})")
 
     # Get document with tenant filtering
-    document = crud.document.get(db, id=document_id, tenant_id=current_user.tenant_id)
+    document = crud.document.get(db, id=document_id, tenant_id=tenant_id)
 
     if not document:
-        logger.warning(f"Document {document_id} not found or access denied for tenant {current_user.tenant_id}")
+        logger.warning(f"Document {document_id} not found in tenant {tenant_id}")
         raise HTTPException(
             status_code=404,
             detail="Document not found"
-        )
-
-    # Verify ownership
-    if document.owner_id != current_user.id:
-        logger.warning(f"User {current_user.email} attempted to access document {document_id} owned by user {document.owner_id}")
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
         )
 
     response = schemas.billing.DocumentCostResponse(
@@ -134,6 +133,7 @@ def get_document_cost(
 @router.post("/topup", response_model=schemas.billing.TenantBillingResponse)
 def add_balance(
     *,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user),
     request: schemas.billing.TopUpRequest
@@ -148,15 +148,17 @@ def add_balance(
 
     Returns:
         Updated billing information
+
+    SPRINT 2: Uses tenant_id dependency injection for consistency.
     """
-    logger.info(f"Processing top-up request for user {current_user.email}, amount={request.amount_inr} INR")
+    logger.info(f"Processing top-up request for user {current_user.email} (tenant_id={tenant_id}), amount={request.amount_inr} INR")
 
     # Get billing record
-    billing = crud.tenant_billing.get_or_create(db, tenant_id=current_user.tenant_id)
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
 
     # Verify this is a prepaid account
     if billing.billing_type != "prepaid":
-        logger.warning(f"Top-up attempted on postpaid account for tenant {current_user.tenant_id}")
+        logger.warning(f"Top-up attempted on postpaid account for tenant {tenant_id}")
         raise HTTPException(
             status_code=400,
             detail="Top-up is only available for prepaid accounts"
@@ -165,7 +167,7 @@ def add_balance(
     # Add balance
     updated_billing = crud.tenant_billing.add_balance(
         db,
-        tenant_id=current_user.tenant_id,
+        tenant_id=tenant_id,
         amount_inr=request.amount_inr
     )
 
@@ -176,6 +178,7 @@ def add_balance(
 @router.get("/settings", response_model=schemas.billing.TenantBillingResponse)
 def get_billing_settings(
     *,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ):
@@ -187,10 +190,12 @@ def get_billing_settings(
         - Balance and limits
         - Cost history
         - All billing settings
-    """
-    logger.info(f"Fetching billing settings for user {current_user.email}, tenant {current_user.tenant_id}")
 
-    billing = crud.tenant_billing.get_or_create(db, tenant_id=current_user.tenant_id)
+    SPRINT 2: Uses tenant_id dependency injection for consistency.
+    """
+    logger.info(f"Fetching billing settings for user {current_user.email}, tenant {tenant_id}")
+
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
 
     logger.info(f"Billing settings retrieved for tenant {billing.tenant_id}")
     return billing
@@ -199,6 +204,7 @@ def get_billing_settings(
 @router.put("/settings", response_model=schemas.billing.TenantBillingResponse)
 def update_billing_settings(
     *,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user),
     request: schemas.billing.UpdateBillingSettingsRequest
@@ -216,12 +222,14 @@ def update_billing_settings(
 
     Returns:
         Updated billing information
+
+    SPRINT 2: Uses tenant_id dependency injection for consistency.
     """
-    logger.info(f"Updating billing settings for user {current_user.email}, tenant {current_user.tenant_id}")
+    logger.info(f"Updating billing settings for user {current_user.email}, tenant {tenant_id}")
 
     updated_billing = crud.tenant_billing.update_settings(
         db,
-        tenant_id=current_user.tenant_id,
+        tenant_id=tenant_id,
         billing_type=request.billing_type,
         monthly_limit_inr=request.monthly_limit_inr,
         low_balance_threshold=request.low_balance_threshold

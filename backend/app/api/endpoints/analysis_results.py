@@ -25,17 +25,19 @@ analysis_endpoints = AnalysisEndpoints()
 router = APIRouter()
 
 # --- This is our new multi-pass analysis background task ---
-async def perform_multi_pass_analysis(db: Session, document_id: int, triggered_by_user_id: int):
+async def perform_multi_pass_analysis(db: Session, document_id: int, triggered_by_user_id: int, tenant_id: int):
     """
     This function runs in the background and performs the complete multi-pass analysis
     using the Document Analysis Engine (DAE).
+
+    SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Starting multi-pass analysis for document_id: {document_id}")
-    
-    document = crud.document.get(db=db, id=document_id)
+    logger.info(f"Starting multi-pass analysis for document_id: {document_id} (tenant_id={tenant_id})")
+
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document or not document.raw_text:
-        logger.warning(f"Document {document_id} has no raw_text to analyze.")
+        logger.warning(f"Document {document_id} has no raw_text to analyze (tenant_id={tenant_id})")
         return
 
     # Initialize services
@@ -75,64 +77,65 @@ async def perform_multi_pass_analysis(db: Session, document_id: int, triggered_b
 @router.get("/document/{document_id}", response_model=List[schemas.AnalysisResult])
 def get_analysis_results_for_document(
     document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Retrieve all existing analysis results for a specific document.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Fetching analysis results for document {document_id}")
-    
-    # Verify user owns the document
-    document = crud.document.get(db=db, id=document_id)
-    if not document:
-        logger.warning(f"Document {document_id} not found")
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        logger.warning(f"User {current_user.id} attempted to access analysis results for document {document_id} owned by {document.owner_id}")
-        raise HTTPException(status_code=403, detail="Not authorized to access this document")
+    logger.info(f"Fetching analysis results for document {document_id} (tenant_id={tenant_id})")
 
-    results = crud.analysis_result.get_multi_by_document(db=db, document_id=document_id)
-    logger.info(f"Retrieved {len(results)} analysis results for document {document_id}")
+    # Verify document exists in tenant
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        logger.warning(f"Document {document_id} not found in tenant {tenant_id}")
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    results = crud.analysis_result.get_multi_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
+    logger.info(f"Retrieved {len(results)} analysis results for document {document_id} (tenant_id={tenant_id})")
     return results
 
 
 @router.get("/segment/{segment_id}", response_model=schemas.AnalysisResult)
 def get_analysis_result_for_segment(
     segment_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Retrieve analysis result for a specific document segment.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when segment/document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Fetching analysis result for segment {segment_id}")
-    
-    # Get the segment and verify user has access to the parent document
-    segment = crud.document_segment.get(db=db, id=segment_id)
+    logger.info(f"Fetching analysis result for segment {segment_id} (tenant_id={tenant_id})")
+
+    # Get the segment and verify it's in tenant
+    segment = crud.document_segment.get(db=db, id=segment_id, tenant_id=tenant_id)
     if not segment:
-        logger.warning(f"Segment {segment_id} not found")
+        logger.warning(f"Segment {segment_id} not found in tenant {tenant_id}")
         raise HTTPException(status_code=404, detail="Segment not found")
-    
-    document = crud.document.get(db=db, id=segment.document_id)
+
+    # Verify parent document is in tenant
+    document = crud.document.get(db=db, id=segment.document_id, tenant_id=tenant_id)
     if not document:
-        logger.warning(f"Document {segment.document_id} for segment {segment_id} not found")
+        logger.warning(f"Document {segment.document_id} for segment {segment_id} not found in tenant {tenant_id}")
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        logger.warning(f"User {current_user.id} attempted to access analysis result for segment {segment_id} in document {document.id} owned by {document.owner_id}")
-        raise HTTPException(status_code=403, detail="Not authorized to access this document")
 
     # Get the analysis result for this segment
-    analysis_result = crud.analysis_result.get_by_segment(db=db, segment_id=segment_id)
+    analysis_result = crud.analysis_result.get_by_segment(db=db, segment_id=segment_id, tenant_id=tenant_id)
     if not analysis_result:
-        logger.warning(f"Analysis result not found for segment {segment_id}")
+        logger.warning(f"Analysis result not found for segment {segment_id} (tenant_id={tenant_id})")
         raise HTTPException(status_code=404, detail="Analysis result not found for this segment")
-    
-    logger.info(f"Retrieved analysis result for segment {segment_id}")
+
+    logger.info(f"Retrieved analysis result for segment {segment_id} (tenant_id={tenant_id})")
     return analysis_result
 
 
@@ -140,56 +143,59 @@ def get_analysis_result_for_segment(
 async def run_new_analysis(
     document_id: int,
     background_tasks: BackgroundTasks,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Trigger a new multi-pass analysis on a document using the Document Analysis Engine (DAE).
     This endpoint responds instantly and schedules the analysis to run in the background.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Triggering new analysis for document {document_id}")
-    
-    document = crud.document.get(db=db, id=document_id)
+    logger.info(f"Triggering new analysis for document {document_id} (tenant_id={tenant_id})")
+
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document:
-        logger.warning(f"Document {document_id} not found")
+        logger.warning(f"Document {document_id} not found in tenant {tenant_id}")
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        logger.warning(f"User {current_user.id} attempted to trigger analysis for document {document_id} owned by {document.owner_id}")
-        raise HTTPException(status_code=403, detail="Not authorized to analyze this document")
 
     # Add the multi-pass analysis to the background
     background_tasks.add_task(
         perform_multi_pass_analysis,
         db=db,
         document_id=document_id,
-        triggered_by_user_id=current_user.id
+        triggered_by_user_id=current_user.id,
+        tenant_id=tenant_id  # SPRINT 2: Pass tenant context to background task
     )
 
-    logger.info(f"Multi-pass analysis scheduled for document {document_id}")
+    logger.info(f"Multi-pass analysis scheduled for document {document_id} (tenant_id={tenant_id})")
     return {"message": "Multi-pass analysis has been scheduled to run in the background."}
 
 
 @router.get("/document/{document_id}/consolidated")
 def get_saved_consolidated_analysis(
     document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Return previously saved consolidated analysis if present.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Fetching saved consolidated analysis for document {document_id}")
+    logger.info(f"Fetching saved consolidated analysis for document {document_id} (tenant_id={tenant_id})")
 
-    document = crud.document.get(db=db, id=document_id)
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    if document.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized")
 
-    saved = crud.consolidated_analysis.get_by_document(db=db, document_id=document_id)
+    saved = crud.consolidated_analysis.get_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
     if not saved:
         raise HTTPException(status_code=404, detail="No consolidated analysis found")
     return saved.data
@@ -199,23 +205,23 @@ def get_saved_consolidated_analysis(
 async def consolidate_analysis(
     document_id: int,
     payload: dict,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Generate a consolidated analysis by synthesizing all segment analysis results.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Generating consolidated analysis for document {document_id}")
-    
-    document = crud.document.get(db=db, id=document_id)
+    logger.info(f"Generating consolidated analysis for document {document_id} (tenant_id={tenant_id})")
+
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document:
-        logger.warning(f"Document {document_id} not found")
+        logger.warning(f"Document {document_id} not found in tenant {tenant_id}")
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        logger.warning(f"User {current_user.id} attempted to consolidate analysis for document {document_id} owned by {document.owner_id}")
-        raise HTTPException(status_code=403, detail="Not authorized to access this document")
 
     try:
         # Import the gemini service for consolidation
@@ -258,10 +264,10 @@ async def consolidate_analysis(
         # Parse the JSON response
         try:
             consolidated_analysis = json.loads(cleaned_response)
-            logger.info(f"Successfully generated consolidated analysis for document {document_id}")
+            logger.info(f"Successfully generated consolidated analysis for document {document_id} (tenant_id={tenant_id})")
             # Optionally persist if requested
             if payload.get("save", True):
-                crud.consolidated_analysis.upsert(db=db, document_id=document_id, data=consolidated_analysis)
+                crud.consolidated_analysis.upsert(db=db, document_id=document_id, data=consolidated_analysis, tenant_id=tenant_id)
             return consolidated_analysis
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse consolidated analysis response: {e}")
@@ -276,22 +282,23 @@ async def consolidate_analysis(
 @router.get("/document/{document_id}/runs")
 def get_analysis_runs(
     document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Get all analysis runs for a document with their status and progress.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Fetching analysis runs for document {document_id}")
-    
-    # Verify document ownership
-    document = crud.document.get(db=db, id=document_id)
+    logger.info(f"Fetching analysis runs for document {document_id} (tenant_id={tenant_id})")
+
+    # Verify document exists in tenant
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to view this document's analysis runs")
     
     # Get analysis runs for this document
     run_service = AnalysisRunService()
@@ -320,22 +327,23 @@ def get_analysis_runs(
 @router.get("/document/{document_id}/runs/active")
 def get_active_analysis_run(
     document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Get the currently active analysis run for a document, if any.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when document not in tenant to avoid leaking existence.
     """
     logger = analysis_endpoints.logger
-    logger.info(f"Fetching active analysis run for document {document_id}")
-    
-    # Verify document ownership
-    document = crud.document.get(db=db, id=document_id)
+    logger.info(f"Fetching active analysis run for document {document_id} (tenant_id={tenant_id})")
+
+    # Verify document exists in tenant
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
-    if document.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to view this document's analysis runs")
     
     # Get active run for this document
     run_service = AnalysisRunService()

@@ -26,6 +26,7 @@ router = APIRouter()
 
 @router.get("/", response_model=List[schemas.CodeComponent])
 def read_code_components(
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100,
@@ -33,21 +34,24 @@ def read_code_components(
 ) -> Any:
     """
     Retrieve all code components for the current user.
+
+    SPRINT 2: Now filtered by tenant_id for multi-tenancy isolation.
     """
     logger = code_component_endpoints.logger
-    logger.info(f"Fetching code components for user {current_user.id}, skip={skip}, limit={limit}")
-    
+    logger.info(f"Fetching code components for user {current_user.id} (tenant_id={tenant_id}), skip={skip}, limit={limit}")
+
     code_components = crud.code_component.get_multi_by_owner(
-        db=db, owner_id=current_user.id, skip=skip, limit=limit
+        db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=skip, limit=limit
     )
-    
-    logger.info(f"Retrieved {len(code_components)} code components for user {current_user.id}")
+
+    logger.info(f"Retrieved {len(code_components)} code components for user {current_user.id} (tenant_id={tenant_id})")
     return code_components
 
 
 @router.post("/", response_model=schemas.CodeComponent)
 def create_code_component(
     *,
+    tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     code_component_in: schemas.CodeComponentCreate,
     current_user: models.User = Depends(deps.get_current_user),
@@ -55,25 +59,28 @@ def create_code_component(
 ) -> Any:
     """
     Create new code component.
+
+    SPRINT 2: Now creates component in current tenant for multi-tenancy isolation.
     """
     logger = code_component_endpoints.logger
-    logger.info(f"Creating code component '{code_component_in.name}' for user {current_user.id}")
-    
+    logger.info(f"Creating code component '{code_component_in.name}' for user {current_user.id} (tenant_id={tenant_id})")
+
     try:
         code_component = crud.code_component.create_with_owner(
-            db=db, obj_in=code_component_in, owner_id=current_user.id
+            db=db, obj_in=code_component_in, owner_id=current_user.id, tenant_id=tenant_id
         )
 
         # Add the new analysis service to the background queue
         # This triggers our new pipeline without making the user wait
+        # SPRINT 2 NOTE: Phase 6 will add tenant_id to background task
         background_tasks.add_task(
             code_analysis_service.analyze_component_in_background,
             component_id=code_component.id
         )
-        
-        logger.info(f"Code component {code_component.id} created successfully and analysis scheduled")
+
+        logger.info(f"Code component {code_component.id} created successfully in tenant {tenant_id} and analysis scheduled")
         return code_component
-        
+
     except Exception as e:
         logger.error(f"Failed to create code component: {e}")
         raise ValidationException(f"Failed to create code component: {str(e)}")
@@ -82,55 +89,53 @@ def create_code_component(
 @router.get("/{id}", response_model=schemas.CodeComponent)
 def read_code_component(
     *,
-    db: Session = Depends(deps.get_db),
     id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Get code component by ID.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when component not in tenant to avoid leaking existence.
     """
     logger = code_component_endpoints.logger
-    logger.info(f"Attempting to fetch CodeComponent with id: {id} for user: {current_user.email}")
-    
-    component = crud.code_component.get(db=db, id=id)
-    
-    if not component:
-        logger.warning(f"DATABASE MISS: CodeComponent with id {id} not found in the database.")
-        raise HTTPException(status_code=404, detail="CodeComponent not found")
-    
-    logger.info(f"DATABASE HIT: Found component '{component.name}' with owner_id: {component.owner_id}")
+    logger.info(f"Fetching CodeComponent {id} for user {current_user.email} (tenant_id={tenant_id})")
 
-    if component.owner_id != current_user.id:
-        logger.error(f"PERMISSION DENIED: User {current_user.email} tried to access component owned by user {component.owner_id}.")
-        raise HTTPException(status_code=403, detail="Not enough permissions")
-    
-    logger.info(f"Successfully retrieved component {id} for user {current_user.email}")
+    component = crud.code_component.get(db=db, id=id, tenant_id=tenant_id)
+
+    if not component:
+        logger.warning(f"CodeComponent {id} not found in tenant {tenant_id}")
+        raise HTTPException(status_code=404, detail="CodeComponent not found")
+
+    logger.info(f"Successfully retrieved component {id} ('{component.name}') for user {current_user.email}")
     return component
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_code_component(
     *,
-    db: Session = Depends(deps.get_db),
     id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ):
     """
     Delete a code component and its associated links.
+
+    SPRINT 2: Now filtered by tenant_id. Uses "Schrödinger's Document" pattern -
+    returns 404 (not 403) when component not in tenant to avoid leaking existence.
     """
     logger = code_component_endpoints.logger
-    logger.info(f"User {current_user.email} attempting to delete component {id}")
-    
-    component = crud.code_component.get(db=db, id=id)
+    logger.info(f"User {current_user.email} attempting to delete component {id} (tenant_id={tenant_id})")
+
+    component = crud.code_component.get(db=db, id=id, tenant_id=tenant_id)
     if not component:
-        logger.warning(f"Component {id} not found for deletion")
+        logger.warning(f"Component {id} not found in tenant {tenant_id} for deletion")
         raise HTTPException(status_code=404, detail="CodeComponent not found")
-    
-    if component.owner_id != current_user.id:
-        logger.warning(f"User {current_user.email} attempted to delete component {id} owned by user {component.owner_id}")
-        raise HTTPException(status_code=403, detail="Not enough permissions")
-    
+
     # Use our new safe deletion method from the CRUD layer
-    crud.code_component.remove_with_links(db=db, id=id)
-    logger.info(f"Successfully deleted component {id}")
+    crud.code_component.remove_with_links(db=db, id=id, tenant_id=tenant_id)
+    logger.info(f"Successfully deleted component {id} from tenant {tenant_id}")
     # No return value is needed, as the 204 status code implies success with no content.
