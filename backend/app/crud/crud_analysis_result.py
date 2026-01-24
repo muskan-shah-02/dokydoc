@@ -14,42 +14,75 @@ class CRUDAnalysisResult(CRUDBase[AnalysisResult, AnalysisResultCreate, None]):
     """
 
     def create_for_document(
-        self, 
-        db: Session, 
-        *, 
-        obj_in: AnalysisResultCreate
+        self,
+        db: Session,
+        *,
+        obj_in: AnalysisResultCreate,
+        tenant_id: int
     ) -> AnalysisResult:
         """
         Create a new analysis result for a specific document.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
         """
-        db_obj = self.model(**obj_in.model_dump())
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for analysis result creation")
+
+        obj_data = obj_in.model_dump()
+        obj_data["tenant_id"] = tenant_id  # SPRINT 2: Assign to tenant
+        db_obj = self.model(**obj_data)
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
         return db_obj
 
     def get_multi_by_document(
-        self, db: Session, *, document_id: int
+        self, db: Session, *, document_id: int, tenant_id: int
     ) -> List[AnalysisResult]:
         """
         Retrieve all analysis results associated with a specific document.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
         """
-        return db.query(self.model).filter(self.model.document_id == document_id).all()
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_multi_by_document()")
+
+        return db.query(self.model).filter(
+            self.model.document_id == document_id,
+            self.model.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+        ).all()
 
     def get_by_segment(
-        self, db: Session, *, segment_id: int
+        self, db: Session, *, segment_id: int, tenant_id: int
     ) -> Optional[AnalysisResult]:
         """
         Retrieve analysis result for a specific segment.
-        """
-        return db.query(self.model).filter(self.model.segment_id == segment_id).first()
 
-    def delete_by_segment(self, db: Session, *, segment_id: int) -> int:
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_by_segment()")
+
+        return db.query(self.model).filter(
+            self.model.segment_id == segment_id,
+            self.model.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+        ).first()
+
+    def delete_by_segment(self, db: Session, *, segment_id: int, tenant_id: int) -> int:
         """
         Delete analysis result for a specific segment.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+
         Returns the number of deleted analysis results.
         """
-        deleted_count = db.query(self.model).filter(self.model.segment_id == segment_id).delete()
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for delete_by_segment()")
+
+        deleted_count = db.query(self.model).filter(
+            self.model.segment_id == segment_id,
+            self.model.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+        ).delete()
         db.commit()
         return deleted_count
 

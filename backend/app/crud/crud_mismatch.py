@@ -15,23 +15,40 @@ class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
     """
 
     def create_with_owner(
-        self, db: Session, *, obj_in: MismatchCreate, owner_id: int
+        self, db: Session, *, obj_in: MismatchCreate, owner_id: int, tenant_id: int
     ) -> Mismatch:
-        """Create a new mismatch and associate it with an owner."""
+        """
+        Create a new mismatch and associate it with an owner.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for mismatch creation")
+
         obj_in_data = obj_in.model_dump()
-        db_obj = self.model(**obj_in_data, owner_id=owner_id)
+        db_obj = self.model(**obj_in_data, owner_id=owner_id, tenant_id=tenant_id)
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
         return db_obj
 
     def get_multi_by_owner(
-        self, db: Session, *, owner_id: int, skip: int = 0, limit: int = 100
+        self, db: Session, *, owner_id: int, tenant_id: int, skip: int = 0, limit: int = 100
     ) -> List[Mismatch]:
-        """Retrieve multiple mismatches for a specific owner with eager loading."""
+        """
+        Retrieve multiple mismatches for a specific owner with eager loading.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_multi_by_owner()")
+
         return (
             db.query(self.model)
-            .filter(Mismatch.owner_id == owner_id)
+            .filter(
+                Mismatch.owner_id == owner_id,
+                Mismatch.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+            )
             .options(
                 joinedload(self.model.document),
                 joinedload(self.model.code_component)
@@ -43,14 +60,21 @@ class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
         )
 
     # --- NEW: Helper method for the ValidationService ---
-    def remove_by_link(self, db: Session, *, document_id: int, code_component_id: int) -> int:
+    def remove_by_link(self, db: Session, *, document_id: int, code_component_id: int, tenant_id: int) -> int:
         """
         Deletes all mismatches associated with a specific document-code link.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+
         Returns the number of mismatches deleted.
         """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for remove_by_link()")
+
         num_deleted = db.query(self.model).filter(
             self.model.document_id == document_id,
-            self.model.code_component_id == code_component_id
+            self.model.code_component_id == code_component_id,
+            self.model.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
         ).delete()
         db.commit()
         return num_deleted
@@ -61,11 +85,23 @@ class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
         *,
         obj_in: dict,
         link_id: int,
-        owner_id: int
+        owner_id: int,
+        tenant_id: int
     ) -> Mismatch:
-        link = db.query(DocumentCodeLink).filter(DocumentCodeLink.id == link_id).first()
+        """
+        Create mismatch from document-code link.
+
+        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for create_with_link()")
+
+        link = db.query(DocumentCodeLink).filter(
+            DocumentCodeLink.id == link_id,
+            DocumentCodeLink.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+        ).first()
         if not link:
-            raise ValueError(f"DocumentCodeLink {link_id} not found")
+            raise ValueError(f"DocumentCodeLink {link_id} not found in tenant {tenant_id}")
 
         mismatch_schema = MismatchCreate(
             **obj_in,
@@ -73,7 +109,7 @@ class CRUDMismatch(CRUDBase[Mismatch, MismatchCreate, MismatchUpdate]):
             code_component_id=link.code_component_id
         )
 
-        db_obj = self.model(**mismatch_schema.model_dump(), owner_id=owner_id)
+        db_obj = self.model(**mismatch_schema.model_dump(), owner_id=owner_id, tenant_id=tenant_id)
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)

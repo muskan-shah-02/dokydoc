@@ -16,22 +16,38 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         """Check if model has tenant_id column for multi-tenancy support."""
         return hasattr(self.model, 'tenant_id')
 
-    def get(self, db: Session, id: Any, *, tenant_id: Optional[int] = None) -> Optional[ModelType]:
+    def get(self, db: Session, id: Any, *, tenant_id: int) -> Optional[ModelType]:
         """
-        Get a single record by ID, optionally filtered by tenant_id.
+        Get a single record by ID, filtered by tenant_id.
+
+        SPRINT 2: tenant_id is now REQUIRED (not optional) for data isolation.
 
         Args:
             db: Database session
             id: Record ID
-            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
+
+        Raises:
+            ValueError: If tenant_id is not provided or model doesn't support multi-tenancy
         """
-        query = db.query(self.model).filter(self.model.id == id)
+        # CRITICAL VALIDATION: Ensure tenant_id is provided
+        if not tenant_id:
+            raise ValueError(
+                f"tenant_id is REQUIRED for {self.model.__name__}.get() - "
+                "this is a critical security requirement for data isolation"
+            )
 
-        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
-        if tenant_id is not None and self._has_tenant_id():
-            query = query.filter(self.model.tenant_id == tenant_id)
+        # Validate model supports multi-tenancy
+        if not self._has_tenant_id():
+            raise ValueError(
+                f"Model {self.model.__name__} does not support multi-tenancy (missing tenant_id column)"
+            )
 
-        return query.first()
+        # Build query with MANDATORY tenant filter
+        return db.query(self.model).filter(
+            self.model.id == id,
+            self.model.tenant_id == tenant_id
+        ).first()
 
     def get_multi(
         self,
@@ -39,27 +55,78 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         *,
         skip: int = 0,
         limit: int = 100,
-        tenant_id: Optional[int] = None
+        tenant_id: int
     ) -> List[ModelType]:
         """
-        Get multiple records with pagination, optionally filtered by tenant_id.
+        Get multiple records with pagination, filtered by tenant_id.
+
+        SPRINT 2: tenant_id is now REQUIRED (not optional) for data isolation.
 
         Args:
             db: Database session
             skip: Number of records to skip (pagination offset)
             limit: Maximum number of records to return
-            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
+
+        Raises:
+            ValueError: If tenant_id is not provided or model doesn't support multi-tenancy
         """
-        query = db.query(self.model)
+        # CRITICAL VALIDATION: Ensure tenant_id is provided
+        if not tenant_id:
+            raise ValueError(
+                f"tenant_id is REQUIRED for {self.model.__name__}.get_multi() - "
+                "this is a critical security requirement for data isolation"
+            )
 
-        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
-        if tenant_id is not None and self._has_tenant_id():
-            query = query.filter(self.model.tenant_id == tenant_id)
+        # Validate model supports multi-tenancy
+        if not self._has_tenant_id():
+            raise ValueError(
+                f"Model {self.model.__name__} does not support multi-tenancy (missing tenant_id column)"
+            )
 
-        return query.offset(skip).limit(limit).all()
+        # Build query with MANDATORY tenant filter
+        return db.query(self.model).filter(
+            self.model.tenant_id == tenant_id
+        ).offset(skip).limit(limit).all()
 
-    def create(self, db: Session, *, obj_in: CreateSchemaType) -> ModelType:
+    def create(self, db: Session, *, obj_in: CreateSchemaType, tenant_id: int) -> ModelType:
+        """
+        Create a new record with tenant_id automatically injected.
+
+        SPRINT 2: tenant_id is now REQUIRED and automatically assigned to the record.
+
+        Args:
+            db: Database session
+            obj_in: Pydantic schema with create data
+            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
+
+        Raises:
+            ValueError: If tenant_id is not provided or model doesn't support multi-tenancy
+
+        Returns:
+            Created database object
+        """
+        # CRITICAL VALIDATION: Ensure tenant_id is provided
+        if not tenant_id:
+            raise ValueError(
+                f"tenant_id is REQUIRED for {self.model.__name__}.create() - "
+                "this is a critical security requirement for data isolation"
+            )
+
+        # Validate model supports multi-tenancy
+        if not self._has_tenant_id():
+            raise ValueError(
+                f"Model {self.model.__name__} does not support multi-tenancy (missing tenant_id column)"
+            )
+
+        # Convert Pydantic model to dict
         obj_in_data = obj_in.model_dump()
+
+        # CRITICAL: Force tenant_id to prevent tenant hijacking
+        # Even if obj_in contains tenant_id, we override it with the authenticated tenant
+        obj_in_data["tenant_id"] = tenant_id
+
+        # Create database object
         db_obj = self.model(**obj_in_data)
         db.add(db_obj)
         db.commit()
@@ -98,10 +165,46 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         return db_obj
 
 
-    def remove(self, db: Session, *, id: int) -> ModelType:
-        obj = db.query(self.model).get(id)
-        db.delete(obj)
-        db.commit()
+    def remove(self, db: Session, *, id: int, tenant_id: int) -> Optional[ModelType]:
+        """
+        Remove a record by ID, filtered by tenant_id.
+
+        SPRINT 2: tenant_id is now REQUIRED to prevent cross-tenant deletion.
+
+        Args:
+            db: Database session
+            id: Record ID to delete
+            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
+
+        Raises:
+            ValueError: If tenant_id is not provided or model doesn't support multi-tenancy
+
+        Returns:
+            Deleted database object, or None if not found
+        """
+        # CRITICAL VALIDATION: Ensure tenant_id is provided
+        if not tenant_id:
+            raise ValueError(
+                f"tenant_id is REQUIRED for {self.model.__name__}.remove() - "
+                "this is a critical security requirement for data isolation"
+            )
+
+        # Validate model supports multi-tenancy
+        if not self._has_tenant_id():
+            raise ValueError(
+                f"Model {self.model.__name__} does not support multi-tenancy (missing tenant_id column)"
+            )
+
+        # Find object with tenant filter (prevents cross-tenant deletion)
+        obj = db.query(self.model).filter(
+            self.model.id == id,
+            self.model.tenant_id == tenant_id
+        ).first()
+
+        if obj:
+            db.delete(obj)
+            db.commit()
+
         return obj
     
     def get_multi_by_ids(
@@ -109,22 +212,38 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         db: Session,
         *,
         ids: List[int],
-        tenant_id: Optional[int] = None
+        tenant_id: int
     ) -> List[ModelType]:
         """
-        Get multiple records by IDs, optionally filtered by tenant_id.
+        Get multiple records by IDs, filtered by tenant_id.
+
+        SPRINT 2: tenant_id is now REQUIRED (not optional) for data isolation.
 
         Args:
             db: Database session
             ids: List of record IDs to fetch
-            tenant_id: Optional tenant ID for multi-tenancy isolation (Sprint 1: BE-MULTI-01)
+            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
+
+        Raises:
+            ValueError: If tenant_id is not provided or model doesn't support multi-tenancy
         """
-        query = db.query(self.model).filter(self.model.id.in_(ids))
+        # CRITICAL VALIDATION: Ensure tenant_id is provided
+        if not tenant_id:
+            raise ValueError(
+                f"tenant_id is REQUIRED for {self.model.__name__}.get_multi_by_ids() - "
+                "this is a critical security requirement for data isolation"
+            )
 
-        # Apply tenant filter if model supports multi-tenancy and tenant_id is provided
-        if tenant_id is not None and self._has_tenant_id():
-            query = query.filter(self.model.tenant_id == tenant_id)
+        # Validate model supports multi-tenancy
+        if not self._has_tenant_id():
+            raise ValueError(
+                f"Model {self.model.__name__} does not support multi-tenancy (missing tenant_id column)"
+            )
 
-        return query.all()
+        # Build query with MANDATORY tenant filter
+        return db.query(self.model).filter(
+            self.model.id.in_(ids),
+            self.model.tenant_id == tenant_id
+        ).all()
     
     
