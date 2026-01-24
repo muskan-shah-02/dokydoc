@@ -39,11 +39,24 @@ def _truncate_password(password: str) -> str:
     return truncated_bytes.decode('utf-8', errors='ignore')
 
 
-def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+def create_access_token(
+    subject: Union[str, Any],
+    tenant_id: int,
+    tenant_subdomain: str = None,
+    roles: list = None,
+    is_superuser: bool = False,
+    expires_delta: timedelta = None
+) -> str:
     """
-    Creates a new JWT access token.
+    Creates a new JWT access token with tenant context.
+
+    SPRINT 2 ENHANCEMENT: Includes tenant_id for multi-tenancy isolation.
 
     :param subject: The subject of the token (e.g., user's email or ID).
+    :param tenant_id: The tenant ID this user belongs to (REQUIRED for Sprint 2).
+    :param tenant_subdomain: Optional tenant subdomain for URL routing.
+    :param roles: List of user roles for RBAC.
+    :param is_superuser: Whether user is a superuser (enables tenant override).
     :param expires_delta: The lifespan of the token. If not provided, it defaults
                           to the value from the settings.
     :return: The encoded JWT token as a string.
@@ -55,20 +68,35 @@ def create_access_token(subject: Union[str, Any], expires_delta: timedelta = Non
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
 
-    # BE-04/AUTH-01 FIX: Add token type to differentiate access vs refresh tokens
-    to_encode = {"exp": expire, "sub": str(subject), "type": "access"}
+    # SPRINT 2: Enhanced JWT payload with tenant context and roles
+    to_encode = {
+        "exp": expire,
+        "sub": str(subject),
+        "type": "access",
+        "tenant_id": tenant_id,  # CRITICAL: Required for tenant isolation
+        "tenant_subdomain": tenant_subdomain,
+        "roles": roles or [],
+        "is_superuser": is_superuser  # Enables X-Tenant-Override for superusers
+    }
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
 
-def create_refresh_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+def create_refresh_token(
+    subject: Union[str, Any],
+    tenant_id: int,
+    expires_delta: timedelta = None
+) -> str:
     """
     Creates a new JWT refresh token for long-lived sessions.
 
     BE-04/AUTH-01 FIX: Refresh tokens allow users to get new access tokens
     without re-authenticating, preventing session loss during long document processing.
 
+    SPRINT 2 ENHANCEMENT: Includes tenant_id for proper token refresh.
+
     :param subject: The subject of the token (e.g., user's email or ID).
+    :param tenant_id: The tenant ID this user belongs to (REQUIRED for Sprint 2).
     :param expires_delta: The lifespan of the token. If not provided, it defaults
                           to REFRESH_TOKEN_EXPIRE_DAYS from settings.
     :return: The encoded JWT refresh token as a string.
@@ -81,7 +109,13 @@ def create_refresh_token(subject: Union[str, Any], expires_delta: timedelta = No
         )
 
     # Mark this as a refresh token (prevents using refresh token as access token)
-    to_encode = {"exp": expire, "sub": str(subject), "type": "refresh"}
+    # SPRINT 2: Include tenant_id for proper refresh flow
+    to_encode = {
+        "exp": expire,
+        "sub": str(subject),
+        "type": "refresh",
+        "tenant_id": tenant_id  # CRITICAL: Required for tenant-aware refresh
+    }
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 

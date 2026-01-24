@@ -17,6 +17,7 @@ from app.api.endpoints import (
     document_code_links, analysis_results, validation, billing
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
+from app.middleware.tenant_context import TenantContextMiddleware
 from slowapi.errors import RateLimitExceeded
 
 # Setup logging
@@ -61,6 +62,10 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
 
 # --- Middleware Configuration ---
+
+# SPRINT 2: Tenant Context Middleware (MUST be added BEFORE CORS)
+# This extracts tenant_id from JWT and injects it into request.state
+app.add_middleware(TenantContextMiddleware)
 
 # CORS middleware
 app.add_middleware(
