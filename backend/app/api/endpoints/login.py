@@ -35,11 +35,16 @@ def create_user(
     """
     Create a new user.
 
+    SPRINT 2 NOTE: This endpoint is DEPRECATED for production use.
+    Use POST /api/v1/tenants/register instead (Phase 3).
+
+    This endpoint creates users in the default tenant (tenant_id=1) for testing only.
+
     Rate Limit: 5 registrations/minute, 20/hour per IP (prevents spam)
     """
     logger = login_endpoints.logger
     logger.info(f"Creating new user with email: {user_in.email}")
-    
+
     user = crud.user.get_user_by_email(db, email=user_in.email)
     if user:
         logger.warning(f"User creation failed - email {user_in.email} already exists")
@@ -47,9 +52,11 @@ def create_user(
             status_code=400,
             detail="A user with this email already exists.",
         )
-    
-    user = crud.user.create_user(db=db, obj_in=user_in)
-    logger.info(f"User {user.id} created successfully with email: {user.email}")
+
+    # SPRINT 2: Create user in default tenant (tenant_id=1) for testing
+    # TODO: Remove this endpoint after Phase 3 tenant registration is implemented
+    user = crud.user.create_user(db=db, obj_in=user_in, tenant_id=1)
+    logger.info(f"User {user.id} created successfully with email: {user.email} (tenant_id=1)")
     return user
 
 
@@ -85,21 +92,32 @@ def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # BE-04/AUTH-01 FIX: Create both access and refresh tokens
+    # SPRINT 2: Create both access and refresh tokens with tenant context
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        subject=user.email, expires_delta=access_token_expires
+        subject=user.email,
+        tenant_id=user.tenant_id,  # SPRINT 2: Include tenant context
+        tenant_subdomain="default" if user.tenant_id == 1 else None,  # TODO: Get from tenant table
+        roles=user.roles,  # SPRINT 2: Include roles for RBAC
+        is_superuser=user.is_superuser,  # SPRINT 2: Enable tenant override for superusers
+        expires_delta=access_token_expires
     )
 
     refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     refresh_token = create_refresh_token(
-        subject=user.email, expires_delta=refresh_token_expires
+        subject=user.email,
+        tenant_id=user.tenant_id,  # SPRINT 2: Include tenant context
+        expires_delta=refresh_token_expires
     )
 
-    logger.info(f"Login successful for user: {user.email} (access token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES}min, refresh token: {settings.REFRESH_TOKEN_EXPIRE_DAYS}d)")
+    logger.info(
+        f"Login successful for user: {user.email} (tenant_id={user.tenant_id}, "
+        f"access token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES}min, "
+        f"refresh token: {settings.REFRESH_TOKEN_EXPIRE_DAYS}d)"
+    )
     return {
         "access_token": access_token,
-        "refresh_token": refresh_token,  # BE-04 FIX: Return refresh token
+        "refresh_token": refresh_token,
         "token_type": "bearer"
     }
 
@@ -162,18 +180,25 @@ def refresh_access_token(
             detail="User not found"
         )
 
-    # Create new access token and refresh token
+    # SPRINT 2: Create new access token and refresh token with tenant context
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     new_access_token = create_access_token(
-        subject=user.email, expires_delta=access_token_expires
+        subject=user.email,
+        tenant_id=user.tenant_id,  # SPRINT 2: Include tenant context
+        tenant_subdomain="default" if user.tenant_id == 1 else None,  # TODO: Get from tenant table
+        roles=user.roles,  # SPRINT 2: Include roles for RBAC
+        is_superuser=user.is_superuser,  # SPRINT 2: Enable tenant override for superusers
+        expires_delta=access_token_expires
     )
 
     refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     new_refresh_token = create_refresh_token(
-        subject=user.email, expires_delta=refresh_token_expires
+        subject=user.email,
+        tenant_id=user.tenant_id,  # SPRINT 2: Include tenant context
+        expires_delta=refresh_token_expires
     )
 
-    logger.info(f"Tokens refreshed for user: {user.email}")
+    logger.info(f"Tokens refreshed for user: {user.email} (tenant_id={user.tenant_id})")
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,  # Return new refresh token
