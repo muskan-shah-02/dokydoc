@@ -7,3 +7,4 @@ from .crud_mismatch import mismatch
 from .crud_document_segment import document_segment
 from .crud_consolidated_analysis import crud_consolidated_analysis as consolidated_analysis
 from .crud_tenant_billing import tenant_billing
+from .crud_tenant import tenant  # SPRINT 2 Phase 3: Tenant registration

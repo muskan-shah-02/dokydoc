@@ -1,5 +1,6 @@
 from . import user
 from . import token
+from . import tenant  # SPRINT 2 Phase 3: Tenant registration
 from .document import Document, DocumentCreate, DocumentUpdate
 from .code_component import CodeComponent, CodeComponentCreate, CodeComponentUpdate
 from .document_code_link import DocumentCodeLink, DocumentCodeLinkCreate
