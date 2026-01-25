@@ -17,26 +17,42 @@ class CodeAnalysisService(LoggerMixin):
     def __init__(self):
         super().__init__()
     
-    def analyze_component_in_background(self, component_id: int) -> None:
+    def analyze_component_in_background(self, component_id: int, tenant_id: int = None) -> None:
         """
         This is the main entry point that will be called as a background task.
         It's a synchronous function that sets up and runs the main async logic.
-        """
-        self.logger.info(f"Setting up async analysis for component_id: {component_id}")
-        asyncio.run(self._async_analyze_component(component_id))
 
-    async def _async_analyze_component(self, component_id: int) -> None:
+        SPRINT 2 Phase 6: Added tenant_id for multi-tenancy isolation.
+
+        Args:
+            component_id: ID of the code component to analyze
+            tenant_id: Tenant ID for isolation (SPRINT 2)
+        """
+        self.logger.info(f"Setting up async analysis for component_id: {component_id}, tenant_id: {tenant_id}")
+        asyncio.run(self._async_analyze_component(component_id, tenant_id))
+
+    async def _async_analyze_component(self, component_id: int, tenant_id: int = None) -> None:
         """
         This is the core asynchronous logic for analyzing a single code component.
         It handles the entire lifecycle of fetching, analyzing, and storing results.
+
+        SPRINT 2 Phase 6: Added tenant_id for multi-tenancy isolation.
+
+        Args:
+            component_id: ID of the code component to analyze
+            tenant_id: Tenant ID for isolation (SPRINT 2)
         """
         db: Session = SessionLocal()
         component = None
         try:
             # Retrieve the component from the database
-            component = crud.code_component.get(db=db, id=component_id)
+            # SPRINT 2 Phase 6: Filter by tenant_id for isolation
+            component = crud.code_component.get(db=db, id=component_id, tenant_id=tenant_id)
             if not component:
-                self.logger.error(f"CodeAnalysisService: Component with ID {component_id} not found.")
+                self.logger.error(
+                    f"CodeAnalysisService: Component with ID {component_id} not found "
+                    f"in tenant {tenant_id}"
+                )
                 return
 
             # 1. Update status to 'processing' to give feedback to the UI

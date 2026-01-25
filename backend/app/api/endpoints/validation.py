@@ -85,11 +85,12 @@ def run_validation_scan(
         )
 
     # Schedule validation scan in background
-    # SPRINT 2 NOTE: Phase 6 will add tenant_id to background task
+    # SPRINT 2 Phase 6: Pass tenant_id to background task for isolation
     background_tasks.add_task(
         validation_service.run_validation_scan,
         user_id=current_user.id,
-        document_ids=document_ids
+        document_ids=document_ids,
+        tenant_id=tenant_id
     )
 
     logger.info(f"Validation scan scheduled for user {current_user.id} (tenant_id={tenant_id}) on {len(document_ids)} documents")

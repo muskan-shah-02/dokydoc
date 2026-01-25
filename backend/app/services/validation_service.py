@@ -35,24 +35,36 @@ class ValidationService(LoggerMixin):
         finally:
             db.close()
 
-    async def run_validation_scan(self, user_id: int, document_ids: List[int]):
+    async def run_validation_scan(self, user_id: int, document_ids: List[int], tenant_id: int = None):
         """
-        Your top-level orchestration logic is preserved. It correctly filters
-        documents and links for the specific user.
+        Run validation scan for documents.
+
+        SPRINT 2 Phase 6: Added tenant_id for multi-tenancy isolation.
+
+        Args:
+            user_id: User ID who triggered the scan
+            document_ids: List of document IDs to validate
+            tenant_id: Tenant ID for isolation (SPRINT 2)
         """
         if not document_ids:
             self.logger.warning(f"No document IDs provided for user {user_id}")
             return
 
-        self.logger.info(f"Starting validation scan for user_id: {user_id} on documents: {document_ids}")
+        self.logger.info(
+            f"Starting validation scan for user_id: {user_id}, tenant_id: {tenant_id} "
+            f"on documents: {document_ids}"
+        )
         async with ValidationService.get_db_session() as db:
             try:
-                user_documents = db.query(models.Document).filter(
-                    and_(
-                        models.Document.owner_id == user_id,
-                        models.Document.id.in_(document_ids)
-                    )
-                ).all()
+                # SPRINT 2 Phase 6: Filter by tenant_id for isolation
+                filters = [
+                    models.Document.owner_id == user_id,
+                    models.Document.id.in_(document_ids)
+                ]
+                if tenant_id:
+                    filters.append(models.Document.tenant_id == tenant_id)
+
+                user_documents = db.query(models.Document).filter(and_(*filters)).all()
 
                 found_doc_ids = [doc.id for doc in user_documents]
                 if len(found_doc_ids) != len(document_ids):
@@ -63,19 +75,27 @@ class ValidationService(LoggerMixin):
                     self.logger.warning(f"No valid documents found for user {user_id}")
                     return
 
+                # SPRINT 2 Phase 6: Filter links by tenant_id
+                link_filters = [
+                    models.Document.owner_id == user_id,
+                    models.DocumentCodeLink.document_id.in_(found_doc_ids)
+                ]
+                if tenant_id:
+                    link_filters.append(models.Document.tenant_id == tenant_id)
+
                 links = db.query(models.DocumentCodeLink).join(models.Document).filter(
-                    and_(
-                        models.Document.owner_id == user_id,
-                        models.DocumentCodeLink.document_id.in_(found_doc_ids)
-                    )
+                    and_(*link_filters)
                 ).all()
 
                 if not links:
-                    self.logger.info(f"No document-code links found for documents {found_doc_ids} for user {user_id}")
+                    self.logger.info(
+                        f"No document-code links found for documents {found_doc_ids} "
+                        f"for user {user_id} (tenant_id={tenant_id})"
+                    )
                     return
 
-                # Your original task processing logic is preserved
-                tasks = [self.validate_single_link(link, user_id) for link in links]
+                # SPRINT 2 Phase 6: Pass tenant_id to validate_single_link
+                tasks = [self.validate_single_link(link, user_id, tenant_id) for link in links]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 successful_validations = 0
@@ -93,21 +113,47 @@ class ValidationService(LoggerMixin):
             finally:
                 self.logger.info(f"Validation scan finished for user_id: {user_id}")
 
-    async def validate_single_link(self, link: DocumentCodeLink, user_id: int):
+    async def validate_single_link(self, link: DocumentCodeLink, user_id: int, tenant_id: int = None):
         """
-        --- THIS IS THE FINAL, ARCHITECTURALLY CORRECT METHOD ---
+        Validate a single document-code link.
+
+        SPRINT 2 Phase 6: Added tenant_id for multi-tenancy isolation.
+
+        Args:
+            link: DocumentCodeLink to validate
+            user_id: User ID who owns the link
+            tenant_id: Tenant ID for isolation (SPRINT 2)
         """
         async with GEMINI_API_SEMAPHORE:
             async with ValidationService.get_db_session() as db:
                 try:
-                    document = db.query(models.Document).filter(models.Document.id == link.document_id).first()
-                    code_component = db.query(models.CodeComponent).filter(models.CodeComponent.id == link.code_component_id).first()
+                    # SPRINT 2 Phase 6: Filter by tenant_id
+                    doc_filters = [models.Document.id == link.document_id]
+                    if tenant_id:
+                        doc_filters.append(models.Document.tenant_id == tenant_id)
+                    document = db.query(models.Document).filter(and_(*doc_filters)).first()
+
+                    code_filters = [models.CodeComponent.id == link.code_component_id]
+                    if tenant_id:
+                        code_filters.append(models.CodeComponent.tenant_id == tenant_id)
+                    code_component = db.query(models.CodeComponent).filter(and_(*code_filters)).first()
 
                     if not document or not code_component:
-                        self.logger.error(f"Missing document or code component for link {link.id}")
+                        self.logger.error(
+                            f"Missing document or code component for link {link.id} "
+                            f"(tenant_id={tenant_id})"
+                        )
                         return
 
-                    doc_analysis_objects = crud.analysis_result.get_multi_by_document(db=db, document_id=document.id)
+                    # SPRINT 2 Phase 6: Pass tenant_id to CRUD
+                    if tenant_id:
+                        doc_analysis_objects = crud.analysis_result.get_multi_by_document(
+                            db=db, document_id=document.id, tenant_id=tenant_id
+                        )
+                    else:
+                        doc_analysis_objects = crud.analysis_result.get_multi_by_document(
+                            db=db, document_id=document.id
+                        )
 
                     if not doc_analysis_objects or not code_component.structured_analysis:
                         self.logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")

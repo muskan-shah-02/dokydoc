@@ -72,10 +72,11 @@ def create_code_component(
 
         # Add the new analysis service to the background queue
         # This triggers our new pipeline without making the user wait
-        # SPRINT 2 NOTE: Phase 6 will add tenant_id to background task
+        # SPRINT 2 Phase 6: Pass tenant_id to background task for isolation
         background_tasks.add_task(
             code_analysis_service.analyze_component_in_background,
-            component_id=code_component.id
+            component_id=code_component.id,
+            tenant_id=tenant_id
         )
 
         logger.info(f"Code component {code_component.id} created successfully in tenant {tenant_id} and analysis scheduled")
