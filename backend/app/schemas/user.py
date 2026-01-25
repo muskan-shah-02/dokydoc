@@ -45,3 +45,41 @@ class User(UserBase):
 
     class Config:
         from_attributes = True
+
+
+# SPRINT 2 Phase 5: User Management Schemas
+
+class UserResponse(BaseModel):
+    """
+    Schema for user information in API responses.
+    Includes tenant context and timestamps.
+    """
+    id: int
+    email: EmailStr
+    roles: List[Role]
+    is_superuser: bool
+    tenant_id: int
+    created_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class UserInvite(BaseModel):
+    """
+    Schema for inviting a new user to a tenant.
+
+    Used by tenant admins (CXO) to add users.
+    """
+    email: EmailStr
+    password: str  # TODO: Consider auto-generating and emailing
+    roles: List[Role]
+
+
+class UserRolesUpdate(BaseModel):
+    """
+    Schema for updating a user's roles.
+
+    Used by tenant admins (CXO) to change permissions.
+    """
+    roles: List[Role]

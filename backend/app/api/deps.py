@@ -133,14 +133,194 @@ def get_current_user_with_role(required_role: Role):
     """
     def _get_user_with_role(current_user: User = Depends(get_current_user)):
         logger.debug(f"Checking role {required_role.value} for user {current_user.email}")
-        
+
         if required_role.value not in current_user.roles:
             logger.warning(f"User {current_user.email} attempted to access resource requiring role {required_role.value}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to access this resource.",
             )
-        
+
         logger.debug(f"User {current_user.email} has required role {required_role.value}")
         return current_user
     return _get_user_with_role
+
+
+# SPRINT 2 Phase 5: Permission-based dependencies
+
+def require_permission(required_permission):
+    """
+    Dependency factory that checks if the current user has a specific permission.
+
+    SPRINT 2 Phase 5: Fine-grained permission checking.
+
+    Usage:
+        @router.get("/protected")
+        def protected_endpoint(
+            current_user: User = Depends(require_permission(Permission.DOCUMENT_WRITE))
+        ):
+            ...
+
+    Args:
+        required_permission: Permission enum value to check
+
+    Returns:
+        Dependency function that validates permission
+    """
+    from app.core.permissions import permission_checker
+
+    def _check_permission(current_user: User = Depends(get_current_user)):
+        logger.debug(
+            f"Checking permission {required_permission.value} for user {current_user.email}"
+        )
+
+        if not permission_checker.user_has_permission(current_user.roles, required_permission):
+            logger.warning(
+                f"Permission denied: User {current_user.email} (roles={current_user.roles}) "
+                f"attempted to access resource requiring {required_permission.value}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You do not have permission to {required_permission.value}",
+            )
+
+        logger.debug(f"User {current_user.email} has permission {required_permission.value}")
+        return current_user
+
+    return _check_permission
+
+
+def require_any_permission(*required_permissions):
+    """
+    Dependency factory that checks if user has ANY of the specified permissions.
+
+    SPRINT 2 Phase 5: Flexible permission checking (OR logic).
+
+    Usage:
+        @router.get("/flexible")
+        def flexible_endpoint(
+            current_user: User = Depends(
+                require_any_permission(Permission.DOCUMENT_READ, Permission.CODE_READ)
+            )
+        ):
+            ...
+
+    Args:
+        *required_permissions: Variable number of Permission enum values
+
+    Returns:
+        Dependency function that validates user has at least one permission
+    """
+    from app.core.permissions import permission_checker
+
+    def _check_any_permission(current_user: User = Depends(get_current_user)):
+        logger.debug(
+            f"Checking if user {current_user.email} has any of: "
+            f"{[p.value for p in required_permissions]}"
+        )
+
+        if not permission_checker.user_has_any_permission(
+            current_user.roles, list(required_permissions)
+        ):
+            logger.warning(
+                f"Permission denied: User {current_user.email} (roles={current_user.roles}) "
+                f"attempted to access resource requiring any of: "
+                f"{[p.value for p in required_permissions]}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have the required permissions to access this resource",
+            )
+
+        logger.debug(f"User {current_user.email} has required permissions")
+        return current_user
+
+    return _check_any_permission
+
+
+def require_all_permissions(*required_permissions):
+    """
+    Dependency factory that checks if user has ALL of the specified permissions.
+
+    SPRINT 2 Phase 5: Strict permission checking (AND logic).
+
+    Usage:
+        @router.post("/strict")
+        def strict_endpoint(
+            current_user: User = Depends(
+                require_all_permissions(Permission.DOCUMENT_WRITE, Permission.BILLING_VIEW)
+            )
+        ):
+            ...
+
+    Args:
+        *required_permissions: Variable number of Permission enum values
+
+    Returns:
+        Dependency function that validates user has all permissions
+    """
+    from app.core.permissions import permission_checker
+
+    def _check_all_permissions(current_user: User = Depends(get_current_user)):
+        logger.debug(
+            f"Checking if user {current_user.email} has all of: "
+            f"{[p.value for p in required_permissions]}"
+        )
+
+        if not permission_checker.user_has_all_permissions(
+            current_user.roles, list(required_permissions)
+        ):
+            logger.warning(
+                f"Permission denied: User {current_user.email} (roles={current_user.roles}) "
+                f"attempted to access resource requiring all of: "
+                f"{[p.value for p in required_permissions]}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have all the required permissions to access this resource",
+            )
+
+        logger.debug(f"User {current_user.email} has all required permissions")
+        return current_user
+
+    return _check_all_permissions
+
+
+def require_tenant_admin(current_user: User = Depends(get_current_user)):
+    """
+    Dependency that requires user to be a tenant admin (CXO role).
+
+    SPRINT 2 Phase 5: Tenant admin restriction for user management.
+
+    Usage:
+        @router.post("/admin-only")
+        def admin_endpoint(
+            current_user: User = Depends(require_tenant_admin)
+        ):
+            ...
+
+    Args:
+        current_user: Current authenticated user
+
+    Returns:
+        User if they are tenant admin
+
+    Raises:
+        HTTPException: If user is not a tenant admin
+    """
+    from app.core.permissions import permission_checker
+
+    logger.debug(f"Checking if user {current_user.email} is tenant admin")
+
+    if not permission_checker.is_tenant_admin(current_user.roles):
+        logger.warning(
+            f"Tenant admin access denied: User {current_user.email} (roles={current_user.roles}) "
+            f"attempted to access tenant admin resource"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only tenant administrators (CXO) can access this resource",
+        )
+
+    logger.debug(f"User {current_user.email} is tenant admin")
+    return current_user

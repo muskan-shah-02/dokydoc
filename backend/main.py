@@ -14,7 +14,7 @@ from app.core.exceptions import DokyDocException, handle_dokydoc_exception, crea
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
     login, dashboard, documents, code_components,
-    document_code_links, analysis_results, validation, billing, tenants  # SPRINT 2 Phase 3
+    document_code_links, analysis_results, validation, billing, tenants, users  # SPRINT 2 Phase 5
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -268,6 +268,13 @@ app.include_router(
     tenants.router,
     tags=["Tenants"],
     prefix=f"/api/{settings.API_VERSION}/tenants"
+)
+
+# SPRINT 2 Phase 5: Tenant user management (RBAC)
+app.include_router(
+    users.router,
+    tags=["User Management"],
+    prefix=f"/api/{settings.API_VERSION}/users"
 )
 
 app.include_router(

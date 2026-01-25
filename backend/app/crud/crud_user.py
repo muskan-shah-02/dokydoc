@@ -42,4 +42,32 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         db.refresh(db_obj)
         return db_obj
 
+    def get_multi_by_tenant(
+        self, db: Session, *, tenant_id: int, skip: int = 0, limit: int = 100
+    ) -> list[User]:
+        """
+        Get all users in a specific tenant.
+
+        SPRINT 2 Phase 5: Used by tenant admins to list users in their tenant.
+
+        Args:
+            db: Database session
+            tenant_id: Tenant ID to filter by
+            skip: Number of records to skip (pagination)
+            limit: Maximum number of records to return
+
+        Returns:
+            List of users in the tenant
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED")
+
+        return (
+            db.query(User)
+            .filter(User.tenant_id == tenant_id)
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
 user = CRUDUser(User)
