@@ -158,6 +158,7 @@ docker-compose exec db psql -U dokydoc dokydoc -c "\dt"
 1. `c8f2a1d9e321` (down_revision=None) - Sprint 1 base tables (users, documents, etc.)
 2. `d4f3e2a1b567` (revises c8f2a1d9e321) - Sprint 2 tenant table + foreign keys
 3. `b342e208f554` (revises d4f3e2a1b567) - Sprint 2 analysis_runs table
+4. `f1a2b3c4d5e6` (revises b342e208f554) - Sprint 2 composite indexes (security & performance)
 
 ### Cycle Detected Error
 

@@ -1,5 +1,5 @@
 from typing import List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.crud.base import CRUDBase
 from app.models.document_segment import DocumentSegment
@@ -14,14 +14,17 @@ class CRUDDocumentSegment(CRUDBase[DocumentSegment, DocumentSegmentCreate, Docum
         Get all segments for a specific document.
 
         SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
+        PERFORMANCE: Eager loads analysis_results to prevent N+1 queries.
         """
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for get_multi_by_document()")
 
-        return db.query(DocumentSegment).filter(
-            DocumentSegment.document_id == document_id,
-            DocumentSegment.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
-        ).offset(skip).limit(limit).all()
+        return db.query(DocumentSegment)\
+            .options(joinedload(DocumentSegment.analysis_results))\
+            .filter(
+                DocumentSegment.document_id == document_id,
+                DocumentSegment.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+            ).offset(skip).limit(limit).all()
 
     def get_by_document(
         self, db: Session, *, document_id: int, tenant_id: int
