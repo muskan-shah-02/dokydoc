@@ -11,15 +11,22 @@ docker-compose down -v
 # 2. Start database and redis
 docker-compose up -d db redis
 
-# 3. Run migrations
-docker-compose run --rm app alembic upgrade head
+# 3. Initialize database (create all tables from models)
+docker-compose run --rm app python scripts/init_db.py
 
-# 4. Create initial data (creates default tenant and users)
+# 4. Mark migrations as applied
+docker-compose run --rm app alembic stamp head
+
+# 5. Create initial data (creates default tenant and users)
 docker-compose exec app python initial_data.py
 
-# 5. Start all services
+# 6. Start all services
 docker-compose up -d
 ```
+
+**Why use `init_db.py` instead of migrations?**
+
+The Alembic migrations were written to ADD multi-tenancy to an existing schema, but the base migration that creates the initial tables is missing. Rather than rewriting all migrations, `init_db.py` creates all tables directly from SQLAlchemy models (which already include `tenant_id`). We then mark migrations as "applied" with `alembic stamp head` so future migrations will work correctly.
 
 ## Initial Data Created
 
