@@ -126,6 +126,32 @@ This means you're trying to create a user without a tenant. Make sure:
 2. You've created a tenant (or run `initial_data.py`)
 3. You're passing `tenant_id` when creating users
 
+### Relation Does Not Exist Error
+
+If you see: `relation "documents" does not exist` or `relation "users" does not exist`
+
+This means migrations are running out of order. **Solution: Fresh start (required)**
+```bash
+# Stop and remove everything
+docker-compose down -v
+
+# Start database
+docker-compose up -d db redis
+
+# Run ALL migrations in correct order
+docker-compose run --rm app alembic upgrade head
+
+# Verify migrations completed
+docker-compose exec db psql -U dokydoc dokydoc -c "\dt"
+
+# You should see: tenants, users, documents, code_components, etc.
+```
+
+**Root Cause:** The migration chain must be:
+1. `c8f2a1d9e321` - Sprint 1 base tables (users, documents, etc.)
+2. `d4f3e2a1b567` - Sprint 2 tenant table + foreign keys
+3. `b342e208f554` - Sprint 2 analysis_runs table
+
 ## API Changes in Sprint 2
 
 ### Authentication

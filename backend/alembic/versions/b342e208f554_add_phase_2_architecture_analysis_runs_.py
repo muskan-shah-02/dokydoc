@@ -2,9 +2,10 @@
 """Add Phase 2 architecture: analysis_runs table and status fields
 
 Revision ID: b342e208f554
-Revises: 3d4d38b70252
+Revises: d4f3e2a1b567
 Create Date: 2025-09-11 20:15:27.801157
 
+SPRINT 2 Phase 8: Fixed down_revision to point to Sprint 2 tenant migration
 """
 from typing import Sequence, Union
 
@@ -14,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'b342e208f554'
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = 'd4f3e2a1b567'  # SPRINT 2 Phase 8: Fixed to depend on tenant migration
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
