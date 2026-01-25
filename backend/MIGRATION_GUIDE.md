@@ -147,10 +147,23 @@ docker-compose exec db psql -U dokydoc dokydoc -c "\dt"
 # You should see: tenants, users, documents, code_components, etc.
 ```
 
-**Root Cause:** The migration chain must be:
-1. `c8f2a1d9e321` - Sprint 1 base tables (users, documents, etc.)
-2. `d4f3e2a1b567` - Sprint 2 tenant table + foreign keys
-3. `b342e208f554` - Sprint 2 analysis_runs table
+**Root Cause:** The migration chain must be (in order):
+1. `c8f2a1d9e321` (down_revision=None) - Sprint 1 base tables (users, documents, etc.)
+2. `d4f3e2a1b567` (revises c8f2a1d9e321) - Sprint 2 tenant table + foreign keys
+3. `b342e208f554` (revises d4f3e2a1b567) - Sprint 2 analysis_runs table
+
+### Cycle Detected Error
+
+If you see: `Cycle is detected in revisions`
+
+This means one of the migrations has an incorrect `down_revision` pointing back to a later migration.
+**Solution: This should be fixed in latest code. Pull and try again:**
+```bash
+git pull
+docker-compose down -v
+docker-compose up -d db redis
+docker-compose run --rm app alembic upgrade head
+```
 
 ## API Changes in Sprint 2
 

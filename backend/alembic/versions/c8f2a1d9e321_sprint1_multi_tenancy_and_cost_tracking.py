@@ -1,13 +1,15 @@
 """Sprint 1: Multi-tenancy and cost tracking
 
 Revision ID: c8f2a1d9e321
-Revises: b342e208f554
+Revises: None
 Create Date: 2026-01-14 10:00:00.000000
 
 This migration adds:
 1. tenant_id to all tables for multi-tenancy support
 2. Cost tracking fields to documents table
 3. New tenant_billing table for per-tenant billing
+
+SPRINT 2 Phase 8: Fixed down_revision to None (this is the base migration)
 """
 from typing import Sequence, Union
 
@@ -17,7 +19,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c8f2a1d9e321'
-down_revision: Union[str, None] = 'b342e208f554'
+down_revision: Union[str, None] = None  # SPRINT 2 Phase 8: This is the base migration
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
