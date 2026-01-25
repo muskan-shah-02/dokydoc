@@ -12,7 +12,13 @@ from app.models.code_component import CodeComponent  # noqa
 from app.models.document_code_link import DocumentCodeLink  # noqa
 from app.models.mismatch import Mismatch  # noqa
 from app.models.tenant import Tenant  # noqa
-from app.models.billing import Billing  # noqa
+from app.models.tenant_billing import TenantBilling  # noqa
+from app.models.analysis_run import AnalysisRun  # noqa
+from app.models.consolidated_analysis import ConsolidatedAnalysis  # noqa
+from app.models.initiative import Initiative  # noqa
+from app.models.initiative_asset import InitiativeAsset  # noqa
+from app.models.ontology_concept import OntologyConcept  # noqa
+from app.models.ontology_relationship import OntologyRelationship  # noqa
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}
