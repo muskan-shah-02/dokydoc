@@ -353,6 +353,7 @@ async def analyze_document(
     This now uses Celery instead of BackgroundTasks. (Fix for A-01)
 
     SPRINT 2: Analysis is scoped to tenant. Celery task receives tenant_id.
+    SPRINT 2 Phase 4: Billing enforcement added - checks balance before analysis.
     """
     logger = document_endpoints.logger
     logger.info(f"Received analysis request for document {document_id}, tenant {tenant_id}")
@@ -374,6 +375,58 @@ async def analyze_document(
         logger.error(f"Document {document.id} has no storage_path, cannot analyze.")
         raise HTTPException(status_code=500, detail="Document file is missing.")
 
+    # SPRINT 2 Phase 4: Billing enforcement - check if tenant can afford analysis
+    from app.services.billing_enforcement_service import (
+        billing_enforcement_service,
+        InsufficientBalanceException,
+        MonthlyLimitExceededException
+    )
+
+    try:
+        # Estimate cost based on document size
+        estimated_cost = billing_enforcement_service.estimate_analysis_cost(
+            document_size_kb=document.file_size_kb or 100,  # Default 100KB if not set
+            document_type=document.document_type or "PRD"
+        )
+
+        # Check if tenant can afford it
+        affordability_check = billing_enforcement_service.check_can_afford_analysis(
+            db=db,
+            tenant_id=tenant_id,
+            estimated_cost_inr=estimated_cost
+        )
+
+        logger.info(
+            f"Billing check passed for document {document.id}: "
+            f"estimated_cost=₹{estimated_cost}, billing_type={affordability_check['billing_type']}"
+        )
+
+    except InsufficientBalanceException as e:
+        logger.warning(f"Analysis blocked - insufficient balance: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "error": "insufficient_balance",
+                "message": e.message,
+                "required_inr": e.required,
+                "available_inr": e.available,
+                "shortage_inr": e.required - e.available
+            }
+        )
+
+    except MonthlyLimitExceededException as e:
+        logger.warning(f"Analysis blocked - monthly limit exceeded: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "error": "monthly_limit_exceeded",
+                "message": e.message,
+                "monthly_limit_inr": e.limit,
+                "current_month_cost": e.current,
+                "overage_inr": e.current - e.limit
+            }
+        )
+
     # Set status to "processing" and reset any old errors
     crud.document.update(
         db=db,
@@ -389,7 +442,10 @@ async def analyze_document(
     )
 
     logger.info(f"Analysis for document {document.id} (tenant {tenant_id}) has been scheduled (202 Accepted)")
-    return {"message": "Document analysis has been scheduled"}
+    return {
+        "message": "Document analysis has been scheduled",
+        "estimated_cost_inr": estimated_cost
+    }
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(

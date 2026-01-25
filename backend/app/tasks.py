@@ -10,15 +10,22 @@ from app.services.lock_service import lock_service
 from app.core.logging import logger
 
 @celery_app.task(name="process_document_pipeline")
-def process_document_pipeline(document_id: int, storage_path: str):
+def process_document_pipeline(document_id: int, storage_path: str, tenant_id: int = None):
     """
     Celery task to orchestrate the full document pipeline.
     This runs in a separate worker process.
 
     FLAW-10 FIX: Uses distributed locks to prevent race conditions
     when multiple workers try to process the same document.
+
+    SPRINT 2 Phase 4: tenant_id added for billing enforcement.
+
+    Args:
+        document_id: ID of document to process
+        storage_path: File path to document
+        tenant_id: Tenant ID for billing (optional for backwards compat)
     """
-    logger.info(f"CELERY_TASK started for document_id: {document_id}")
+    logger.info(f"CELERY_TASK started for document_id: {document_id}, tenant_id: {tenant_id}")
 
     # FLAW-10 FIX: Acquire distributed lock to prevent concurrent processing
     # Use context manager for automatic lock release
@@ -36,7 +43,15 @@ def process_document_pipeline(document_id: int, storage_path: str):
         # A Celery task MUST manage its own DB session.
         db = SessionLocal()
 
-        document = crud.document.get(db=db, id=document_id)
+        # SPRINT 2 Phase 4: Get document with tenant_id for billing
+        if tenant_id:
+            document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+        else:
+            # Backwards compatibility: fetch without tenant filter
+            document = crud.document.get(db=db, id=document_id)
+            if document:
+                tenant_id = document.tenant_id  # Get tenant_id from document
+
         if not document:
             logger.error(f"Celery task could not find document_id: {document_id}")
             db.close()
@@ -45,8 +60,9 @@ def process_document_pipeline(document_id: int, storage_path: str):
         try:
             # We use asyncio.run() to execute our async pipeline
             # from within this synchronous Celery task.
+            # SPRINT 2 Phase 4: Pass tenant_id for billing
             asyncio.run(
-                _run_async_pipeline(db, document, storage_path, document_id)
+                _run_async_pipeline(db, document, storage_path, document_id, tenant_id)
             )
         except Exception as e:
             # Top-level safety net
@@ -63,9 +79,18 @@ def process_document_pipeline(document_id: int, storage_path: str):
             logger.info(f"CELERY_TASK finished for document_id: {document_id}")
             # Lock is automatically released by context manager
 
-async def _run_async_pipeline(db, document, storage_path, document_id):
+async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id=None):
     """
     This is the core async logic that runs inside the Celery task.
+
+    SPRINT 2 Phase 4: tenant_id added for billing cost deduction after analysis.
+
+    Args:
+        db: Database session
+        document: Document object
+        storage_path: Path to document file
+        document_id: Document ID
+        tenant_id: Tenant ID for billing (optional)
     """
     
     # --- Step 1: Text Extraction ---
@@ -106,10 +131,52 @@ async def _run_async_pipeline(db, document, storage_path, document_id):
         # This DAE service will provide its own granular status updates
         # (e.g., "pass_1_composition") as it runs, fulfilling UX-02.
         success = await dae.analyze_document(db=db, document_id=document.id, learning_mode=True)
-        
+
         if success:
             crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100, "error_message": None})
             logger.info(f"Multi-pass analysis completed successfully for document_id: {document_id}")
+
+            # SPRINT 2 Phase 4: Deduct cost from tenant after successful analysis
+            if tenant_id:
+                try:
+                    from app.services.billing_enforcement_service import billing_enforcement_service
+
+                    # Refresh document to get latest cost data
+                    db.refresh(document)
+
+                    # Use actual cost if available, otherwise use estimate
+                    actual_cost = float(document.ai_cost_inr) if document.ai_cost_inr else 0.0
+
+                    if actual_cost > 0:
+                        result = billing_enforcement_service.deduct_cost(
+                            db=db,
+                            tenant_id=tenant_id,
+                            cost_inr=actual_cost,
+                            description=f"Document analysis: {document.filename}"
+                        )
+
+                        logger.info(
+                            f"Cost deducted for tenant {tenant_id}: ₹{actual_cost} "
+                            f"(billing_type={result['billing_type']}, "
+                            f"low_balance_alert={result['low_balance_alert']})"
+                        )
+
+                        # Emit low balance warning if needed
+                        if result.get('low_balance_alert'):
+                            logger.warning(
+                                f"⚠️ LOW BALANCE ALERT for tenant {tenant_id}: "
+                                f"balance=₹{result.get('new_balance_inr', 'N/A')}"
+                            )
+                    else:
+                        logger.info(f"No cost to deduct for document {document_id} (ai_cost_inr=0)")
+
+                except Exception as billing_error:
+                    # Don't fail the entire analysis if billing deduction fails
+                    logger.error(f"Failed to deduct billing cost for tenant {tenant_id}: {billing_error}")
+                    # Continue - document analysis was successful
+            else:
+                logger.debug(f"No tenant_id provided for document {document_id}, skipping billing deduction")
+
         else:
             # If 'success' is false, the DAE service should have already
             # set the error_message in the DB, per DAE-01.

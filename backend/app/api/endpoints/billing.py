@@ -237,3 +237,42 @@ def update_billing_settings(
 
     logger.info(f"Billing settings updated successfully for tenant {updated_billing.tenant_id}")
     return updated_billing
+
+
+@router.get("/usage")
+def get_billing_usage(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+):
+    """
+    Get current billing usage for tenant.
+
+    SPRINT 2 Phase 4: Shows current usage, balance, limits, and alerts.
+
+    Returns:
+        {
+            "tenant_id": int,
+            "billing_type": "prepaid" | "postpaid",
+            "balance_inr": float (prepaid only),
+            "current_month_cost": float,
+            "last_30_days_cost": float,
+            "monthly_limit_inr": float (if set),
+            "limit_remaining_inr": float (if limit set),
+            "limit_usage_percentage": float (if limit set),
+            "low_balance_alert": bool
+        }
+    """
+    logger.info(f"Fetching billing usage for tenant {tenant_id}, user {current_user.email}")
+
+    from app.services.billing_enforcement_service import billing_enforcement_service
+
+    usage = billing_enforcement_service.get_current_usage(db=db, tenant_id=tenant_id)
+
+    logger.info(
+        f"Billing usage retrieved for tenant {tenant_id}: "
+        f"type={usage['billing_type']}, current_month=₹{usage['current_month_cost']}"
+    )
+
+    return usage
