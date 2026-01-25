@@ -52,11 +52,12 @@ def upgrade() -> None:
     """)
     
     # Step 2: Create the analysis_runs table first
+    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
     op.create_table('analysis_runs',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('document_id', sa.Integer(), nullable=False),
         sa.Column('triggered_by_user_id', sa.Integer(), nullable=False),
-        sa.Column('status', sa.Enum('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', name='analysisrunstatus'), nullable=False),
+        sa.Column('status', postgresql.ENUM('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', name='analysisrunstatus', create_type=False), nullable=False),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.Column('started_at', sa.DateTime(), nullable=True),
         sa.Column('completed_at', sa.DateTime(), nullable=True),
@@ -71,13 +72,14 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['triggered_by_user_id'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
-    
+
     # Step 2: Add nullable columns to existing tables
-    op.add_column('analysisresult', sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED', name='analysisresultstatus'), nullable=True))
+    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
+    op.add_column('analysisresult', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED', name='analysisresultstatus', create_type=False), nullable=True))
     op.add_column('analysisresult', sa.Column('error_message', sa.Text(), nullable=True))
     op.add_column('analysisresult', sa.Column('processing_time_ms', sa.Integer(), nullable=True))
-    
-    op.add_column('document_segments', sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED', name='segmentstatus'), nullable=True))
+
+    op.add_column('document_segments', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED', name='segmentstatus', create_type=False), nullable=True))
     op.add_column('document_segments', sa.Column('retry_count', sa.Integer(), nullable=True))
     op.add_column('document_segments', sa.Column('last_error', sa.String(), nullable=True))
     op.add_column('document_segments', sa.Column('analysis_run_id', sa.Integer(), nullable=True))
