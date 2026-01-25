@@ -54,7 +54,11 @@ async def main() -> None:
                 name="Default Organization",
                 subdomain="default",
                 tier="pro",  # Give default tenant pro tier
-                billing_type="prepaid"
+                billing_type="prepaid",
+                # Provide admin credentials (required by TenantCreate schema)
+                # These are only used for validation; actual user creation happens below
+                admin_email="superuser@example.com",
+                admin_password="superuserpassword"
             )
             default_tenant = tenant_crud.create_tenant(db, obj_in=tenant_in)
             logger.info(f"Created default tenant: {default_tenant.name} (ID: {default_tenant.id})")
