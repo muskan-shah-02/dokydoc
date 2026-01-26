@@ -26,10 +26,10 @@ PUBLIC_ROUTES = [
     "/docs",
     "/openapi.json",
     "/redoc",
-    "/login/access-token",
-    "/refresh",
-    "/users/",  # User registration
+    "/api/login/access-token",  # Login endpoint
+    "/api/refresh",  # Refresh token endpoint
     "/api/v1/tenants/register",  # Tenant registration
+    "/api/v1/tenants/check-subdomain",  # Subdomain availability check
 ]
 
 
@@ -111,10 +111,13 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
                 raise AuthenticationException("Missing tenant_id in authentication token")
 
         except JWTError as e:
-            # Invalid token - let the auth dependency handle this
-            logger.warning(f"JWT decode error in tenant context: {e}")
-            # Don't raise here - let get_current_user handle auth errors
-            pass
+            # JWT decode error - log and continue without setting tenant context
+            # This allows unauthenticated endpoints to work, but authenticated
+            # endpoints will fail at the dependency level
+            logger.debug(f"JWT decode error in tenant context: {e}")
+            # Set tenant_id to None explicitly so we know middleware ran
+            request.state.tenant_id = None
+            request.state.is_tenant_override = False
 
         except AuthenticationException:
             # Re-raise authentication exceptions
