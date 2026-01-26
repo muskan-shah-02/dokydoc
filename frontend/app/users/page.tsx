@@ -99,7 +99,7 @@ export default function UsersPage() {
     setInviteError(null);
 
     try {
-      await api.post("/users/invite/", {
+      await api.post("/users/invite", {
         email: inviteEmail,
         roles: inviteRoles,
       });
@@ -125,7 +125,7 @@ export default function UsersPage() {
     }
 
     try {
-      await api.put(`/users/${userId}/`, {
+      await api.put(`/users/${userId}`, {
         is_active: !currentStatus,
       });
       loadUsers();
