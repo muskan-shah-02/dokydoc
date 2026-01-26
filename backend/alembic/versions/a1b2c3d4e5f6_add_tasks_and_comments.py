@@ -66,7 +66,7 @@ def upgrade():
         sa.Column('estimated_hours', sa.Integer(), nullable=True),
         sa.Column('actual_hours', sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(['assigned_to_id'], ['users.id'], ),
-        sa.ForeignKeyConstraint(['code_component_id'], ['codecomponents.id'], ondelete='SET NULL'),
+        sa.ForeignKeyConstraint(['code_component_id'], ['code_components.id'], ondelete='SET NULL'),
         sa.ForeignKeyConstraint(['created_by_id'], ['users.id'], ),
         sa.ForeignKeyConstraint(['document_id'], ['documents.id'], ondelete='SET NULL'),
         sa.ForeignKeyConstraint(['tenant_id'], ['tenants.id'], ondelete='CASCADE'),

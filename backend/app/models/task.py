@@ -95,7 +95,7 @@ class Task(Base):
     )
     code_component_id = Column(
         Integer,
-        ForeignKey("codecomponents.id", ondelete="SET NULL"),
+        ForeignKey("code_components.id", ondelete="SET NULL"),
         nullable=True,
         index=True
     )
