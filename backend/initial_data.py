@@ -1,4 +1,9 @@
 import asyncio
+
+# CRITICAL: Import app.db.base FIRST to ensure all models are registered
+# This must happen before any CRUD imports to avoid mapper initialization errors
+import app.db.base  # noqa: F401
+
 from app.db.session import get_db_context
 from app.crud.crud_user import user as user_crud
 from app.crud.crud_tenant import tenant as tenant_crud
