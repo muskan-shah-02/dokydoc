@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
+from datetime import datetime
 from enum import Enum
 
 # Define the available roles using an Enum for consistency and validation
@@ -59,7 +60,7 @@ class UserResponse(BaseModel):
     roles: List[Role]
     is_superuser: bool
     tenant_id: int
-    created_at: Optional[str] = None
+    created_at: datetime
 
     class Config:
         from_attributes = True
