@@ -36,6 +36,14 @@ class Permission(str, Enum):
     VALIDATION_VIEW = "validation:view"
     VALIDATION_RUN = "validation:run"
 
+    # Task Permissions (Sprint 2 Extended - Phase 10)
+    TASK_READ = "task:read"
+    TASK_CREATE = "task:create"
+    TASK_UPDATE = "task:update"
+    TASK_DELETE = "task:delete"
+    TASK_ASSIGN = "task:assign"
+    TASK_COMMENT = "task:comment"
+
     # Billing Permissions
     BILLING_VIEW = "billing:view"
     BILLING_MANAGE = "billing:manage"  # Update settings, add balance
@@ -72,6 +80,12 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.ANALYSIS_RUN,
         Permission.VALIDATION_VIEW,
         Permission.VALIDATION_RUN,
+        Permission.TASK_READ,
+        Permission.TASK_CREATE,
+        Permission.TASK_UPDATE,
+        Permission.TASK_DELETE,
+        Permission.TASK_ASSIGN,
+        Permission.TASK_COMMENT,
         Permission.BILLING_VIEW,
         Permission.BILLING_MANAGE,
         Permission.USER_VIEW,
@@ -94,6 +108,11 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.ANALYSIS_RUN,
         Permission.VALIDATION_VIEW,
         Permission.VALIDATION_RUN,
+        Permission.TASK_READ,
+        Permission.TASK_CREATE,
+        Permission.TASK_UPDATE,
+        Permission.TASK_ASSIGN,  # BA can assign tasks
+        Permission.TASK_COMMENT,
         Permission.BILLING_VIEW,  # Can view billing but not manage
         Permission.USER_VIEW,  # Can see other users
         Permission.TENANT_VIEW,  # Can view tenant info
@@ -113,6 +132,10 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.ANALYSIS_RUN,
         Permission.VALIDATION_VIEW,
         Permission.VALIDATION_RUN,
+        Permission.TASK_READ,
+        Permission.TASK_CREATE,
+        Permission.TASK_UPDATE,
+        Permission.TASK_COMMENT,
         Permission.BILLING_VIEW,
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
@@ -127,6 +150,10 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.ANALYSIS_VIEW,
         Permission.ANALYSIS_RUN,
         Permission.VALIDATION_VIEW,
+        Permission.TASK_READ,
+        Permission.TASK_CREATE,
+        Permission.TASK_UPDATE,
+        Permission.TASK_COMMENT,
         Permission.BILLING_VIEW,
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,

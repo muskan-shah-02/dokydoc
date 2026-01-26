@@ -19,6 +19,7 @@ from app.models.initiative import Initiative  # noqa
 from app.models.initiative_asset import InitiativeAsset  # noqa
 from app.models.ontology_concept import OntologyConcept  # noqa
 from app.models.ontology_relationship import OntologyRelationship  # noqa
+from app.models.task import Task, TaskComment  # noqa - Sprint 2 Extended Phase 10
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}

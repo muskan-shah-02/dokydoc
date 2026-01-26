@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .analysis_result import AnalysisResult  # noqa: F401
     from .document_segment import DocumentSegment  # noqa: F401
     from .user import User  # noqa: F401
+    from .task import Task  # noqa: F401
 
 
 # --- Re-introducing Enums (required by the model) ---
@@ -109,3 +110,8 @@ class Document(Base):
     
     # Owner of the document
     owner: Mapped["User"] = relationship("User", back_populates="documents")
+
+    # Sprint 2 Extended - Phase 10: Tasks linked to this document
+    tasks: Mapped[List["Task"]] = relationship(
+        "Task", back_populates="document", lazy="dynamic"
+    )

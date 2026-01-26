@@ -14,7 +14,7 @@ from app.core.exceptions import DokyDocException, handle_dokydoc_exception, crea
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
     login, dashboard, documents, code_components,
-    document_code_links, analysis_results, validation, billing, tenants, users  # SPRINT 2 Phase 5
+    document_code_links, analysis_results, validation, billing, tenants, users, tasks  # SPRINT 2 Phase 10
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -317,6 +317,13 @@ app.include_router(
     billing.router,
     prefix=f"/api/{settings.API_VERSION}/billing",
     tags=["Billing"]
+)
+
+# SPRINT 2 Extended Phase 10: Task Management
+app.include_router(
+    tasks.router,
+    prefix=f"/api/{settings.API_VERSION}/tasks",
+    tags=["Tasks"]
 )
 
 # --- Startup Event (Legacy support) ---

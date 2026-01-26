@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 from datetime import datetime
 from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -7,6 +7,7 @@ from app.db.base_class import Base
 
 if TYPE_CHECKING:
     from .user import User  # noqa: F401
+    from .task import Task  # noqa: F401
 
 class CodeComponent(Base):
     """
@@ -51,4 +52,9 @@ class CodeComponent(Base):
     # Timestamp fields
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+
+    # Sprint 2 Extended - Phase 10: Tasks linked to this code component
+    tasks: Mapped[List["Task"]] = relationship(
+        "Task", back_populates="code_component", lazy="dynamic"
+    )
 

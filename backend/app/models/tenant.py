@@ -3,11 +3,14 @@ Tenant model for multi-tenancy support.
 Represents an organization/company using DokyDoc.
 """
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from sqlalchemy import Integer, String, DateTime, Numeric, JSON
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
+
+if TYPE_CHECKING:
+    from app.models.task import Task
 
 
 class Tenant(Base):
@@ -45,3 +48,6 @@ class Tenant(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # First admin user
+
+    # Relationships (Sprint 2 Extended - Phase 10)
+    tasks: Mapped[list["Task"]] = relationship("Task", back_populates="tenant", lazy="dynamic")
