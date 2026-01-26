@@ -73,9 +73,18 @@ export class ApiClient {
       });
     }
 
+    const headers = this.getAuthHeaders();
+
+    // DEBUG: Log token presence for troubleshooting
+    console.log('[API] GET', endpoint, {
+      hasToken: !!localStorage.getItem('accessToken'),
+      hasAuthHeader: !!headers.Authorization,
+      url: url.toString()
+    });
+
     const response = await fetch(url.toString(), {
       method: 'GET',
-      headers: this.getAuthHeaders(),
+      headers,
     });
 
     return this.handleResponse<T>(response);
@@ -85,9 +94,18 @@ export class ApiClient {
    * POST request
    */
   async post<T>(endpoint: string, data?: any): Promise<T> {
+    const headers = this.getAuthHeaders();
+
+    // DEBUG: Log token presence for troubleshooting
+    console.log('[API] POST', endpoint, {
+      hasToken: !!localStorage.getItem('accessToken'),
+      hasAuthHeader: !!headers.Authorization,
+      url: `${this.baseUrl}${endpoint}`
+    });
+
     const response = await fetch(`${this.baseUrl}${endpoint}`, {
       method: 'POST',
-      headers: this.getAuthHeaders(),
+      headers,
       body: JSON.stringify(data),
     });
 
