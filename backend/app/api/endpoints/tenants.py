@@ -4,7 +4,7 @@ Sprint 2 Phase 3: Tenant Registration Flow
 """
 from datetime import timedelta
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -35,6 +35,7 @@ router = APIRouter()
 @limiter.limit(RateLimits.AUTH)  # Rate limit to prevent spam (5/min, 20/hour)
 def register_tenant(
     request: Request,  # Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     *,
     db: Session = Depends(deps.get_db),
     tenant_in: schemas.tenant.TenantCreate
@@ -314,6 +315,7 @@ def update_tenant_settings(
 def check_subdomain_availability(
     subdomain: str,
     request: Request,  # Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     db: Session = Depends(deps.get_db)
 ) -> Any:
     """

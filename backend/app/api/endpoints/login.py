@@ -1,5 +1,5 @@
 from datetime import timedelta
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Any
 from sqlalchemy.orm import Session
@@ -28,6 +28,7 @@ router = APIRouter()
 @limiter.limit(RateLimits.AUTH)  # API-01 FIX: Prevent account creation abuse (5/min, 20/hour)
 def create_user(
     request: Request,  # API-01 FIX: Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     *,
     db: Session = Depends(deps.get_db),
     user_in: schemas.user.UserCreate,
@@ -64,6 +65,7 @@ def create_user(
 @limiter.limit(RateLimits.AUTH)  # API-01 FIX: Prevent brute force (5/min, 20/hour)
 def login_for_access_token(
     request: Request,  # API-01 FIX: Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     db: Session = Depends(deps.get_db),
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
@@ -126,6 +128,7 @@ def login_for_access_token(
 @limiter.limit(RateLimits.AUTH)  # BE-04 FIX: Rate limit refresh endpoint
 def refresh_access_token(
     request: Request,  # Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     refresh_token: str,
     db: Session = Depends(deps.get_db)
 ) -> Any:

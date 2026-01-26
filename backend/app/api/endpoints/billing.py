@@ -3,7 +3,7 @@ Billing and cost tracking API endpoints.
 Sprint 1: BE-COST-03 (Billing API)
 """
 from typing import List
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -33,6 +33,7 @@ router = APIRouter()
 @limiter.limit(RateLimits.BILLING)  # API-01 FIX: Rate limit billing queries (30/min, 200/hour)
 def get_current_costs(
     request: Request,  # API-01 FIX: Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     *,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),

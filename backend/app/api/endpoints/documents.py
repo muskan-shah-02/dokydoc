@@ -7,7 +7,7 @@ from typing import List, Any
 import uuid
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request, Response
 from fastapi.responses import FileResponse # Added for download endpoint
 from sqlalchemy.orm import Session
 
@@ -262,6 +262,7 @@ def download_document(
 @limiter.limit(RateLimits.UPLOAD)  # API-01 FIX: Rate limit uploads (10/min, 50/hour)
 async def upload_document(
     request: Request,  # API-01 FIX: Required for rate limiter
+    response: Response,  # Required for rate limiter to inject headers
     *,
     tenant_id: int = Depends(deps.get_tenant_id),  # SPRINT 2: Tenant context
     db: Session = Depends(deps.get_db),
