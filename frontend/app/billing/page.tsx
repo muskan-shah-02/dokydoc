@@ -86,7 +86,7 @@ export default function BillingPage() {
   const loadBillingData = async () => {
     setIsLoading(true);
     try {
-      const response = await api.get<BillingData>("/billing");
+      const response = await api.get<BillingData>("/billing/");
       setBillingData(response);
     } catch (error) {
       console.error("Failed to load billing data:", error);
@@ -117,7 +117,7 @@ export default function BillingPage() {
 
     setAddBalanceLoading(true);
     try {
-      await api.post("/billing/add-balance", { amount });
+      await api.post("/billing/add-balance/", { amount });
       setAddBalanceOpen(false);
       setBalanceAmount("");
       loadBillingData();

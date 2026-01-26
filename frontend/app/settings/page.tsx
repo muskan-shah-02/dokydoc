@@ -104,7 +104,7 @@ function ProfileTab({ user }: { user: any }) {
     setSuccess(false);
 
     try {
-      await api.put("/users/me", { email });
+      await api.put("/users/me/", { email });
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (error) {
@@ -214,7 +214,7 @@ function PasswordTab() {
     setIsLoading(true);
 
     try {
-      await api.post("/users/me/password", {
+      await api.post("/users/me/password/", {
         current_password: currentPassword,
         new_password: newPassword,
       });
@@ -313,7 +313,7 @@ function TenantTab({ tenant }: { tenant: any }) {
     setSuccess(false);
 
     try {
-      await api.put("/tenants/me", { name });
+      await api.put("/tenants/me/", { name });
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (error) {

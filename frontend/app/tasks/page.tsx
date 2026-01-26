@@ -79,7 +79,7 @@ export default function TasksPage() {
       if (filterStatus !== "all") params.status = filterStatus;
       if (filterPriority !== "all") params.priority = filterPriority;
 
-      const response = await api.get<Task[]>("/tasks", params);
+      const response = await api.get<Task[]>("/tasks/", params);
       setTasks(response);
     } catch (error) {
       console.error("Failed to load tasks:", error);
@@ -446,7 +446,7 @@ function CreateTaskDialog({
     setError(null);
 
     try {
-      await api.post("/tasks", {
+      await api.post("/tasks/", {
         title: title.trim(),
         description: description.trim() || undefined,
         priority,
@@ -573,7 +573,7 @@ function TaskDetailDialog({
 
   const loadComments = async () => {
     try {
-      const response = await api.get<any[]>(`/tasks/${task.id}/comments`);
+      const response = await api.get<any[]>(`/tasks/${task.id}/comments/`);
       setComments(response);
     } catch (error) {
       console.error("Failed to load comments:", error);
@@ -585,7 +585,7 @@ function TaskDetailDialog({
     if (!newComment.trim()) return;
 
     try {
-      await api.post(`/tasks/${task.id}/comments`, {
+      await api.post(`/tasks/${task.id}/comments/`, {
         content: newComment.trim(),
       });
       setNewComment("");
@@ -601,7 +601,7 @@ function TaskDetailDialog({
 
     setIsUpdating(true);
     try {
-      await api.put(`/tasks/${task.id}`, { status: newStatus });
+      await api.put(`/tasks/${task.id}/`, { status: newStatus });
       onUpdate();
       onClose();
     } catch (error) {

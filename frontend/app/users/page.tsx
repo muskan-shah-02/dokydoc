@@ -74,7 +74,7 @@ export default function UsersPage() {
   const loadUsers = async () => {
     setIsLoading(true);
     try {
-      const response = await api.get<User[]>("/users");
+      const response = await api.get<User[]>("/users/");
       setUsers(response);
     } catch (error) {
       console.error("Failed to load users:", error);
@@ -99,7 +99,7 @@ export default function UsersPage() {
     setInviteError(null);
 
     try {
-      await api.post("/users/invite", {
+      await api.post("/users/invite/", {
         email: inviteEmail,
         roles: inviteRoles,
       });
@@ -125,7 +125,7 @@ export default function UsersPage() {
     }
 
     try {
-      await api.put(`/users/${userId}`, {
+      await api.put(`/users/${userId}/`, {
         is_active: !currentStatus,
       });
       loadUsers();
@@ -143,7 +143,7 @@ export default function UsersPage() {
     }
 
     try {
-      await api.put(`/users/${userId}`, {
+      await api.put(`/users/${userId}/`, {
         roles: newRoles,
       });
       loadUsers();
