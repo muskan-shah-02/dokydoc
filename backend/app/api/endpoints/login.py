@@ -112,15 +112,27 @@ def login_for_access_token(
         expires_delta=refresh_token_expires
     )
 
+    # SPRINT 2: Fetch tenant information for frontend
+    tenant = crud.tenant.get(db, id=user.tenant_id)
+    if not tenant:
+        logger.error(f"Tenant {user.tenant_id} not found for user {user.email}")
+        raise HTTPException(
+            status_code=500,
+            detail="Tenant configuration error. Please contact support."
+        )
+
     logger.info(
         f"Login successful for user: {user.email} (tenant_id={user.tenant_id}, "
         f"access token: {settings.ACCESS_TOKEN_EXPIRE_MINUTES}min, "
         f"refresh token: {settings.REFRESH_TOKEN_EXPIRE_DAYS}d)"
     )
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
+        "user": user,  # SPRINT 2: Include user data for frontend
+        "tenant": tenant  # SPRINT 2: Include tenant data for frontend
     }
 
 
