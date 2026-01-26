@@ -20,6 +20,19 @@ class CRUDTenant(CRUDBase[Tenant, TenantCreate, TenantUpdate]):
     Handles tenant registration, subdomain validation, and tenant management.
     """
 
+    def get_by_id(self, db: Session, *, id: int) -> Optional[Tenant]:
+        """
+        Get tenant by ID (no tenant isolation needed for Tenant model itself).
+
+        Args:
+            db: Database session
+            id: Tenant ID
+
+        Returns:
+            Tenant if found, None otherwise
+        """
+        return db.query(Tenant).filter(Tenant.id == id).first()
+
     def get_by_subdomain(self, db: Session, *, subdomain: str) -> Optional[Tenant]:
         """
         Get tenant by subdomain.

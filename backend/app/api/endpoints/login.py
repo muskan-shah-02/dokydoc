@@ -113,7 +113,7 @@ def login_for_access_token(
     )
 
     # SPRINT 2: Fetch tenant information for frontend
-    tenant = crud.tenant.get(db, id=user.tenant_id)
+    tenant = crud.tenant.get_by_id(db, id=user.tenant_id)
     if not tenant:
         logger.error(f"Tenant {user.tenant_id} not found for user {user.email}")
         raise HTTPException(
