@@ -86,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       const response = await api.get<{ permissions: string[] }>('/users/me/permissions');
-      setPermissions(response.permissions);
+      setPermissions(response.permissions || []);
     } catch (error) {
       console.error('Failed to load permissions:', error);
       setPermissions([]);
@@ -178,6 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Check if user has a specific permission
    */
   const hasPermission = (permission: Permission | string): boolean => {
+    if (!permissions || !Array.isArray(permissions)) return false;
     return permissions.includes(permission);
   };
 
@@ -185,6 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Check if user has ANY of the specified permissions
    */
   const hasAnyPermission = (perms: (Permission | string)[]): boolean => {
+    if (!permissions || !Array.isArray(permissions)) return false;
     return perms.some((p) => permissions.includes(p));
   };
 
@@ -192,6 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Check if user has ALL of the specified permissions
    */
   const hasAllPermissions = (perms: (Permission | string)[]): boolean => {
+    if (!permissions || !Array.isArray(permissions)) return false;
     return perms.every((p) => permissions.includes(p));
   };
 
