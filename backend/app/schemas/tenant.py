@@ -91,7 +91,8 @@ class TenantUpdate(BaseModel):
     """Schema for updating tenant settings (admin only)."""
     name: Optional[str] = Field(None, min_length=2, max_length=100)
     status: Optional[str] = Field(None, description="Status: active, suspended, cancelled")
-    tier: Optional[str] = Field(None, description="Subscription tier")
+    tier: Optional[str] = Field(None, description="Subscription tier: free, pro, enterprise")
+    billing_type: Optional[str] = Field(None, description="Billing type: prepaid or postpaid")
     max_users: Optional[int] = Field(None, ge=1, description="Maximum users allowed")
     max_documents: Optional[int] = Field(None, ge=1, description="Maximum documents allowed")
     settings: Optional[dict] = Field(None, description="Additional tenant settings")
@@ -104,6 +105,26 @@ class TenantUpdate(BaseModel):
             allowed = {'active', 'suspended', 'cancelled'}
             if v not in allowed:
                 raise ValueError(f"Status must be one of: {', '.join(allowed)}")
+        return v
+
+    @field_validator('tier')
+    @classmethod
+    def validate_tier(cls, v: Optional[str]) -> Optional[str]:
+        """Validate tier if provided."""
+        if v is not None:
+            allowed = {'free', 'pro', 'enterprise'}
+            if v not in allowed:
+                raise ValueError(f"Tier must be one of: {', '.join(allowed)}")
+        return v
+
+    @field_validator('billing_type')
+    @classmethod
+    def validate_billing_type(cls, v: Optional[str]) -> Optional[str]:
+        """Validate billing type if provided."""
+        if v is not None:
+            allowed = {'prepaid', 'postpaid'}
+            if v not in allowed:
+                raise ValueError(f"Billing type must be one of: {', '.join(allowed)}")
         return v
 
 
