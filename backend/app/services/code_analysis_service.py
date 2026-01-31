@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 # We will create this function in our next step (Task 1.C)
 from app.services.ai.gemini import call_gemini_for_code_analysis
 from app.services.cache_service import cache_service
+from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException  # ✅ SPRINT 2 BILLING FIX
 from app.core.logging import LoggerMixin
 from app.core.exceptions import DocumentProcessingException, AIAnalysisException
 
@@ -78,6 +79,37 @@ class CodeAnalysisService(LoggerMixin):
                 self.logger.info(f"✅ Using cached analysis for component {component_id}")
                 analysis_result = cached_result
             else:
+                # ✅ BILLING CHECK: Check if tenant can afford this analysis BEFORE calling Gemini
+                self.logger.info(f"💰 Checking billing: tenant {tenant_id} for code component {component_id}")
+                try:
+                    billing_check = billing_enforcement_service.check_can_afford_analysis(
+                        db=db,
+                        tenant_id=tenant_id,
+                        estimated_cost_inr=5.0  # Estimated cost for code analysis
+                    )
+
+                    if not billing_check["can_proceed"]:
+                        error_msg = f"Insufficient funds: {billing_check['reason']}"
+                        self.logger.error(f"❌ {error_msg}")
+                        crud.code_component.update(
+                            db, db_obj=component,
+                            obj_in={"analysis_status": "failed", "analysis_error": error_msg}
+                        )
+                        db.commit()
+                        return
+
+                    self.logger.info(f"✅ Billing check passed for tenant {tenant_id}")
+
+                except (InsufficientBalanceException, MonthlyLimitExceededException) as e:
+                    error_msg = str(e)
+                    self.logger.error(f"❌ Billing enforcement failed: {error_msg}")
+                    crud.code_component.update(
+                        db, db_obj=component,
+                        obj_in={"analysis_status": "failed", "analysis_error": error_msg}
+                    )
+                    db.commit()
+                    return
+
                 # Cache MISS - call Gemini API
                 self.logger.info(f"❌ Cache miss. Sending code for component {component_id} to Gemini for analysis...")
                 analysis_result = await call_gemini_for_code_analysis(code_content)

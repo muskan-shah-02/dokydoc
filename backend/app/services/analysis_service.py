@@ -9,6 +9,7 @@ from app.services.ai.gemini import gemini_service
 from app.services.ai.prompt_manager import prompt_manager, PromptType
 from app.services.analysis_run_service import AnalysisRunService
 from app.services.cost_service import cost_service  # ✅ SPRINT 1 PHASE 2 FIX
+from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException  # ✅ SPRINT 2 BILLING FIX
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
@@ -179,11 +180,42 @@ class DocumentAnalysisEngine(LoggerMixin):
             if not document:
                 self.logger.error(f"Document {document_id} not found")
                 return False
-                
+
             if not document.raw_text:
                 self.logger.error(f"Document {document_id} has no raw_text to analyze")
                 return False
-            
+
+            # ✅ BILLING CHECK: Check if tenant can afford this analysis BEFORE calling Gemini
+            self.logger.info(f"💰 Checking billing: tenant {document.tenant_id} for document {document_id}")
+            try:
+                billing_check = billing_enforcement_service.check_can_afford_analysis(
+                    db=db,
+                    tenant_id=document.tenant_id,
+                    estimated_cost_inr=15.0  # Estimated cost for full 3-pass document analysis
+                )
+
+                if not billing_check["can_proceed"]:
+                    error_msg = f"Insufficient funds: {billing_check['reason']}"
+                    self.logger.error(f"❌ {error_msg}")
+                    crud.document.update(
+                        db=db,
+                        db_obj=document,
+                        obj_in={"status": "failed", "error_message": error_msg}
+                    )
+                    return False
+
+                self.logger.info(f"✅ Billing check passed for tenant {document.tenant_id}")
+
+            except (InsufficientBalanceException, MonthlyLimitExceededException) as e:
+                error_msg = str(e)
+                self.logger.error(f"❌ Billing enforcement failed: {error_msg}")
+                crud.document.update(
+                    db=db,
+                    db_obj=document,
+                    obj_in={"status": "failed", "error_message": error_msg}
+                )
+                return False
+
             try:
                 # --- CHECK 1: Before Pass 1 ---
                 if self._check_stop_signal(db, document_id): return False
