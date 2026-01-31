@@ -23,6 +23,9 @@ import {
   Shield,
   Save,
   CheckCircle2,
+  CreditCard,
+  TrendingUp,
+  DollarSign,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,12 +42,17 @@ export default function SettingsPage() {
     { id: "permissions", label: "Permissions", icon: <Shield className="h-4 w-4" /> },
   ];
 
-  // Add Organization tab for CXO
+  // Add Organization and Billing tabs for CXO
   if (isCXO()) {
     tabs.push({
       id: "organization",
       label: "Organization",
       icon: <Building2 className="h-4 w-4" />,
+    });
+    tabs.push({
+      id: "billing",
+      label: "Billing & Usage",
+      icon: <CreditCard className="h-4 w-4" />,
     });
   }
 
@@ -85,6 +93,7 @@ export default function SettingsPage() {
           {activeTab === "password" && <PasswordTab />}
           {activeTab === "permissions" && <PermissionsTab permissions={permissions} />}
           {activeTab === "organization" && isCXO() && <TenantTab tenant={tenant} />}
+          {activeTab === "billing" && isCXO() && <BillingTab />}
         </div>
       </div>
     </AppLayout>
@@ -402,6 +411,213 @@ function TenantTab({ tenant }: { tenant: any }) {
           {isLoading ? "Saving..." : "Save Changes"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Billing Tab (CXO Only)
+// ============================================================================
+
+function BillingTab() {
+  const [billingData, setBillingData] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    loadBillingData();
+  }, []);
+
+  const loadBillingData = async () => {
+    setIsLoading(true);
+    try {
+      const data = await api.get("/billing/usage");
+      setBillingData(data);
+    } catch (error) {
+      console.error("Failed to load billing data:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-center">
+          <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+          <p className="text-gray-600">Loading billing data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!billingData) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-gray-600">Failed to load billing data</p>
+      </div>
+    );
+  }
+
+  const isPrepaid = billingData.billing_type === "prepaid";
+  const limitUsagePercentage = billingData.limit_usage_percentage || 0;
+  const isNearLimit = limitUsagePercentage > 80;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-gray-900">Billing & Usage</h3>
+        <p className="mt-1 text-sm text-gray-600">
+          Monitor your organization's billing and usage metrics
+        </p>
+      </div>
+
+      {/* Billing Type */}
+      <div className="rounded-lg bg-blue-50 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-gray-600">Billing Type</p>
+            <p className="text-xl font-bold capitalize text-gray-900">
+              {billingData.billing_type}
+            </p>
+          </div>
+          <CreditCard className="h-8 w-8 text-blue-600" />
+        </div>
+      </div>
+
+      {/* Balance (Prepaid Only) */}
+      {isPrepaid && (
+        <div className="rounded-lg border p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <Label>Current Balance</Label>
+            {billingData.low_balance_alert && (
+              <span className="rounded-full bg-yellow-100 px-3 py-1 text-xs font-medium text-yellow-700">
+                Low Balance
+              </span>
+            )}
+          </div>
+          <div className="flex items-baseline space-x-2">
+            <p className="text-3xl font-bold text-gray-900">
+              ₹{billingData.balance_inr?.toFixed(2) || "0.00"}
+            </p>
+            <DollarSign className="h-6 w-6 text-gray-400" />
+          </div>
+          {billingData.low_balance_alert && (
+            <p className="mt-2 text-sm text-yellow-700">
+              Your balance is running low. Consider adding funds to continue using services.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Current Month Cost */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-lg border p-4">
+          <Label>Current Month Cost</Label>
+          <div className="mt-2 flex items-baseline space-x-2">
+            <p className="text-2xl font-bold text-gray-900">
+              ₹{billingData.current_month_cost?.toFixed(2) || "0.00"}
+            </p>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">
+            {new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+          </p>
+        </div>
+
+        <div className="rounded-lg border p-4">
+          <Label>Last 30 Days Cost</Label>
+          <div className="mt-2 flex items-baseline space-x-2">
+            <p className="text-2xl font-bold text-gray-900">
+              ₹{billingData.last_30_days_cost?.toFixed(2) || "0.00"}
+            </p>
+            <TrendingUp className="h-5 w-5 text-gray-400" />
+          </div>
+          <p className="mt-1 text-xs text-gray-500">Rolling 30-day period</p>
+        </div>
+      </div>
+
+      {/* Monthly Limit */}
+      {billingData.monthly_limit_inr && (
+        <div className="rounded-lg border p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <Label>Monthly Spending Limit</Label>
+            {isNearLimit && (
+              <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-700">
+                Near Limit
+              </span>
+            )}
+          </div>
+
+          <div className="mb-2 flex items-baseline justify-between">
+            <span className="text-sm text-gray-600">
+              ₹{billingData.current_month_cost?.toFixed(2) || "0.00"} / ₹{billingData.monthly_limit_inr?.toFixed(2)}
+            </span>
+            <span className="text-sm font-medium text-gray-900">
+              {limitUsagePercentage.toFixed(0)}%
+            </span>
+          </div>
+
+          <div className="h-3 overflow-hidden rounded-full bg-gray-200">
+            <div
+              className={`h-full transition-all ${
+                isNearLimit ? "bg-red-600" : "bg-green-600"
+              }`}
+              style={{ width: `${Math.min(limitUsagePercentage, 100)}%` }}
+            />
+          </div>
+
+          {billingData.limit_remaining_inr !== undefined && (
+            <p className="mt-2 text-sm text-gray-600">
+              ₹{billingData.limit_remaining_inr.toFixed(2)} remaining this month
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Usage Breakdown */}
+      <div className="rounded-lg border p-4">
+        <h4 className="mb-3 font-medium text-gray-900">Usage Summary</h4>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-600">Billing Type</span>
+            <span className="text-sm font-medium capitalize text-gray-900">
+              {billingData.billing_type}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-600">Tenant ID</span>
+            <span className="text-sm font-medium text-gray-900">
+              #{billingData.tenant_id}
+            </span>
+          </div>
+          {isPrepaid && (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-600">Balance Status</span>
+                <span
+                  className={`text-sm font-medium ${
+                    billingData.low_balance_alert ? "text-yellow-600" : "text-green-600"
+                  }`}
+                >
+                  {billingData.low_balance_alert ? "Low Balance" : "Healthy"}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Top-up Button (Prepaid Only) */}
+      {isPrepaid && (
+        <div className="rounded-lg bg-gray-50 p-4">
+          <p className="mb-3 text-sm text-gray-600">
+            Need more balance? Add funds to your prepaid account.
+          </p>
+          <Button className="w-full">
+            <DollarSign className="mr-2 h-4 w-4" />
+            Add Balance
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
