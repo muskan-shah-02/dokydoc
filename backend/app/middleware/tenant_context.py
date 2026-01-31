@@ -55,8 +55,17 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else None
 
+        # Log token extraction for debugging
+        logger.info(
+            f"🔍 Tenant Context Middleware: {request.method} {request.url.path} | "
+            f"Has Auth Header: {bool(auth_header)} | Has Token: {bool(token)}"
+        )
+
         if not token:
             # No token = no tenant context (will be handled by auth dependency)
+            logger.warning(f"⚠️ No token found for {request.method} {request.url.path}")
+            request.state.tenant_id = None
+            request.state.is_tenant_override = False
             response = await call_next(request)
             return response
 
@@ -107,14 +116,23 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
 
             # Validate tenant_id exists
             if not request.state.tenant_id:
-                logger.error(f"Missing tenant_id in JWT for user: {user_email}")
+                logger.error(f"❌ Missing tenant_id in JWT for user: {user_email}")
                 raise AuthenticationException("Missing tenant_id in authentication token")
+
+            # Log successful tenant context extraction
+            logger.info(
+                f"✅ Tenant context set: {request.method} {request.url.path} | "
+                f"User: {user_email} | Tenant ID: {request.state.tenant_id}"
+            )
 
         except JWTError as e:
             # JWT decode error - log and continue without setting tenant context
             # This allows unauthenticated endpoints to work, but authenticated
             # endpoints will fail at the dependency level
-            logger.debug(f"JWT decode error in tenant context: {e}")
+            logger.error(
+                f"❌ JWT decode error for {request.method} {request.url.path}: {e} | "
+                f"Token preview: {token[:50]}..." if token and len(token) > 50 else f"Token: {token}"
+            )
             # Set tenant_id to None explicitly so we know middleware ran
             request.state.tenant_id = None
             request.state.is_tenant_override = False
