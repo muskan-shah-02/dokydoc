@@ -84,3 +84,31 @@ class UserRolesUpdate(BaseModel):
     Used by tenant admins (CXO) to change permissions.
     """
     roles: List[Role]
+
+
+class UserProfileUpdate(BaseModel):
+    """
+    Schema for updating user profile (email).
+
+    Users can update their own email address.
+    """
+    email: EmailStr
+
+
+class PasswordChange(BaseModel):
+    """
+    Schema for changing user password.
+
+    Requires current password for security.
+    """
+    current_password: str
+    new_password: str
+
+
+class UserStatusUpdate(BaseModel):
+    """
+    Schema for updating user active status.
+
+    Used by tenant admins to activate/deactivate users.
+    """
+    is_active: bool

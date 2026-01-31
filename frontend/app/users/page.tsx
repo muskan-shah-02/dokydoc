@@ -29,6 +29,7 @@ import {
   X,
   Calendar,
   Crown,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -151,13 +152,36 @@ export default function UsersPage() {
     }
 
     try {
-      await api.put(`/users/${userId}/`, {
+      await api.put(`/users/${userId}/roles`, {
         roles: newRoles,
       });
       loadUsers();
       setEditingUser(null);
     } catch (error) {
       console.error("Failed to update user roles:", error);
+    }
+  };
+
+  // Delete user
+  const handleDeleteUser = async (userId: number, userEmail: string) => {
+    // Prevent deleting yourself
+    if (userId === currentUser?.id) {
+      alert("You cannot delete your own account");
+      return;
+    }
+
+    // Confirm deletion
+    if (!confirm(`Are you sure you want to delete ${userEmail}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await api.delete(`/users/${userId}`);
+      loadUsers();
+      setUserMenuOpen(null);
+    } catch (error: any) {
+      alert(error.detail || "Failed to delete user");
+      console.error("Failed to delete user:", error);
     }
   };
 
@@ -396,6 +420,19 @@ export default function UsersPage() {
                                       <span>Activate</span>
                                     </>
                                   )}
+                                </button>
+
+                                <div className="border-t" />
+
+                                <button
+                                  onClick={() => {
+                                    handleDeleteUser(user.id, user.email);
+                                  }}
+                                  disabled={user.id === currentUser?.id}
+                                  className="flex w-full items-center space-x-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                  <span>Delete User</span>
                                 </button>
                               </div>
                             </>

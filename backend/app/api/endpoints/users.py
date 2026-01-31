@@ -311,6 +311,159 @@ def delete_user_from_tenant(
     )
 
 
+@router.put("/me", response_model=schemas.user.UserResponse)
+def update_my_profile(
+    *,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    profile_update: schemas.user.UserProfileUpdate
+) -> Any:
+    """
+    Update current user's profile (email).
+
+    Users can update their own email address.
+    Other fields like roles must be changed by admins.
+    """
+    logger_instance = user_management_endpoints.logger
+    logger_instance.info(f"User {current_user.email} updating profile to email={profile_update.email}")
+
+    # Check if new email is already taken
+    if profile_update.email != current_user.email:
+        existing_user = crud.user.get_user_by_email(db, email=profile_update.email)
+        if existing_user:
+            logger_instance.warning(f"Email {profile_update.email} already exists")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already in use"
+            )
+
+    # Update email
+    current_user.email = profile_update.email
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    logger_instance.info(f"User profile updated: {current_user.email}")
+
+    return schemas.user.UserResponse(
+        id=current_user.id,
+        email=current_user.email,
+        roles=current_user.roles,
+        is_superuser=current_user.is_superuser,
+        tenant_id=current_user.tenant_id,
+        created_at=current_user.created_at
+    )
+
+
+@router.post("/me/password", status_code=status.HTTP_200_OK)
+def change_my_password(
+    *,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    password_change: schemas.user.PasswordChange
+) -> Any:
+    """
+    Change current user's password.
+
+    Requires current password verification for security.
+    """
+    logger_instance = user_management_endpoints.logger
+    logger_instance.info(f"User {current_user.email} requesting password change")
+
+    # Verify current password
+    from app.core.security import verify_password, get_password_hash
+
+    if not verify_password(password_change.current_password, current_user.hashed_password):
+        logger_instance.warning(f"User {current_user.email} provided incorrect current password")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+
+    # Update password
+    current_user.hashed_password = get_password_hash(password_change.new_password)
+    db.add(current_user)
+    db.commit()
+
+    logger_instance.info(f"Password changed successfully for user {current_user.email}")
+
+    return {"message": "Password changed successfully"}
+
+
+@router.put("/{user_id}", response_model=schemas.user.UserResponse)
+def update_user_status(
+    *,
+    user_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.USER_MANAGE)),
+    user_update: schemas.user.UserStatusUpdate
+) -> Any:
+    """
+    Update user status (activate/deactivate).
+
+    Requires: USER_MANAGE permission (CXO only)
+
+    Restrictions:
+    - Cannot update your own status (prevent admin lockout)
+    - User must be in the same tenant
+    """
+    logger_instance = user_management_endpoints.logger
+    logger_instance.info(
+        f"Updating status for user {user_id} to is_active={user_update.is_active} "
+        f"by admin {current_user.email}"
+    )
+
+    # Get target user
+    target_user = crud.user.get(db, id=user_id)
+    if not target_user:
+        logger_instance.warning(f"User {user_id} not found for status update")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Verify user is in same tenant
+    if target_user.tenant_id != tenant_id:
+        logger_instance.warning(
+            f"Permission denied: User {user_id} (tenant={target_user.tenant_id}) "
+            f"not in admin's tenant ({tenant_id})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Prevent self-status modification
+    if target_user.id == current_user.id:
+        logger_instance.warning(
+            f"User {current_user.email} attempted to modify their own status"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot modify your own status. Ask another admin."
+        )
+
+    # Update status
+    target_user.is_active = user_update.is_active
+    db.add(target_user)
+    db.commit()
+    db.refresh(target_user)
+
+    logger_instance.info(
+        f"Status updated for user {target_user.email} (id={user_id}): is_active={target_user.is_active}"
+    )
+
+    return schemas.user.UserResponse(
+        id=target_user.id,
+        email=target_user.email,
+        roles=target_user.roles,
+        is_superuser=target_user.is_superuser,
+        tenant_id=target_user.tenant_id,
+        created_at=target_user.created_at
+    )
+
+
 @router.get("/me/permissions", response_model=List[str])
 def get_my_permissions(
     *,
