@@ -128,17 +128,18 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
           roles: ["CXO"],
         },
         {
+          label: "Organization",
+          href: "/settings/organization",
+          icon: <Settings className="h-5 w-5" />,
+          roles: ["CXO"],
+        },
+        {
           label: "Permissions",
           href: "/permissions",
           icon: <Shield className="h-5 w-5" />,
         },
-      ],
-    },
-    {
-      title: "Settings",
-      items: [
         {
-          label: "Settings",
+          label: "My Profile",
           href: "/settings",
           icon: <Settings className="h-5 w-5" />,
         },

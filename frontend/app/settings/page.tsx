@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function SettingsPage() {
-  const { user, tenant, isCXO, permissions } = useAuth();
+  const { user, permissions } = useAuth();
   const [activeTab, setActiveTab] = useState("profile");
 
   const tabs = [
@@ -38,23 +38,14 @@ export default function SettingsPage() {
     { id: "permissions", label: "My Permissions", icon: <Shield className="h-4 w-4" /> },
   ];
 
-  // Add tenant settings tab for CXO
-  if (isCXO()) {
-    tabs.splice(2, 0, {
-      id: "tenant",
-      label: "Organization",
-      icon: <Building2 className="h-4 w-4" />,
-    });
-  }
-
   return (
     <AppLayout>
       <div className="space-y-6">
         {/* Header */}
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
+          <h1 className="text-3xl font-bold text-gray-900">My Profile</h1>
           <p className="mt-2 text-gray-600">
-            Manage your account and organization settings
+            Manage your personal account settings
           </p>
         </div>
 
@@ -82,7 +73,6 @@ export default function SettingsPage() {
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           {activeTab === "profile" && <ProfileTab user={user} />}
           {activeTab === "password" && <PasswordTab />}
-          {activeTab === "tenant" && isCXO() && <TenantTab tenant={tenant} />}
           {activeTab === "permissions" && <PermissionsTab permissions={permissions} />}
         </div>
       </div>
