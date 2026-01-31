@@ -29,23 +29,33 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function SettingsPage() {
-  const { user, permissions } = useAuth();
+  const { user, tenant, isCXO, permissions } = useAuth();
   const [activeTab, setActiveTab] = useState("profile");
 
+  // Build tabs based on user role
   const tabs = [
-    { id: "profile", label: "Profile", icon: <User className="h-4 w-4" /> },
+    { id: "profile", label: "My Profile", icon: <User className="h-4 w-4" /> },
     { id: "password", label: "Password", icon: <Lock className="h-4 w-4" /> },
-    { id: "permissions", label: "My Permissions", icon: <Shield className="h-4 w-4" /> },
+    { id: "permissions", label: "Permissions", icon: <Shield className="h-4 w-4" /> },
   ];
+
+  // Add Organization tab for CXO
+  if (isCXO()) {
+    tabs.push({
+      id: "organization",
+      label: "Organization",
+      icon: <Building2 className="h-4 w-4" />,
+    });
+  }
 
   return (
     <AppLayout>
       <div className="space-y-6">
         {/* Header */}
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">My Profile</h1>
+          <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
           <p className="mt-2 text-gray-600">
-            Manage your personal account settings
+            Manage your account and organization settings
           </p>
         </div>
 
@@ -74,6 +84,7 @@ export default function SettingsPage() {
           {activeTab === "profile" && <ProfileTab user={user} />}
           {activeTab === "password" && <PasswordTab />}
           {activeTab === "permissions" && <PermissionsTab permissions={permissions} />}
+          {activeTab === "organization" && isCXO() && <TenantTab tenant={tenant} />}
         </div>
       </div>
     </AppLayout>
