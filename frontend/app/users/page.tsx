@@ -62,6 +62,7 @@ export default function UsersPage() {
 
   // Invite form state
   const [inviteEmail, setInviteEmail] = useState("");
+  const [invitePassword, setInvitePassword] = useState("");
   const [inviteRoles, setInviteRoles] = useState<string[]>(["Developer"]);
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
@@ -90,8 +91,13 @@ export default function UsersPage() {
 
   // Invite user
   const handleInviteUser = async () => {
-    if (!inviteEmail || inviteRoles.length === 0) {
-      setInviteError("Email and at least one role are required");
+    if (!inviteEmail || !invitePassword || inviteRoles.length === 0) {
+      setInviteError("Email, password, and at least one role are required");
+      return;
+    }
+
+    if (invitePassword.length < 6) {
+      setInviteError("Password must be at least 6 characters");
       return;
     }
 
@@ -101,16 +107,18 @@ export default function UsersPage() {
     try {
       await api.post("/users/invite", {
         email: inviteEmail,
+        password: invitePassword,
         roles: inviteRoles,
       });
 
       // Close dialog and refresh
       setInviteDialogOpen(false);
       setInviteEmail("");
+      setInvitePassword("");
       setInviteRoles(["Developer"]);
       loadUsers();
     } catch (error: any) {
-      setInviteError(error.detail || "Failed to invite user");
+      setInviteError(error.detail || "Failed to create user");
     } finally {
       setInviteLoading(false);
     }
@@ -171,7 +179,7 @@ export default function UsersPage() {
 
           <Button onClick={() => setInviteDialogOpen(true)}>
             <UserPlus className="mr-2 h-4 w-4" />
-            Invite User
+            Add User
           </Button>
         </div>
 
@@ -250,7 +258,7 @@ export default function UsersPage() {
               <p className="mt-2 text-sm text-gray-600">
                 {searchQuery
                   ? "Try adjusting your search"
-                  : "Invite users to get started"}
+                  : "Add users to get started"}
               </p>
               {!searchQuery && (
                 <Button
@@ -258,7 +266,7 @@ export default function UsersPage() {
                   className="mt-4"
                 >
                   <UserPlus className="mr-2 h-4 w-4" />
-                  Invite User
+                  Add User
                 </Button>
               )}
             </div>
@@ -408,7 +416,7 @@ export default function UsersPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-semibold text-gray-900">Invite User</h2>
+              <h2 className="text-xl font-semibold text-gray-900">Create User</h2>
               <button
                 onClick={() => {
                   setInviteDialogOpen(false);
@@ -434,6 +442,23 @@ export default function UsersPage() {
                     className="h-11 pl-10"
                   />
                 </div>
+              </div>
+
+              <div>
+                <Label htmlFor="invitePassword">Password</Label>
+                <div className="relative mt-2">
+                  <Input
+                    id="invitePassword"
+                    type="password"
+                    placeholder="Minimum 6 characters"
+                    value={invitePassword}
+                    onChange={(e) => setInvitePassword(e.target.value)}
+                    className="h-11"
+                  />
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  User will login with this password. You can use any password for testing.
+                </p>
               </div>
 
               <div>
@@ -481,7 +506,7 @@ export default function UsersPage() {
                   disabled={inviteLoading}
                   className="flex-1"
                 >
-                  {inviteLoading ? "Inviting..." : "Send Invite"}
+                  {inviteLoading ? "Creating..." : "Create User"}
                 </Button>
               </div>
             </div>
