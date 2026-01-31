@@ -420,8 +420,12 @@ function TenantTab({ tenant }: { tenant: any }) {
 // ============================================================================
 
 function BillingTab() {
+  const { tenant } = useAuth();
   const [billingData, setBillingData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showAddBalanceModal, setShowAddBalanceModal] = useState(false);
+  const [showUpgradePlanModal, setShowUpgradePlanModal] = useState(false);
+  const [showSwitchTypeModal, setShowSwitchTypeModal] = useState(false);
 
   useEffect(() => {
     loadBillingData();
@@ -436,6 +440,40 @@ function BillingTab() {
       console.error("Failed to load billing data:", error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleAddBalance = async (amount: number) => {
+    try {
+      await api.post("/billing/topup", { amount_inr: amount });
+      setShowAddBalanceModal(false);
+      loadBillingData(); // Refresh billing data
+    } catch (error: any) {
+      alert(error.detail || "Failed to add balance");
+      console.error("Failed to add balance:", error);
+    }
+  };
+
+  const handleUpgradePlan = async (newTier: string) => {
+    try {
+      await api.put("/tenants/me", { tier: newTier });
+      setShowUpgradePlanModal(false);
+      loadBillingData(); // Refresh
+      window.location.reload(); // Reload to update tenant context
+    } catch (error: any) {
+      alert(error.detail || "Failed to upgrade plan");
+      console.error("Failed to upgrade plan:", error);
+    }
+  };
+
+  const handleSwitchBillingType = async (newType: string) => {
+    try {
+      await api.put("/tenants/me", { billing_type: newType });
+      setShowSwitchTypeModal(false);
+      loadBillingData(); // Refresh
+    } catch (error: any) {
+      alert(error.detail || "Failed to switch billing type");
+      console.error("Failed to switch billing type:", error);
     }
   };
 
@@ -471,6 +509,24 @@ function BillingTab() {
         </p>
       </div>
 
+      {/* Current Plan */}
+      <div className="rounded-lg border p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <Label>Current Plan</Label>
+          <Button onClick={() => setShowUpgradePlanModal(true)} variant="outline" size="sm">
+            Upgrade Plan
+          </Button>
+        </div>
+        <div className="flex items-center space-x-3">
+          <span className="rounded-full bg-purple-100 px-4 py-2 text-lg font-bold capitalize text-purple-700">
+            {tenant?.tier || "Free"}
+          </span>
+          <div className="text-sm text-gray-600">
+            <div>{tenant?.max_users || 10} users • {tenant?.max_documents || 100} documents</div>
+          </div>
+        </div>
+      </div>
+
       {/* Billing Type */}
       <div className="rounded-lg bg-blue-50 p-4">
         <div className="flex items-center justify-between">
@@ -480,7 +536,12 @@ function BillingTab() {
               {billingData.billing_type}
             </p>
           </div>
-          <CreditCard className="h-8 w-8 text-blue-600" />
+          <div className="flex items-center space-x-3">
+            <CreditCard className="h-8 w-8 text-blue-600" />
+            <Button onClick={() => setShowSwitchTypeModal(true)} variant="outline" size="sm">
+              Switch Type
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -612,12 +673,320 @@ function BillingTab() {
           <p className="mb-3 text-sm text-gray-600">
             Need more balance? Add funds to your prepaid account.
           </p>
-          <Button className="w-full">
+          <Button className="w-full" onClick={() => setShowAddBalanceModal(true)}>
             <DollarSign className="mr-2 h-4 w-4" />
             Add Balance
           </Button>
         </div>
       )}
+
+      {/* Add Balance Modal */}
+      {showAddBalanceModal && (
+        <AddBalanceModal
+          onClose={() => setShowAddBalanceModal(false)}
+          onConfirm={handleAddBalance}
+          currentBalance={billingData.balance_inr || 0}
+        />
+      )}
+
+      {/* Upgrade Plan Modal */}
+      {showUpgradePlanModal && (
+        <UpgradePlanModal
+          currentTier={tenant?.tier || "free"}
+          onClose={() => setShowUpgradePlanModal(false)}
+          onConfirm={handleUpgradePlan}
+        />
+      )}
+
+      {/* Switch Billing Type Modal */}
+      {showSwitchTypeModal && (
+        <SwitchBillingTypeModal
+          currentType={billingData.billing_type}
+          currentBalance={billingData.balance_inr || 0}
+          onClose={() => setShowSwitchTypeModal(false)}
+          onConfirm={handleSwitchBillingType}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Add Balance Modal
+// ============================================================================
+
+function AddBalanceModal({
+  onClose,
+  onConfirm,
+  currentBalance,
+}: {
+  onClose: () => void;
+  onConfirm: (amount: number) => void;
+  currentBalance: number;
+}) {
+  const [amount, setAmount] = useState(1000);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleConfirm = async () => {
+    if (amount < 100) {
+      alert("Minimum top-up amount is ₹100");
+      return;
+    }
+    setIsLoading(true);
+    await onConfirm(amount);
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-xl font-semibold text-gray-900">Add Balance</h2>
+          <button onClick={onClose} className="rounded-md p-1 hover:bg-gray-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mb-4 rounded-lg bg-blue-50 p-3">
+          <p className="text-sm text-gray-600">Current Balance</p>
+          <p className="text-2xl font-bold text-gray-900">₹{currentBalance.toFixed(2)}</p>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <Label htmlFor="amount">Amount to Add (₹)</Label>
+            <Input
+              id="amount"
+              type="number"
+              min="100"
+              step="100"
+              value={amount}
+              onChange={(e) => setAmount(parseInt(e.target.value) || 0)}
+              className="mt-2"
+            />
+            <p className="mt-1 text-xs text-gray-500">Minimum: ₹100</p>
+          </div>
+
+          <div className="grid grid-cols-4 gap-2">
+            {[500, 1000, 5000, 10000].map((quickAmount) => (
+              <button
+                key={quickAmount}
+                onClick={() => setAmount(quickAmount)}
+                className={`rounded-lg border p-2 text-sm font-medium transition-colors ${
+                  amount === quickAmount
+                    ? "border-blue-600 bg-blue-50 text-blue-600"
+                    : "border-gray-300 hover:border-blue-300"
+                }`}
+              >
+                ₹{quickAmount}
+              </button>
+            ))}
+          </div>
+
+          <div className="rounded-lg bg-green-50 p-3">
+            <p className="text-sm text-gray-600">New Balance</p>
+            <p className="text-xl font-bold text-green-700">
+              ₹{(currentBalance + amount).toFixed(2)}
+            </p>
+          </div>
+
+          <div className="flex space-x-3">
+            <Button onClick={onClose} variant="outline" className="flex-1">
+              Cancel
+            </Button>
+            <Button onClick={handleConfirm} disabled={isLoading} className="flex-1">
+              {isLoading ? "Adding..." : `Add ₹${amount}`}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Upgrade Plan Modal
+// ============================================================================
+
+function UpgradePlanModal({
+  currentTier,
+  onClose,
+  onConfirm,
+}: {
+  currentTier: string;
+  onClose: () => void;
+  onConfirm: (tier: string) => void;
+}) {
+  const [selectedTier, setSelectedTier] = useState(currentTier);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const plans = [
+    {
+      id: "free",
+      name: "Free",
+      price: "₹0",
+      users: 10,
+      documents: 100,
+      features: ["Basic features", "Email support", "10 users", "100 documents"],
+    },
+    {
+      id: "pro",
+      name: "Pro",
+      price: "₹999/mo",
+      users: 50,
+      documents: 1000,
+      features: ["All Free features", "Priority support", "50 users", "1000 documents", "Advanced analytics"],
+    },
+    {
+      id: "enterprise",
+      name: "Enterprise",
+      price: "₹4999/mo",
+      users: 500,
+      documents: 10000,
+      features: ["All Pro features", "24/7 support", "500 users", "10000 documents", "Custom integrations", "SLA guarantee"],
+    },
+  ];
+
+  const handleConfirm = async () => {
+    if (selectedTier === currentTier) {
+      alert("Please select a different plan");
+      return;
+    }
+    setIsLoading(true);
+    await onConfirm(selectedTier);
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-4xl rounded-lg bg-white p-6 shadow-xl max-h-[90vh] overflow-y-auto">
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="text-2xl font-semibold text-gray-900">Upgrade Plan</h2>
+          <button onClick={onClose} className="rounded-md p-1 hover:bg-gray-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-3 mb-6">
+          {plans.map((plan) => (
+            <button
+              key={plan.id}
+              onClick={() => setSelectedTier(plan.id)}
+              className={`rounded-lg border-2 p-4 text-left transition-all ${
+                selectedTier === plan.id
+                  ? "border-blue-600 bg-blue-50"
+                  : "border-gray-200 hover:border-blue-300"
+              } ${plan.id === currentTier ? "opacity-60" : ""}`}
+              disabled={plan.id === currentTier}
+            >
+              <div className="mb-3">
+                <h3 className="text-lg font-semibold text-gray-900">{plan.name}</h3>
+                <p className="text-2xl font-bold text-blue-600">{plan.price}</p>
+                {plan.id === currentTier && (
+                  <span className="mt-2 inline-block rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium">
+                    Current Plan
+                  </span>
+                )}
+              </div>
+              <ul className="space-y-2">
+                {plan.features.map((feature, idx) => (
+                  <li key={idx} className="flex items-start text-sm text-gray-600">
+                    <CheckCircle2 className="mr-2 h-4 w-4 flex-shrink-0 text-green-600" />
+                    <span>{feature}</span>
+                  </li>
+                ))}
+              </ul>
+            </button>
+          ))}
+        </div>
+
+        <div className="flex space-x-3">
+          <Button onClick={onClose} variant="outline" className="flex-1">
+            Cancel
+          </Button>
+          <Button onClick={handleConfirm} disabled={isLoading || selectedTier === currentTier} className="flex-1">
+            {isLoading ? "Upgrading..." : `Upgrade to ${plans.find(p => p.id === selectedTier)?.name}`}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Switch Billing Type Modal
+// ============================================================================
+
+function SwitchBillingTypeModal({
+  currentType,
+  currentBalance,
+  onClose,
+  onConfirm,
+}: {
+  currentType: string;
+  currentBalance: number;
+  onClose: () => void;
+  onConfirm: (type: string) => void;
+}) {
+  const [isLoading, setIsLoading] = useState(false);
+  const newType = currentType === "prepaid" ? "postpaid" : "prepaid";
+
+  const handleConfirm = async () => {
+    setIsLoading(true);
+    await onConfirm(newType);
+    setIsLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-xl font-semibold text-gray-900">
+            Switch to {newType === "prepaid" ? "Prepaid" : "Postpaid"}?
+          </h2>
+          <button onClick={onClose} className="rounded-md p-1 hover:bg-gray-100">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mb-4 space-y-3">
+          <p className="text-sm text-gray-600">
+            You're switching from <span className="font-medium capitalize">{currentType}</span> to{" "}
+            <span className="font-medium capitalize">{newType}</span> billing.
+          </p>
+
+          {newType === "postpaid" ? (
+            <div className="rounded-lg bg-blue-50 p-3">
+              <h4 className="font-medium text-gray-900">Postpaid Benefits:</h4>
+              <ul className="mt-2 space-y-1 text-sm text-gray-600">
+                <li>✓ No upfront balance needed</li>
+                <li>✓ Billed monthly based on usage</li>
+                <li>✓ Set monthly spending limits</li>
+                {currentBalance > 0 && <li>✓ Current balance (₹{currentBalance.toFixed(2)}) will be credited</li>}
+              </ul>
+            </div>
+          ) : (
+            <div className="rounded-lg bg-green-50 p-3">
+              <h4 className="font-medium text-gray-900">Prepaid Benefits:</h4>
+              <ul className="mt-2 space-y-1 text-sm text-gray-600">
+                <li>✓ Pay only for what you use</li>
+                <li>✓ No monthly bills</li>
+                <li>✓ Full cost control</li>
+                <li>✓ Top up anytime</li>
+              </ul>
+            </div>
+          )}
+        </div>
+
+        <div className="flex space-x-3">
+          <Button onClick={onClose} variant="outline" className="flex-1">
+            Cancel
+          </Button>
+          <Button onClick={handleConfirm} disabled={isLoading} className="flex-1">
+            {isLoading ? "Switching..." : `Switch to ${newType === "prepaid" ? "Prepaid" : "Postpaid"}`}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
