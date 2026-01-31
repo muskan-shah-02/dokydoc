@@ -9,6 +9,10 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
     def get_user_by_email(self, db: Session, *, email: str) -> User | None:
         return db.query(User).filter(User.email == email).first()
 
+    def get_by_email(self, db: Session, *, email: str) -> User | None:
+        """Alias for get_user_by_email for compatibility."""
+        return self.get_user_by_email(db, email=email)
+
     def create_user(self, db: Session, *, obj_in: UserCreate, tenant_id: int) -> User:
         """
         Create a new user with tenant_id assignment.
@@ -69,5 +73,14 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
             .limit(limit)
             .all()
         )
+
+    def create_with_tenant(self, db: Session, *, obj_in: UserCreate, tenant_id: int) -> User:
+        """
+        Alias for create_user for compatibility with different calling conventions.
+
+        Some endpoints may call this method instead of create_user.
+        Both methods do the same thing.
+        """
+        return self.create_user(db, obj_in=obj_in, tenant_id=tenant_id)
 
 user = CRUDUser(User)

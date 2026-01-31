@@ -5,6 +5,7 @@ Sprint 2 Phase 3: Tenant Registration Flow
 from datetime import timedelta
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -337,11 +338,14 @@ def check_subdomain_availability(
     # Validate subdomain format (same validation as in schema)
     import re
     if not re.match(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$', subdomain.lower()):
-        return {
-            "subdomain": subdomain,
-            "available": False,
-            "message": "Invalid subdomain format. Use lowercase letters, numbers, and hyphens only."
-        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "subdomain": subdomain,
+                "available": False,
+                "message": "Invalid subdomain format. Use lowercase letters, numbers, and hyphens only."
+            }
+        )
 
     # Check availability
     available = crud.tenant.is_subdomain_available(db, subdomain=subdomain)
@@ -353,8 +357,11 @@ def check_subdomain_availability(
 
     logger.info(f"Subdomain check: {subdomain} - {'available' if available else 'taken'}")
 
-    return {
-        "subdomain": subdomain,
-        "available": available,
-        "message": message
-    }
+    return JSONResponse(
+        status_code=200,
+        content={
+            "subdomain": subdomain,
+            "available": available,
+            "message": message
+        }
+    )
