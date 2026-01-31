@@ -208,7 +208,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                 {/* Section Items */}
                 <div className="space-y-1">
                   {section.items.map((item) => {
-                    const isActive = pathname === item.href;
+                    // Improved active state matching
+                    const isActive =
+                      pathname === item.href ||
+                      (item.href !== '/dashboard' && pathname.startsWith(item.href + '/'));
 
                     return (
                       <Link

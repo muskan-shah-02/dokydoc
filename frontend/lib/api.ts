@@ -28,6 +28,26 @@ export class ApiClient {
    */
   private getAuthHeaders(): HeadersInit {
     const token = localStorage.getItem('accessToken');
+
+    // Check if token is expired
+    if (token) {
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        const isExpired = payload.exp * 1000 < Date.now();
+
+        if (isExpired) {
+          console.error('[API] Token expired - redirecting to login');
+          localStorage.clear();
+          if (typeof window !== 'undefined') {
+            window.location.href = '/login?expired=true';
+          }
+          return { 'Content-Type': 'application/json' };
+        }
+      } catch (e) {
+        console.error('[API] Invalid token format:', e);
+      }
+    }
+
     return {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -39,6 +59,16 @@ export class ApiClient {
    */
   private async handleResponse<T>(response: Response): Promise<T> {
     if (!response.ok) {
+      // Handle 401 Unauthorized - token expired or invalid
+      if (response.status === 401) {
+        console.error('[API] 401 Unauthorized - clearing session and redirecting to login');
+        localStorage.clear();
+        if (typeof window !== 'undefined') {
+          window.location.href = '/login?session=expired';
+        }
+        throw new Error('Session expired. Please login again.');
+      }
+
       const error: ApiError = {
         detail: 'An error occurred',
         status: response.status,
