@@ -47,12 +47,12 @@ export default function UsersPage() {
   const router = useRouter();
   const { user: currentUser, hasPermission, isCXO } = useAuth();
 
-  // Redirect if not CXO
+  // Redirect if not CXO (wait for auth to load first)
   useEffect(() => {
-    if (!isCXO()) {
+    if (currentUser && !isCXO()) {
       router.push("/dashboard");
     }
-  }, [isCXO, router]);
+  }, [currentUser, isCXO, router]);
 
   const [users, setUsers] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -68,10 +68,12 @@ export default function UsersPage() {
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
 
-  // Load users
+  // Load users - wait for auth to be ready
   useEffect(() => {
-    loadUsers();
-  }, []);
+    if (currentUser) {
+      loadUsers();
+    }
+  }, [currentUser]);
 
   const loadUsers = async () => {
     setIsLoading(true);
@@ -185,6 +187,21 @@ export default function UsersPage() {
     }
   };
 
+  // Show loading while auth is being checked
+  if (!currentUser) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-screen">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Loading...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
+  }
+
+  // Redirect happens in useEffect above
   if (!isCXO()) {
     return null;
   }
