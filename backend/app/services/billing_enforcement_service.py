@@ -340,7 +340,7 @@ class BillingEnforcementService:
         """
         Check if we need to rollover to a new month and perform it if needed.
 
-        Simple logic: If current date is first of month and last_rollover_date
+        Simple logic: If current date is first of month and last_billing_reset
         is not today, perform rollover.
 
         Args:
@@ -356,8 +356,8 @@ class BillingEnforcementService:
         if today.day != 1:
             return False
 
-        # Check if we already rolled over today
-        if billing.last_rollover_date == today:
+        # Check if we already rolled over today (compare date portion of datetime)
+        if billing.last_billing_reset and billing.last_billing_reset.date() == today:
             return False
 
         # Perform rollover
@@ -366,8 +366,9 @@ class BillingEnforcementService:
         # Reset current month cost
         billing.current_month_cost = Decimal("0.00")
 
-        # Update last rollover date
-        billing.last_rollover_date = today
+        # Update last billing reset (store as datetime)
+        from datetime import datetime as dt
+        billing.last_billing_reset = dt.combine(today, dt.min.time())
 
         db.add(billing)
         db.commit()
