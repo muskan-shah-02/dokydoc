@@ -89,7 +89,7 @@ export default function AdminDashboardPage() {
             max={tenant?.max_users || 10}
             icon={<Users className="h-5 w-5" />}
             color="blue"
-            href="/users"
+            href="/settings/user_management"
           />
           <MetricCard
             label="Documents"
@@ -97,14 +97,14 @@ export default function AdminDashboardPage() {
             max={tenant?.max_documents || 100}
             icon={<FileText className="h-5 w-5" />}
             color="green"
-            href="/documents"
+            href="/dashboard/documents"
           />
           <MetricCard
             label="Monthly Cost"
             value="$0"
             icon={<DollarSign className="h-5 w-5" />}
             color="orange"
-            href="/billing"
+            href="/settings/billing"
           />
           <MetricCard
             label="Active Tasks"
@@ -121,7 +121,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Organization</h2>
-              <Link href="/settings" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/settings/organization" className="text-sm text-blue-600 hover:text-blue-700">
                 Manage
               </Link>
             </div>
@@ -147,7 +147,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Billing Overview</h2>
-              <Link href="/billing" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/settings/billing" className="text-sm text-blue-600 hover:text-blue-700">
                 View Details
               </Link>
             </div>
@@ -211,17 +211,17 @@ export default function AdminDashboardPage() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <ActionLink
-                href="/users"
+                href="/settings/user_management"
                 icon={<Users className="h-5 w-5" />}
                 label="Manage Users"
               />
               <ActionLink
-                href="/billing"
+                href="/settings/billing"
                 icon={<CreditCard className="h-5 w-5" />}
                 label="View Billing"
               />
               <ActionLink
-                href="/analysis"
+                href="/dashboard/validation-panel"
                 icon={<BarChart3 className="h-5 w-5" />}
                 label="Analytics"
               />

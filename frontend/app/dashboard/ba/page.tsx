@@ -124,7 +124,7 @@ export default function BADashboardPage() {
             <span className="rounded-full bg-blue-100 px-3 py-1 text-sm font-medium text-blue-700">
               BA View
             </span>
-            <Link href="/documents">
+            <Link href="/dashboard/documents">
               <Button className="flex items-center space-x-2">
                 <Upload className="h-4 w-4" />
                 <span>Upload Document</span>
@@ -183,7 +183,7 @@ export default function BADashboardPage() {
               <p className="mt-2 text-sm text-gray-600">
                 Drag and drop your PRDs, specs, or requirements documents
               </p>
-              <Link href="/documents">
+              <Link href="/dashboard/documents">
                 <Button variant="outline" className="mt-4">
                   Browse Files
                 </Button>
@@ -198,7 +198,7 @@ export default function BADashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Analysis Queue</h2>
-              <Link href="/analysis" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/dashboard/validation-panel" className="text-sm text-blue-600 hover:text-blue-700">
                 View All
               </Link>
             </div>
@@ -222,7 +222,7 @@ export default function BADashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Recent Documents</h2>
-              <Link href="/documents" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/dashboard/documents" className="text-sm text-blue-600 hover:text-blue-700">
                 View All
               </Link>
             </div>
@@ -233,7 +233,7 @@ export default function BADashboardPage() {
                 title="No documents yet"
                 description="Upload your first document to get started"
                 action={
-                  <Link href="/documents">
+                  <Link href="/dashboard/documents">
                     <Button variant="outline" size="sm" className="mt-4">
                       Upload Document
                     </Button>
@@ -253,7 +253,7 @@ export default function BADashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Validation Summary</h2>
-              <Link href="/validation" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/dashboard/validation-panel" className="text-sm text-blue-600 hover:text-blue-700">
                 View Reports
               </Link>
             </div>
@@ -309,17 +309,17 @@ export default function BADashboardPage() {
           <h2 className="mb-4 text-lg font-semibold text-gray-900">Quick Actions</h2>
           <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
             <QuickActionButton
-              href="/documents"
+              href="/dashboard/documents"
               icon={<Upload className="h-5 w-5" />}
               label="Upload Document"
             />
             <QuickActionButton
-              href="/analysis"
+              href="/dashboard/validation-panel"
               icon={<BarChart3 className="h-5 w-5" />}
               label="View Analysis"
             />
             <QuickActionButton
-              href="/validation"
+              href="/dashboard/validation-panel"
               icon={<CheckCircle2 className="h-5 w-5" />}
               label="Run Validation"
             />

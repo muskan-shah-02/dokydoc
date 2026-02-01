@@ -126,7 +126,7 @@ export default function CXODashboardPage() {
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Cost Overview</h2>
-            <Link href="/settings" className="text-sm text-blue-600 hover:text-blue-700">
+            <Link href="/settings/billing" className="text-sm text-blue-600 hover:text-blue-700">
               View Billing Details
             </Link>
           </div>
@@ -294,10 +294,10 @@ export default function CXODashboardPage() {
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-lg font-semibold text-gray-900">Quick Actions</h2>
           <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
-            <QuickActionButton href="/users" icon={<Users className="h-5 w-5" />} label="Manage Users" />
-            <QuickActionButton href="/settings" icon={<DollarSign className="h-5 w-5" />} label="View Billing" />
-            <QuickActionButton href="/documents" icon={<FileText className="h-5 w-5" />} label="View Documents" />
-            <QuickActionButton href="/settings" icon={<Shield className="h-5 w-5" />} label="Organization" />
+            <QuickActionButton href="/settings/user_management" icon={<Users className="h-5 w-5" />} label="Manage Users" />
+            <QuickActionButton href="/settings/billing" icon={<DollarSign className="h-5 w-5" />} label="View Billing" />
+            <QuickActionButton href="/dashboard/documents" icon={<FileText className="h-5 w-5" />} label="View Documents" />
+            <QuickActionButton href="/settings/organization" icon={<Shield className="h-5 w-5" />} label="Organization" />
           </div>
         </div>
       </div>

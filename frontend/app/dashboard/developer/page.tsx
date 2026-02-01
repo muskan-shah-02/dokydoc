@@ -192,7 +192,7 @@ export default function DeveloperDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Code Mismatches</h2>
-              <Link href="/validation" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/dashboard/validation-panel" className="text-sm text-blue-600 hover:text-blue-700">
                 View All
               </Link>
             </div>
@@ -227,7 +227,7 @@ export default function DeveloperDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Recent Code Components</h2>
-              <Link href="/code" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/dashboard/code" className="text-sm text-blue-600 hover:text-blue-700">
                 View All
               </Link>
             </div>
@@ -238,7 +238,7 @@ export default function DeveloperDashboardPage() {
                 title="No code components yet"
                 description="Upload or sync code to get started"
                 action={
-                  <Link href="/code">
+                  <Link href="/dashboard/code">
                     <Button variant="outline" size="sm" className="mt-4">
                       Add Code
                     </Button>
@@ -259,12 +259,12 @@ export default function DeveloperDashboardPage() {
             <h2 className="mb-4 text-lg font-semibold text-gray-900">Quick Actions</h2>
             <div className="grid gap-3 grid-cols-2">
               <QuickActionButton
-                href="/code"
+                href="/dashboard/code"
                 icon={<Code className="h-5 w-5" />}
                 label="Add Code"
               />
               <QuickActionButton
-                href="/validation"
+                href="/dashboard/validation-panel"
                 icon={<Zap className="h-5 w-5" />}
                 label="Run Validation"
               />
@@ -274,7 +274,7 @@ export default function DeveloperDashboardPage() {
                 label="View Tasks"
               />
               <QuickActionButton
-                href="/documents"
+                href="/dashboard/documents"
                 icon={<GitBranch className="h-5 w-5" />}
                 label="View Docs"
               />
