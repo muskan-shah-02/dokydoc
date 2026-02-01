@@ -12,7 +12,7 @@
 
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth } from "@/contexts/AuthContext";
@@ -42,17 +42,19 @@ import {
 export default function DashboardPage() {
   const router = useRouter();
   const { user, tenant, isCXO, isLoading, getPrimaryDashboardUrl } = useAuth();
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   // Redirect to role-specific dashboard
   useEffect(() => {
-    if (!isLoading && user) {
+    if (!isLoading && user && !isRedirecting) {
+      setIsRedirecting(true);
       const dashboardUrl = getPrimaryDashboardUrl();
       router.replace(dashboardUrl);
     }
-  }, [user, isLoading, getPrimaryDashboardUrl, router]);
+  }, [user, isLoading, getPrimaryDashboardUrl, router, isRedirecting]);
 
   // Show loading while redirecting
-  if (isLoading || user) {
+  if (isLoading || isRedirecting) {
     return (
       <AppLayout>
         <div className="flex items-center justify-center h-96">

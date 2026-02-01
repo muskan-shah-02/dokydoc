@@ -14,7 +14,7 @@
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth, Permission } from "@/contexts/AuthContext";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Users,
@@ -33,18 +33,25 @@ import {
 } from "lucide-react";
 
 export default function AdminDashboardPage() {
-  const { user, tenant, isCXO, isAdmin, hasPermission, isLoading } = useAuth();
+  const { user, tenant, isCXO, isAdmin, hasPermission, isLoading, getPrimaryDashboardUrl } = useAuth();
   const router = useRouter();
+  const [permissionChecked, setPermissionChecked] = useState(false);
 
   // Check if user has admin dashboard permission (CXO or Admin role)
   const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
 
-  // Redirect non-admin users
+  // Check permission after auth is loaded
   useEffect(() => {
-    if (!isLoading && user && !canAccessAdminDashboard) {
-      router.push("/dashboard");
+    if (!isLoading && user && !permissionChecked) {
+      setPermissionChecked(true);
+      if (user.roles && user.roles.length > 0 && !canAccessAdminDashboard) {
+        const primaryUrl = getPrimaryDashboardUrl();
+        if (primaryUrl !== "/dashboard/admin") {
+          router.replace(primaryUrl);
+        }
+      }
     }
-  }, [user, isLoading, canAccessAdminDashboard, router]);
+  }, [user, isLoading, canAccessAdminDashboard, router, permissionChecked, getPrimaryDashboardUrl]);
 
   if (isLoading) {
     return (

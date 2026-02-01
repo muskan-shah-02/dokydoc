@@ -38,18 +38,25 @@ import {
 
 export default function CXODashboardPage() {
   const router = useRouter();
-  const { user, tenant, hasPermission, isLoading } = useAuth();
+  const { user, tenant, hasPermission, isLoading, getPrimaryDashboardUrl } = useAuth();
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [dataLoading, setDataLoading] = useState(true);
+  const [permissionChecked, setPermissionChecked] = useState(false);
 
-  // Redirect if user doesn't have CXO dashboard permission
+  // Check permission after auth is loaded
   useEffect(() => {
-    if (!isLoading && user) {
-      if (!hasPermission(Permission.DASHBOARD_CXO)) {
-        router.push("/dashboard");
+    if (!isLoading && user && !permissionChecked) {
+      setPermissionChecked(true);
+      // Only redirect if user explicitly doesn't have permission AND has roles loaded
+      if (user.roles && user.roles.length > 0 && !hasPermission(Permission.DASHBOARD_CXO)) {
+        // Redirect to their actual primary dashboard, not /dashboard to avoid loop
+        const primaryUrl = getPrimaryDashboardUrl();
+        if (primaryUrl !== "/dashboard/cxo") {
+          router.replace(primaryUrl);
+        }
       }
     }
-  }, [user, isLoading, hasPermission, router]);
+  }, [user, isLoading, hasPermission, router, permissionChecked, getPrimaryDashboardUrl]);
 
   // Load dashboard data
   useEffect(() => {

@@ -33,19 +33,24 @@ import { Button } from "@/components/ui/button";
 
 export default function BADashboardPage() {
   const router = useRouter();
-  const { user, hasPermission, isLoading } = useAuth();
+  const { user, hasPermission, isLoading, getPrimaryDashboardUrl } = useAuth();
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [dataLoading, setDataLoading] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
+  const [permissionChecked, setPermissionChecked] = useState(false);
 
-  // Redirect if user doesn't have BA dashboard permission
+  // Check permission after auth is loaded
   useEffect(() => {
-    if (!isLoading && user) {
-      if (!hasPermission(Permission.DASHBOARD_BA)) {
-        router.push("/dashboard");
+    if (!isLoading && user && !permissionChecked) {
+      setPermissionChecked(true);
+      if (user.roles && user.roles.length > 0 && !hasPermission(Permission.DASHBOARD_BA)) {
+        const primaryUrl = getPrimaryDashboardUrl();
+        if (primaryUrl !== "/dashboard/ba") {
+          router.replace(primaryUrl);
+        }
       }
     }
-  }, [user, isLoading, hasPermission, router]);
+  }, [user, isLoading, hasPermission, router, permissionChecked, getPrimaryDashboardUrl]);
 
   // Load dashboard data
   useEffect(() => {
