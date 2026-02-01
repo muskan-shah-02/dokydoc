@@ -122,8 +122,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const response = await api.get<{ permissions: string[] }>('/users/me/permissions');
-      setPermissions(response.permissions || []);
+      // Backend returns List[str] directly, not wrapped in object
+      const response = await api.get<string[]>('/users/me/permissions');
+      setPermissions(response || []);
     } catch (error) {
       console.error('Failed to load permissions:', error);
       setPermissions([]);
