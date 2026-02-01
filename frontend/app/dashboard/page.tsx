@@ -1,16 +1,19 @@
 /**
- * Dashboard Page
- * Sprint 2 Extended - Multi-Tenancy Support
+ * Dashboard Page - Role Router
+ * Sprint 2 Refinement
  *
- * Role-specific dashboards:
- * - CXO: Billing, team activity, system health
- * - Developer: Tasks, code components, mismatches
- * - BA: Documents, validation, tasks
- * - PM: Project overview, task progress
+ * This page redirects users to their role-specific dashboard:
+ * - CXO: /dashboard/cxo (Executive Overview)
+ * - Admin: /dashboard/admin (Operations)
+ * - Developer: /dashboard/developer (Execution)
+ * - BA: /dashboard/ba (Requirements)
+ * - PM: /dashboard/developer (Uses Developer view)
  */
 
 "use client";
 
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
@@ -37,13 +40,35 @@ import {
 } from "lucide-react";
 
 export default function DashboardPage() {
-  const { user, tenant, isCXO } = useAuth();
+  const router = useRouter();
+  const { user, tenant, isCXO, isLoading, getPrimaryDashboardUrl } = useAuth();
 
-  // Determine primary role for dashboard customization
-  const primaryRole = user?.roles[0];
+  // Redirect to role-specific dashboard
+  useEffect(() => {
+    if (!isLoading && user) {
+      const dashboardUrl = getPrimaryDashboardUrl();
+      router.replace(dashboardUrl);
+    }
+  }, [user, isLoading, getPrimaryDashboardUrl, router]);
+
+  // Show loading while redirecting
+  if (isLoading || user) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-96">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Loading your dashboard...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
+  }
+
+  // Fallback - determine roles for direct rendering
   const isDeveloper = user?.roles.includes("Developer");
   const isBA = user?.roles.includes("BA");
-  const isPM = user?.roles.includes("PM");
+  const isPM = user?.roles.includes("PM") || user?.roles.includes("Product Manager");
 
   return (
     <AppLayout>

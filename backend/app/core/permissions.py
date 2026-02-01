@@ -62,13 +62,15 @@ class Permission(str, Enum):
     DASHBOARD_DEVELOPER = "dashboard:developer"
     DASHBOARD_BA = "dashboard:ba"
     DASHBOARD_CXO = "dashboard:cxo"
+    DASHBOARD_ADMIN = "dashboard:admin"
     DASHBOARD_PM = "dashboard:pm"
 
 
 # Role-to-Permissions Mapping
 ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
     Role.CXO: {
-        # CXO has ALL permissions (tenant admin)
+        # CXO has ALL permissions (tenant owner - "God Mode")
+        # Work Permissions - Full access to all work modules
         Permission.DOCUMENT_READ,
         Permission.DOCUMENT_WRITE,
         Permission.DOCUMENT_DELETE,
@@ -86,6 +88,7 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.TASK_DELETE,
         Permission.TASK_ASSIGN,
         Permission.TASK_COMMENT,
+        # Management Permissions - Full admin access
         Permission.BILLING_VIEW,
         Permission.BILLING_MANAGE,
         Permission.USER_VIEW,
@@ -94,7 +97,26 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_DELETE,
         Permission.TENANT_VIEW,
         Permission.TENANT_MANAGE,
+        # Dashboard Permissions - ALL dashboards (God Mode)
         Permission.DASHBOARD_CXO,
+        Permission.DASHBOARD_ADMIN,
+        Permission.DASHBOARD_DEVELOPER,
+        Permission.DASHBOARD_BA,
+        Permission.DASHBOARD_PM,
+    },
+
+    Role.ADMIN: {
+        # ADMIN - Operations manager (Users, Billing, Org settings only)
+        # NO access to Work modules (Documents, Code, Tasks, Validation)
+        Permission.BILLING_VIEW,
+        Permission.BILLING_MANAGE,
+        Permission.USER_VIEW,
+        Permission.USER_INVITE,
+        Permission.USER_MANAGE,
+        Permission.USER_DELETE,
+        Permission.TENANT_VIEW,
+        Permission.TENANT_MANAGE,
+        Permission.DASHBOARD_ADMIN,
     },
 
     Role.BA: {

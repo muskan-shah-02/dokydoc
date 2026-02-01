@@ -151,14 +151,28 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
         return response
 
     def _is_public_route(self, path: str) -> bool:
-        """Check if route is public (doesn't require tenant context)."""
-        # Exact match
+        """
+        Check if route is public (doesn't require tenant context).
+
+        IMPORTANT: Uses strict matching to avoid false positives.
+        - Exact match for specific routes (e.g., "/", "/health")
+        - Prefix match ONLY for routes ending with "/" to indicate directory-style matching
+        """
+        # Exact match first
         if path in PUBLIC_ROUTES:
             return True
 
-        # Prefix match (e.g., /docs/*)
+        # Prefix match - but ONLY for routes that explicitly end with "/"
+        # OR have a clear path segment boundary
+        # This prevents "/" from matching everything like "/users/me/permissions"
         for public_route in PUBLIC_ROUTES:
-            if path.startswith(public_route):
+            # Skip root path "/" for prefix matching - it would match everything
+            if public_route == "/":
+                continue
+
+            # Check if path starts with public_route followed by "/" or end of string
+            # This ensures /docs matches /docs/something but /do doesn't match /docs
+            if path.startswith(public_route + "/") or path == public_route:
                 return True
 
         return False

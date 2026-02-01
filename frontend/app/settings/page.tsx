@@ -314,44 +314,31 @@ function PasswordTab() {
 // ============================================================================
 
 function TenantTab({ tenant }: { tenant: any }) {
-  const [name, setName] = useState(tenant?.name || "");
-  const [isLoading, setIsLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
-
-  const handleSave = async () => {
-    setIsLoading(true);
-    setSuccess(false);
-
-    try {
-      await api.put("/tenants/me/", { name });
-      setSuccess(true);
-      setTimeout(() => setSuccess(false), 3000);
-    } catch (error) {
-      console.error("Failed to update tenant:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-semibold text-gray-900">Organization Settings</h3>
         <p className="mt-1 text-sm text-gray-600">
-          Manage your organization details and configuration
+          View your organization details and configuration
         </p>
       </div>
 
       <div className="max-w-xl space-y-4">
         <div>
           <Label htmlFor="orgName">Organization Name</Label>
-          <Input
-            id="orgName"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="mt-2"
-          />
+          <div className="mt-2 flex items-center space-x-2">
+            <Input
+              id="orgName"
+              type="text"
+              value={tenant?.name || ""}
+              disabled
+              className="flex-1 bg-gray-50"
+            />
+            <Lock className="h-4 w-4 text-gray-400" />
+          </div>
+          <p className="mt-1 text-sm text-gray-500">
+            Organization name cannot be changed. Contact support if needed.
+          </p>
         </div>
 
         <div>
@@ -399,17 +386,11 @@ function TenantTab({ tenant }: { tenant: any }) {
           </div>
         </div>
 
-        {success && (
-          <div className="flex items-center space-x-2 rounded-md bg-green-50 p-3 text-green-800">
-            <CheckCircle2 className="h-5 w-5" />
-            <span className="text-sm font-medium">Settings updated successfully</span>
-          </div>
-        )}
-
-        <Button onClick={handleSave} disabled={isLoading}>
-          <Save className="mr-2 h-4 w-4" />
-          {isLoading ? "Saving..." : "Save Changes"}
-        </Button>
+        <div className="rounded-md bg-blue-50 p-3">
+          <p className="text-sm text-blue-800">
+            Organization settings are read-only. To make changes, please contact your account manager or support.
+          </p>
+        </div>
       </div>
     </div>
   );

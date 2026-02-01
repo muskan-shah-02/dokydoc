@@ -15,6 +15,7 @@ import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useAuth } from "@/contexts/AuthContext";
+import { RoleSwitcher } from "./RoleSwitcher";
 import {
   User,
   Settings,
@@ -72,11 +73,16 @@ export function Header({ onMenuToggle }: HeaderProps) {
         </Link>
       </div>
 
-      {/* Right: Tenant Info + User Menu */}
+      {/* Right: Role Switcher + Tenant Info + User Menu */}
       <div className="flex items-center space-x-4">
+        {/* Role Switcher (for multi-role users) */}
+        <div className="hidden sm:block">
+          <RoleSwitcher />
+        </div>
+
         {/* Tenant Tier Badge */}
         {tenant && (
-          <div className="hidden items-center space-x-2 rounded-full bg-blue-50 px-3 py-1 sm:flex">
+          <div className="hidden items-center space-x-2 rounded-full bg-blue-50 px-3 py-1 md:flex">
             <Crown className="h-4 w-4 text-blue-600" />
             <span className="text-sm font-medium capitalize text-blue-600">
               {tenant.tier}

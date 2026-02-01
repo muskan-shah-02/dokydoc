@@ -12,7 +12,7 @@
 "use client";
 
 import { AppLayout } from "@/components/layout/AppLayout";
-import { useAuth } from "@/contexts/AuthContext";
+import { useAuth, Permission } from "@/contexts/AuthContext";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import Link from "next/link";
@@ -28,20 +28,38 @@ import {
   CheckCircle2,
   Clock,
   TrendingUp,
+  UserPlus,
+  Receipt,
 } from "lucide-react";
 
 export default function AdminDashboardPage() {
-  const { user, tenant, isCXO } = useAuth();
+  const { user, tenant, isCXO, isAdmin, hasPermission, isLoading } = useAuth();
   const router = useRouter();
+
+  // Check if user has admin dashboard permission (CXO or Admin role)
+  const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
 
   // Redirect non-admin users
   useEffect(() => {
-    if (user && !isCXO()) {
+    if (!isLoading && user && !canAccessAdminDashboard) {
       router.push("/dashboard");
     }
-  }, [user, isCXO, router]);
+  }, [user, isLoading, canAccessAdminDashboard, router]);
 
-  if (!isCXO()) {
+  if (isLoading) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-96">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Loading Admin Dashboard...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
+  }
+
+  if (!canAccessAdminDashboard) {
     return null; // Will redirect
   }
 
