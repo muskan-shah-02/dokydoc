@@ -13,3 +13,4 @@ from .initiative import Initiative
 from .initiative_asset import InitiativeAsset
 from .tenant_billing import TenantBilling
 from .tenant import Tenant
+from .task import Task, TaskComment, TaskStatus, TaskPriority

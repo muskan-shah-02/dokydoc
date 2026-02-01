@@ -67,7 +67,17 @@ export default function AdminDashboardPage() {
   }
 
   if (!canAccessAdminDashboard) {
-    return null; // Will redirect
+    // Show loading while redirect happens
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-96">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Redirecting...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
   }
 
   return (

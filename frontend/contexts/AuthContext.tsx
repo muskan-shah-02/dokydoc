@@ -83,6 +83,7 @@ interface AuthContextType {
   // Actions
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  setAuthFromResponse: (user: User, tenant: Tenant, accessToken: string) => void;
 
   // Permission checking
   hasPermission: (permission: Permission | string) => boolean;
@@ -211,6 +212,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
+   * Set auth state from registration response
+   * Used after successful tenant registration to initialize auth without re-login
+   */
+  const setAuthFromResponse = (newUser: User, newTenant: Tenant, accessToken: string) => {
+    // Store in localStorage
+    localStorage.setItem('accessToken', accessToken);
+    localStorage.setItem('user', JSON.stringify(newUser));
+    localStorage.setItem('tenant', JSON.stringify(newTenant));
+
+    // Update state
+    setUser(newUser);
+    setTenant(newTenant);
+    // Permissions will be loaded by the useEffect that watches user changes
+  };
+
+  /**
    * Check if user has a specific permission
    */
   const hasPermission = (permission: Permission | string): boolean => {
@@ -324,6 +341,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated,
     login,
     logout,
+    setAuthFromResponse,
     hasPermission,
     hasAnyPermission,
     hasAllPermissions,
