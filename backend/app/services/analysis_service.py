@@ -140,24 +140,31 @@ class DocumentAnalysisEngine(LoggerMixin):
             self._api_call_counter[document_id] += 1
 
     # --- NEW: Helper to check for stop signal ---
-    def _check_stop_signal(self, db: Session, document_id: int) -> bool:
+    def _check_stop_signal(self, db: Session, document_id: int, tenant_id: int) -> bool:
         """Checks if the user has requested to stop the analysis."""
         # We must re-fetch the document from DB to see the latest status
-        doc = crud.document.get(db=db, id=document_id)
+        doc = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
         if doc and doc.status == "stopping":
             self.logger.info(f"🛑 Analysis STOPPED by user for document {document_id}")
             # Set final stopped state
             crud.document.update(
-                db=db, 
-                db_obj=doc, 
+                db=db,
+                db_obj=doc,
                 obj_in={"status": "stopped", "error_message": "Analysis manually halted by user."}
             )
             return True
         return False
-    
-    async def analyze_document(self, db: Session, document_id: int, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
+
+    async def analyze_document(self, db: Session, document_id: int, tenant_id: int = None, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
         """
         Performs the complete multi-pass analysis on a document.
+
+        Args:
+            db: Database session
+            document_id: ID of the document to analyze
+            tenant_id: Tenant ID for multi-tenancy filtering
+            learning_mode: Whether to use learning mode
+            analysis_run_id: Optional analysis run ID for tracking
         """
         # Check if document is already being analyzed
         if document_id in self._running_documents:
@@ -167,16 +174,20 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document_id=document_id,
                 details={"status": "already_running"}
             )
-        
+
         # Add document to running set and initialize API call counter + cost tracker
         self._running_documents.add(document_id)
         self._api_call_counter[document_id] = 0
         self._cost_tracker[document_id] = {}  # ✅ Initialize cost tracking
         self.logger.info(f"📊 Starting multi-pass analysis for document_id: {document_id}")
-        
+
         try:
-            # Get the document
-            document = crud.document.get(db=db, id=document_id)
+            # Get the document - use tenant_id if provided, otherwise query without it
+            if tenant_id:
+                document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+            else:
+                # Fallback: query without tenant_id filter for backwards compatibility
+                document = db.query(models.Document).filter(models.Document.id == document_id).first()
             if not document:
                 self.logger.error(f"Document {document_id} not found")
                 return False
@@ -218,7 +229,7 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             try:
                 # --- CHECK 1: Before Pass 1 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
@@ -229,7 +240,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 db.commit()
                 
                 # --- CHECK 2: Before Pass 2 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
@@ -238,14 +249,14 @@ class DocumentAnalysisEngine(LoggerMixin):
                 )
                 
                 # --- CHECK 3: Before Pass 3 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
                 await self._pass_3_structured_extraction(db, document_id, analysis_run_id)
                 
                 # --- CHECK 4: Before Learning Mode ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Learning Mode: Feed to Business Ontology Engine
                 if learning_mode:
@@ -272,7 +283,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                     )
 
                 # Final Success State (only update if we haven't stopped)
-                final_check = crud.document.get(db=db, id=document_id)
+                final_check = crud.document.get(db=db, id=document_id, tenant_id=document.tenant_id)
                 if final_check.status != "stopped":
                     crud.document.update(
                         db=db,
@@ -292,8 +303,8 @@ class DocumentAnalysisEngine(LoggerMixin):
             except Exception as e:
                 self.logger.error(f"Error during multi-pass analysis for document {document_id}: {e}")
                 # Only set to failed if it wasn't a user stop
-                current_doc = crud.document.get(db=db, id=document_id)
-                if current_doc.status != "stopped":
+                current_doc = crud.document.get(db=db, id=document_id, tenant_id=document.tenant_id if document else tenant_id)
+                if current_doc and current_doc.status != "stopped":
                     crud.document.update(db=db, db_obj=current_doc, obj_in={"status": "analysis_failed", "error_message": str(e)})
                 return False
         finally:
@@ -410,7 +421,13 @@ class DocumentAnalysisEngine(LoggerMixin):
             
             self.logger.info(f"🔍 PASS 3: Starting structured extraction - {len(segments)} segments")
             base_prompt = prompt_manager.get_prompt(PromptType.STRUCTURED_EXTRACTION)
-            document = crud.document.get(db=db, id=document_id)
+
+            # Get document - get tenant_id from segments if available
+            tenant_id = segments[0].tenant_id if segments else None
+            if tenant_id:
+                document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+            else:
+                document = db.query(models.Document).filter(models.Document.id == document_id).first()
 
             # ✅ SPRINT 1 PHASE 2: Initialize Pass 3 cost tracking
             pass_3_cost_inr = 0
@@ -419,7 +436,7 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             for i, segment in enumerate(segments):
                 # --- CRITICAL: Check stop signal inside the loop ---
-                if self._check_stop_signal(db, document_id): 
+                if self._check_stop_signal(db, document_id, document.tenant_id if document else tenant_id):
                     return False
                 
                 # --- Rate Limit Throttle (Fix for 429 Error) ---

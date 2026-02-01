@@ -130,7 +130,7 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
         
         # This DAE service will provide its own granular status updates
         # (e.g., "pass_1_composition") as it runs, fulfilling UX-02.
-        success = await dae.analyze_document(db=db, document_id=document.id, learning_mode=True)
+        success = await dae.analyze_document(db=db, document_id=document.id, tenant_id=tenant_id, learning_mode=True)
 
         if success:
             crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100, "error_message": None})
