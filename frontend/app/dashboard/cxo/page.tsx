@@ -12,10 +12,11 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth, Permission } from "@/contexts/AuthContext";
+import { api } from "@/lib/api";
 import Link from "next/link";
 import {
   DollarSign,
@@ -34,6 +35,7 @@ import {
   HardDrive,
   BarChart3,
   ArrowUpRight,
+  RefreshCw,
 } from "lucide-react";
 
 export default function CXODashboardPage() {
@@ -42,6 +44,7 @@ export default function CXODashboardPage() {
   const [dashboardData, setDashboardData] = useState<any>(null);
   const [dataLoading, setDataLoading] = useState(true);
   const [permissionChecked, setPermissionChecked] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Check permission after auth is loaded
   useEffect(() => {
@@ -58,36 +61,108 @@ export default function CXODashboardPage() {
     }
   }, [user, isLoading, hasPermission, router, permissionChecked, getPrimaryDashboardUrl]);
 
+  // Types for API responses
+  interface BillingUsageResponse {
+    balance_inr?: number;
+    billing_type?: string;
+    current_month_cost?: number;
+    monthly_limit_inr?: number;
+    last_30_days_cost?: number;
+    low_balance_alert?: boolean;
+  }
+
+  interface DocumentsResponse {
+    items?: any[];
+    total?: number;
+  }
+
+  interface TasksResponse {
+    items?: any[];
+    total?: number;
+  }
+
+  // Fetch real data from APIs
+  const fetchDashboardData = useCallback(async () => {
+    try {
+      // Fetch billing data, documents, and tasks in parallel
+      const [billingData, documentsData, tasksData, usersData] = await Promise.all([
+        api.get<BillingUsageResponse>("/billing/usage").catch(() => null),
+        api.get<DocumentsResponse>("/documents").catch(() => ({ items: [], total: 0 })),
+        api.get<TasksResponse>("/tasks").catch(() => ({ items: [], total: 0 })),
+        api.get<any[]>("/users").catch(() => []),
+      ]);
+
+      // Calculate task stats
+      const tasks = tasksData?.items || tasksData || [];
+      const completedTasks = Array.isArray(tasks) ? tasks.filter((t: any) => t.status === "done").length : 0;
+      const inProgressTasks = Array.isArray(tasks) ? tasks.filter((t: any) => t.status === "in_progress").length : 0;
+      const openTasks = Array.isArray(tasks) ? tasks.filter((t: any) => ["todo", "backlog"].includes(t.status)).length : 0;
+
+      // Get user count
+      const userCount = Array.isArray(usersData) ? usersData.length : 1;
+
+      // Get document count
+      const documentCount = documentsData?.total || (Array.isArray(documentsData?.items) ? documentsData.items.length : 0);
+
+      setDashboardData({
+        costOverview: {
+          currentMonth: billingData?.current_month_cost || 0,
+          budget: billingData?.monthly_limit_inr || tenant?.monthly_limit_inr || 10000,
+          lastMonth: billingData?.last_30_days_cost || 0,
+          trend: 0, // Calculate from history if available
+          balance: billingData?.balance_inr || 0,
+          billingType: billingData?.billing_type || "prepaid",
+          lowBalanceAlert: billingData?.low_balance_alert || false,
+        },
+        systemHealth: {
+          api: "operational",
+          database: "operational",
+          aiServices: "operational",
+          storage: "operational",
+        },
+        teamVelocity: {
+          completed: completedTasks,
+          open: openTasks,
+          inProgress: inProgressTasks,
+        },
+        tenantUsage: {
+          users: { current: userCount, max: tenant?.max_users || 10 },
+          documents: { current: documentCount, max: tenant?.max_documents || 100 },
+          storage: { used: 0, max: 10 }, // GB - would need separate API
+          apiCalls: { current: 0, max: 10000 }, // Would need separate tracking
+        },
+      });
+    } catch (error) {
+      console.error("Failed to load dashboard data:", error);
+      // Set default data on error
+      setDashboardData({
+        costOverview: { currentMonth: 0, budget: 10000, lastMonth: 0, trend: 0, balance: 0, billingType: "prepaid" },
+        systemHealth: { api: "operational", database: "operational", aiServices: "operational", storage: "operational" },
+        teamVelocity: { completed: 0, open: 0, inProgress: 0 },
+        tenantUsage: {
+          users: { current: 1, max: tenant?.max_users || 10 },
+          documents: { current: 0, max: tenant?.max_documents || 100 },
+          storage: { used: 0, max: 10 },
+          apiCalls: { current: 0, max: 10000 },
+        },
+      });
+    } finally {
+      setDataLoading(false);
+      setRefreshing(false);
+    }
+  }, [tenant]);
+
   // Load dashboard data
   useEffect(() => {
-    // Simulated data - in production, fetch from API
-    setDashboardData({
-      costOverview: {
-        currentMonth: 0,
-        budget: 10000,
-        lastMonth: 0,
-        trend: 0,
-      },
-      systemHealth: {
-        api: "operational",
-        database: "operational",
-        aiServices: "operational",
-        storage: "operational",
-      },
-      teamVelocity: {
-        completed: 0,
-        open: 0,
-        inProgress: 0,
-      },
-      tenantUsage: {
-        users: { current: 1, max: tenant?.max_users || 10 },
-        documents: { current: 0, max: tenant?.max_documents || 100 },
-        storage: { used: 0, max: 10 }, // GB
-        apiCalls: { current: 0, max: 10000 },
-      },
-    });
-    setDataLoading(false);
-  }, [tenant]);
+    if (user && !isLoading) {
+      fetchDashboardData();
+    }
+  }, [user, isLoading, fetchDashboardData]);
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    fetchDashboardData();
+  };
 
   if (isLoading || dataLoading) {
     return (
@@ -115,73 +190,124 @@ export default function CXODashboardPage() {
               Monitor costs, system health, and organizational metrics
             </p>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="flex items-center space-x-2 rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+              <span>Refresh</span>
+            </button>
             <span className="rounded-full bg-purple-100 px-3 py-1 text-sm font-medium text-purple-700">
               CXO View
             </span>
           </div>
         </div>
 
+        {/* Low Balance Alert */}
+        {data.costOverview.billingType === "prepaid" && data.costOverview.lowBalanceAlert && (
+          <div className="rounded-lg border border-orange-300 bg-orange-50 p-4">
+            <div className="flex items-center space-x-3">
+              <AlertCircle className="h-5 w-5 text-orange-600" />
+              <div>
+                <p className="font-medium text-orange-800">Low Balance Alert</p>
+                <p className="text-sm text-orange-700">
+                  Your prepaid balance is running low. Current balance: INR {data.costOverview.balance.toFixed(2)}.
+                  <Link href="/settings/billing" className="ml-1 underline">Top up now</Link>
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Cost Overview */}
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Cost Overview</h2>
-            <Link href="/settings/billing" className="text-sm text-blue-600 hover:text-blue-700">
-              View Billing Details
-            </Link>
+            <div className="flex items-center space-x-4">
+              <span className={`rounded-full px-2 py-1 text-xs font-medium ${
+                data.costOverview.billingType === "prepaid"
+                  ? "bg-blue-100 text-blue-700"
+                  : "bg-purple-100 text-purple-700"
+              }`}>
+                {data.costOverview.billingType === "prepaid" ? "Prepaid" : "Postpaid"}
+              </span>
+              <Link href="/settings/billing" className="text-sm text-blue-600 hover:text-blue-700">
+                View Billing Details
+              </Link>
+            </div>
           </div>
 
           <div className="grid gap-6 md:grid-cols-4">
+            {/* Current Balance (for prepaid) or Current Month Cost */}
+            {data.costOverview.billingType === "prepaid" ? (
+              <div className={`rounded-lg p-4 ${
+                data.costOverview.balance < 100 ? "bg-red-50" : "bg-green-50"
+              }`}>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-gray-600">Current Balance</p>
+                  <DollarSign className={`h-5 w-5 ${
+                    data.costOverview.balance < 100 ? "text-red-600" : "text-green-600"
+                  }`} />
+                </div>
+                <p className="mt-2 text-3xl font-bold text-gray-900">
+                  INR {data.costOverview.balance.toFixed(2)}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {data.costOverview.balance < 100 ? "Low balance - top up soon" : "Available for API calls"}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg bg-blue-50 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-gray-600">Current Month</p>
+                  <DollarSign className="h-5 w-5 text-blue-600" />
+                </div>
+                <p className="mt-2 text-3xl font-bold text-gray-900">
+                  INR {data.costOverview.currentMonth.toFixed(2)}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  of INR {data.costOverview.budget} budget
+                </p>
+              </div>
+            )}
+
             <div className="rounded-lg bg-blue-50 p-4">
               <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-600">Current Month</p>
-                <DollarSign className="h-5 w-5 text-blue-600" />
+                <p className="text-sm text-gray-600">Month Spend</p>
+                <TrendingUp className="h-5 w-5 text-blue-600" />
               </div>
               <p className="mt-2 text-3xl font-bold text-gray-900">
-                ${data.costOverview.currentMonth.toFixed(2)}
+                INR {data.costOverview.currentMonth.toFixed(2)}
               </p>
               <p className="mt-1 text-xs text-gray-500">
-                of ${data.costOverview.budget} budget
-              </p>
-            </div>
-
-            <div className="rounded-lg bg-green-50 p-4">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-600">Budget Remaining</p>
-                <TrendingUp className="h-5 w-5 text-green-600" />
-              </div>
-              <p className="mt-2 text-3xl font-bold text-gray-900">
-                ${(data.costOverview.budget - data.costOverview.currentMonth).toFixed(2)}
-              </p>
-              <p className="mt-1 text-xs text-gray-500">
-                {(((data.costOverview.budget - data.costOverview.currentMonth) / data.costOverview.budget) * 100).toFixed(0)}% available
+                This billing cycle
               </p>
             </div>
 
             <div className="rounded-lg bg-gray-50 p-4">
               <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-600">Last Month</p>
+                <p className="text-sm text-gray-600">Last 30 Days</p>
                 <BarChart3 className="h-5 w-5 text-gray-600" />
               </div>
               <p className="mt-2 text-3xl font-bold text-gray-900">
-                ${data.costOverview.lastMonth.toFixed(2)}
+                INR {data.costOverview.lastMonth.toFixed(2)}
               </p>
               <p className="mt-1 text-xs text-gray-500">Total spend</p>
             </div>
 
             <div className="rounded-lg bg-purple-50 p-4">
               <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-600">Trend</p>
-                {data.costOverview.trend >= 0 ? (
-                  <TrendingUp className="h-5 w-5 text-red-600" />
-                ) : (
-                  <TrendingDown className="h-5 w-5 text-green-600" />
-                )}
+                <p className="text-sm text-gray-600">Monthly Limit</p>
+                <Shield className="h-5 w-5 text-purple-600" />
               </div>
               <p className="mt-2 text-3xl font-bold text-gray-900">
-                {data.costOverview.trend >= 0 ? "+" : ""}{data.costOverview.trend}%
+                INR {data.costOverview.budget.toFixed(0)}
               </p>
-              <p className="mt-1 text-xs text-gray-500">vs. last month</p>
+              <p className="mt-1 text-xs text-gray-500">
+                {(((data.costOverview.budget - data.costOverview.currentMonth) / data.costOverview.budget) * 100).toFixed(0)}% remaining
+              </p>
             </div>
           </div>
         </div>

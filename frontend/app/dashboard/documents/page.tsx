@@ -33,7 +33,11 @@ import {
   XCircle,
   Download,
   Trash2,
+  Wallet,
+  RefreshCw,
 } from "lucide-react";
+import { api } from "@/lib/api";
+import Link from "next/link";
 
 // --- Interface Definitions ---
 interface Document {
@@ -482,12 +486,92 @@ const DocumentStatusCell = ({
   );
 };
 
+// --- Balance Display Component ---
+const BalanceDisplay = ({
+  balance,
+  billingType,
+  lowBalanceAlert,
+  onRefresh,
+  isRefreshing
+}: {
+  balance: number;
+  billingType: string;
+  lowBalanceAlert: boolean;
+  onRefresh: () => void;
+  isRefreshing: boolean;
+}) => {
+  if (billingType !== "prepaid") return null;
+
+  const isLow = balance < 100 || lowBalanceAlert;
+
+  return (
+    <div className={`flex items-center gap-2 rounded-lg px-3 py-2 ${
+      isLow ? "bg-orange-50 border border-orange-200" : "bg-green-50 border border-green-200"
+    }`}>
+      <Wallet className={`h-4 w-4 ${isLow ? "text-orange-600" : "text-green-600"}`} />
+      <div className="flex flex-col">
+        <span className="text-xs text-gray-500">Balance</span>
+        <span className={`font-semibold ${isLow ? "text-orange-700" : "text-green-700"}`}>
+          INR {balance.toFixed(2)}
+        </span>
+      </div>
+      <button
+        onClick={onRefresh}
+        disabled={isRefreshing}
+        className="ml-1 p-1 rounded hover:bg-white/50"
+        title="Refresh balance"
+      >
+        <RefreshCw className={`h-3 w-3 text-gray-400 ${isRefreshing ? "animate-spin" : ""}`} />
+      </button>
+      {isLow && (
+        <Link
+          href="/settings/billing"
+          className="text-xs text-orange-600 underline hover:text-orange-800"
+        >
+          Top up
+        </Link>
+      )}
+    </div>
+  );
+};
+
 // --- Main Documents Page Component ---
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [billingInfo, setBillingInfo] = useState<{
+    balance: number;
+    billingType: string;
+    lowBalanceAlert: boolean;
+  } | null>(null);
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
+
+  interface BillingUsageResponse {
+    balance_inr?: number;
+    billing_type?: string;
+    low_balance_alert?: boolean;
+  }
+
+  const fetchBillingInfo = useCallback(async () => {
+    try {
+      const data = await api.get<BillingUsageResponse>("/billing/usage");
+      setBillingInfo({
+        balance: data?.balance_inr || 0,
+        billingType: data?.billing_type || "prepaid",
+        lowBalanceAlert: data?.low_balance_alert || false,
+      });
+    } catch (err) {
+      console.error("Failed to fetch billing info:", err);
+    }
+  }, []);
+
+  const handleRefreshBalance = async () => {
+    setRefreshingBalance(true);
+    await fetchBillingInfo();
+    setRefreshingBalance(false);
+  };
 
   const fetchDocuments = useCallback(async () => {
     setIsLoading(true);
@@ -541,12 +625,17 @@ export default function DocumentsPage() {
 
   useEffect(() => {
     fetchDocuments();
-  }, [fetchDocuments]);
+    fetchBillingInfo();
+  }, [fetchDocuments, fetchBillingInfo]);
 
   const handleDocumentUpdate = (updatedDoc: Document) => {
     setDocuments((currentDocs) =>
       currentDocs.map((d) => (d.id === updatedDoc.id ? updatedDoc : d))
     );
+    // Refresh balance when a document finishes processing (completed or failed)
+    if (updatedDoc.status === "completed" || updatedDoc.status.includes("failed")) {
+      fetchBillingInfo();
+    }
   };
 
   // Helper for download
@@ -605,11 +694,26 @@ export default function DocumentsPage() {
 
   return (
     <div className="p-2 sm:p-4">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
           Document Library
         </h1>
-        <UploadDialog onUploadSuccess={fetchDocuments} />
+        <div className="flex items-center gap-3">
+          {billingInfo && (
+            <BalanceDisplay
+              balance={billingInfo.balance}
+              billingType={billingInfo.billingType}
+              lowBalanceAlert={billingInfo.lowBalanceAlert}
+              onRefresh={handleRefreshBalance}
+              isRefreshing={refreshingBalance}
+            />
+          )}
+          <UploadDialog onUploadSuccess={() => {
+            fetchDocuments();
+            // Refresh balance after upload triggers analysis
+            setTimeout(fetchBillingInfo, 2000);
+          }} />
+        </div>
       </div>
 
       {isLoading && (
