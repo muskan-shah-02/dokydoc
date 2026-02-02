@@ -2,11 +2,11 @@
   frontend/app/dashboard/documents/[id]/page.tsx
   -----------------------------------------------
   Status: FINAL MASTER
-  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal
+  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal + Billing Notifications
 */
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,6 +56,8 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useBillingNotification } from "@/components/BillingToast";
+import { api } from "@/lib/api";
 
 // --- 1. Types ---
 
@@ -829,6 +831,9 @@ export default function DocumentDetailPage() {
   const [segments, setSegments] = useState<AnalyzedSegment[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
+  const notifiedProcessingRef = useRef(false);
+  const previousStatusRef = useRef<string | null>(null);
+  const billingNotification = useBillingNotification();
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -863,6 +868,7 @@ export default function DocumentDetailPage() {
     fetchFullAnalysis();
   }, [fetchFullAnalysis]);
 
+  // Polling with billing notifications
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isLive && documentId) {
@@ -875,20 +881,56 @@ export default function DocumentDetailPage() {
           );
           if (res.ok) {
             const statusData = await res.json();
+            const newStatus = statusData.status;
+            const prevStatus = previousStatusRef.current;
+
+            // Show "Processing Started" notification when entering AI phases
+            const aiStates = ["analyzing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"];
+            if (aiStates.includes(newStatus) && !notifiedProcessingRef.current) {
+              notifiedProcessingRef.current = true;
+              const balance = await billingNotification.refreshBalance();
+              if (balance !== null) {
+                billingNotification.showProcessingStarted(balance);
+              }
+            }
+
             setDoc((prev) =>
               prev
                 ? {
                     ...prev,
-                    status: statusData.status,
+                    status: newStatus,
                     progress: statusData.progress,
                     error_message: statusData.error_message,
                   }
                 : null
             );
-            if (!ACTIVE_STATES.includes(statusData.status)) {
+
+            // Check if processing just completed
+            if (!ACTIVE_STATES.includes(newStatus)) {
               setIsLive(false);
+
+              // Show completion or error notification
+              if (newStatus === "completed") {
+                try {
+                  const [costData, newBalance] = await Promise.all([
+                    api.get<{ ai_cost_inr: number }>(`/billing/documents/${documentId}/cost`),
+                    billingNotification.refreshBalance(),
+                  ]);
+                  const cost = costData?.ai_cost_inr || 0;
+                  billingNotification.showProcessingComplete(cost, newBalance || 0);
+                } catch (err) {
+                  console.error("Failed to fetch document cost:", err);
+                }
+              } else if (newStatus.includes("failed")) {
+                billingNotification.showError(statusData.error_message || "Document processing failed");
+              }
+
+              // Reset notification flag for next run
+              notifiedProcessingRef.current = false;
               fetchFullAnalysis();
             }
+
+            previousStatusRef.current = newStatus;
           }
         } catch (e) {
           console.error(e);
@@ -896,11 +938,15 @@ export default function DocumentDetailPage() {
       }, 3000);
     }
     return () => clearInterval(interval);
-  }, [isLive, documentId, fetchFullAnalysis]);
+  }, [isLive, documentId, fetchFullAnalysis, billingNotification]);
 
   const handleRunAnalysis = async () => {
     if (!documentId) return;
     const token = localStorage.getItem("accessToken");
+
+    // Reset notification flag when starting new analysis
+    notifiedProcessingRef.current = false;
+
     setIsLive(true);
     setDoc((prev) =>
       prev ? { ...prev, status: "processing", progress: 0 } : null
