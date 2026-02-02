@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import Link from "next/link";
+import { useBillingNotification } from "@/components/BillingToast";
 
 // --- Interface Definitions ---
 interface Document {
@@ -383,7 +384,7 @@ const ManageLinksDialog = ({
   );
 };
 
-// --- Document Status Cell Component (With Live Polling) ---
+// --- Document Status Cell Component (With Live Polling & Billing Notifications) ---
 const DocumentStatusCell = ({
   doc,
   onUpdate,
@@ -394,6 +395,8 @@ const DocumentStatusCell = ({
   const [status, setStatus] = useState(doc.status);
   const [progress, setProgress] = useState(doc.progress);
   const [errorMessage, setErrorMessage] = useState(doc.error_message);
+  const [notifiedProcessing, setNotifiedProcessing] = useState(false);
+  const billingNotification = useBillingNotification();
 
   useEffect(() => {
     // Define active states that require polling
@@ -406,6 +409,18 @@ const DocumentStatusCell = ({
       "pass_2_segmenting",
       "pass_3_extraction",
     ];
+
+    // Show processing started notification when entering AI analysis phases
+    const aiStates = ["analyzing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"];
+    if (aiStates.includes(status) && !notifiedProcessing) {
+      setNotifiedProcessing(true);
+      // Fetch current balance and show notification
+      billingNotification.refreshBalance().then((balance) => {
+        if (balance !== null) {
+          billingNotification.showProcessingStarted(balance);
+        }
+      });
+    }
 
     if (activeStates.includes(status)) {
       const intervalId = setInterval(async () => {
@@ -426,7 +441,28 @@ const DocumentStatusCell = ({
             setProgress(data.progress);
             setErrorMessage(data.error_message);
 
-            if (data.status === "completed" || data.status.includes("failed")) {
+            // Show completion notification with cost
+            if (data.status === "completed") {
+              // Fetch document cost and new balance
+              try {
+                const [costData, newBalance] = await Promise.all([
+                  api.get<{ ai_cost_inr: number }>(`/billing/documents/${doc.id}/cost`),
+                  billingNotification.refreshBalance(),
+                ]);
+                const cost = costData?.ai_cost_inr || 0;
+                billingNotification.showProcessingComplete(cost, newBalance || 0);
+              } catch (err) {
+                console.error("Failed to fetch document cost:", err);
+              }
+
+              onUpdate({
+                ...doc,
+                status: data.status,
+                progress: data.progress,
+                error_message: data.error_message,
+              });
+            } else if (data.status.includes("failed")) {
+              billingNotification.showError(data.error_message || "Document processing failed");
               onUpdate({
                 ...doc,
                 status: data.status,
@@ -447,7 +483,7 @@ const DocumentStatusCell = ({
 
       return () => clearInterval(intervalId);
     }
-  }, [status, doc.id, onUpdate, doc, progress]);
+  }, [status, doc.id, onUpdate, doc, progress, notifiedProcessing, billingNotification]);
 
   if (status === "completed") {
     return (
