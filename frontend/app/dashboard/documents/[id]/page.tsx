@@ -73,6 +73,9 @@ interface Document {
   progress: number | null;
   file_size_kb?: number | null;
   error_message?: string | null;
+  ai_cost_inr?: number | null;
+  token_count_input?: number | null;
+  token_count_output?: number | null;
 }
 
 interface DocumentSegment {
@@ -912,12 +915,17 @@ export default function DocumentDetailPage() {
               // Show completion or error notification
               if (newStatus === "completed") {
                 try {
-                  const [costData, newBalance] = await Promise.all([
+                  // Fetch both cost and full document data for tokens
+                  const [costData, docData, newBalance] = await Promise.all([
                     api.get<{ ai_cost_inr: number }>(`/billing/documents/${documentId}/cost`),
+                    api.get<Document>(`/documents/${documentId}`),
                     billingNotification.refreshBalance(),
                   ]);
                   const cost = costData?.ai_cost_inr || 0;
-                  billingNotification.showProcessingComplete(cost, newBalance || 0);
+                  const tokens = docData?.token_count_input && docData?.token_count_output
+                    ? { input: docData.token_count_input, output: docData.token_count_output }
+                    : undefined;
+                  billingNotification.showProcessingComplete(cost, newBalance || 0, tokens);
                 } catch (err) {
                   console.error("Failed to fetch document cost:", err);
                 }

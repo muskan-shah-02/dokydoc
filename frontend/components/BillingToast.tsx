@@ -3,13 +3,19 @@
  *
  * Shows toast notifications in the bottom-right corner on any page when:
  * - Gemini API is called (shows current balance)
- * - Processing completes (shows cost of operation)
+ * - Processing completes (shows cost, tokens, and processing time)
+ *
+ * Features:
+ * - Toast stays visible for 30 seconds
+ * - Minimized icon persists after dismissal for re-viewing
+ * - Shows token count (input + output)
+ * - Shows processing duration
  */
 
 "use client";
 
-import React, { createContext, useContext, useState, useCallback, useEffect, ReactNode } from "react";
-import { X, Wallet, Zap, CheckCircle, AlertTriangle, Loader2 } from "lucide-react";
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from "react";
+import { X, Wallet, Zap, CheckCircle, AlertTriangle, Loader2, Clock, Cpu, ChevronUp, Receipt } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 
@@ -23,16 +29,29 @@ export interface BillingToast {
   message: string;
   balance?: number;
   cost?: number;
+  tokens?: { input: number; output: number; total: number };
+  processingTime?: number; // in seconds
   duration?: number; // ms, 0 = persistent until dismissed
+}
+
+// Last completed operation info for re-viewing
+interface LastOperation {
+  cost: number;
+  balance: number;
+  tokens?: { input: number; output: number; total: number };
+  processingTime?: number;
+  timestamp: Date;
 }
 
 interface BillingNotificationContextType {
   showProcessingStarted: (balance: number) => void;
-  showProcessingComplete: (cost: number, newBalance: number) => void;
+  showProcessingComplete: (cost: number, newBalance: number, tokens?: { input: number; output: number }, processingTime?: number) => void;
   showLowBalance: (balance: number) => void;
   showError: (message: string) => void;
   dismissToast: (id: string) => void;
   refreshBalance: () => Promise<number | null>;
+  getProcessingStartTime: () => number | null;
+  setProcessingStartTime: (time: number | null) => void;
 }
 
 const BillingNotificationContext = createContext<BillingNotificationContextType | null>(null);
@@ -48,6 +67,10 @@ export function useBillingNotification() {
 // Provider component
 export function BillingNotificationProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<BillingToast[]>([]);
+  const [lastOperation, setLastOperation] = useState<LastOperation | null>(null);
+  const [showMinimizedIcon, setShowMinimizedIcon] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const processingStartTimeRef = useRef<number | null>(null);
 
   const addToast = useCallback((toast: Omit<BillingToast, "id">) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -55,8 +78,8 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
 
     setToasts(prev => [...prev, newToast]);
 
-    // Auto-dismiss after duration (default 5 seconds, 0 = no auto-dismiss)
-    const duration = toast.duration ?? 5000;
+    // Auto-dismiss after duration (default 30 seconds, 0 = no auto-dismiss)
+    const duration = toast.duration ?? 30000;
     if (duration > 0) {
       setTimeout(() => {
         setToasts(prev => prev.filter(t => t.id !== id));
@@ -79,7 +102,18 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
     }
   }, []);
 
+  const getProcessingStartTime = useCallback(() => {
+    return processingStartTimeRef.current;
+  }, []);
+
+  const setProcessingStartTime = useCallback((time: number | null) => {
+    processingStartTimeRef.current = time;
+  }, []);
+
   const showProcessingStarted = useCallback((balance: number) => {
+    // Record start time
+    processingStartTimeRef.current = Date.now();
+
     addToast({
       type: "processing",
       title: "AI Processing Started",
@@ -89,9 +123,37 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
     });
   }, [addToast]);
 
-  const showProcessingComplete = useCallback((cost: number, newBalance: number) => {
+  const showProcessingComplete = useCallback((
+    cost: number,
+    newBalance: number,
+    tokens?: { input: number; output: number },
+    processingTime?: number
+  ) => {
+    // Calculate processing time if not provided
+    let duration = processingTime;
+    if (duration === undefined && processingStartTimeRef.current) {
+      duration = Math.round((Date.now() - processingStartTimeRef.current) / 1000);
+    }
+    processingStartTimeRef.current = null;
+
     // Remove any processing toasts
     setToasts(prev => prev.filter(t => t.type !== "processing"));
+
+    const tokenData = tokens ? {
+      input: tokens.input,
+      output: tokens.output,
+      total: tokens.input + tokens.output
+    } : undefined;
+
+    // Save last operation for re-viewing
+    setLastOperation({
+      cost,
+      balance: newBalance,
+      tokens: tokenData,
+      processingTime: duration,
+      timestamp: new Date(),
+    });
+    setShowMinimizedIcon(true);
 
     addToast({
       type: "cost",
@@ -99,7 +161,9 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
       message: `This operation cost INR ${cost.toFixed(2)}`,
       cost,
       balance: newBalance,
-      duration: 8000,
+      tokens: tokenData,
+      processingTime: duration,
+      duration: 30000, // 30 seconds
     });
 
     // Show low balance warning if needed
@@ -110,7 +174,7 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
           title: "Low Balance Warning",
           message: `Your balance is running low. Top up to continue using AI features.`,
           balance: newBalance,
-          duration: 10000,
+          duration: 15000,
         });
       }, 1000);
     }
@@ -122,11 +186,14 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
       title: "Low Balance Alert",
       message: "Your prepaid balance is running low.",
       balance,
-      duration: 10000,
+      duration: 15000,
     });
   }, [addToast]);
 
   const showError = useCallback((message: string) => {
+    // Clear start time
+    processingStartTimeRef.current = null;
+
     // Remove any processing toasts
     setToasts(prev => prev.filter(t => t.type !== "processing"));
 
@@ -134,9 +201,34 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
       type: "error",
       title: "Processing Failed",
       message,
-      duration: 8000,
+      duration: 10000,
     });
   }, [addToast]);
+
+  // Re-show last operation toast
+  const handleReviewClick = useCallback(() => {
+    if (lastOperation) {
+      setIsExpanded(!isExpanded);
+    }
+  }, [lastOperation, isExpanded]);
+
+  // Format time elapsed since last operation
+  const formatTimeAgo = (date: Date) => {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    return `${Math.floor(minutes / 60)}h ago`;
+  };
+
+  // Update time ago display
+  const [, forceUpdate] = useState({});
+  useEffect(() => {
+    if (showMinimizedIcon && lastOperation) {
+      const interval = setInterval(() => forceUpdate({}), 10000);
+      return () => clearInterval(interval);
+    }
+  }, [showMinimizedIcon, lastOperation]);
 
   return (
     <BillingNotificationContext.Provider
@@ -147,17 +239,123 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
         showError,
         dismissToast,
         refreshBalance,
+        getProcessingStartTime,
+        setProcessingStartTime,
       }}
     >
       {children}
+
       {/* Toast Container - Fixed to bottom-right */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-3 max-w-sm">
         {toasts.map(toast => (
           <ToastCard key={toast.id} toast={toast} onDismiss={dismissToast} />
         ))}
+
+        {/* Minimized Re-view Icon (shows after toast dismisses) */}
+        {showMinimizedIcon && toasts.length === 0 && lastOperation && (
+          <div className="relative">
+            {/* Expanded Card */}
+            {isExpanded && (
+              <div
+                className="absolute bottom-14 right-0 w-72 rounded-lg border border-gray-200 bg-white/95 backdrop-blur-sm shadow-lg p-4 animate-in slide-in-from-bottom-2 duration-200"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="font-semibold text-sm text-gray-900">Last Operation</h4>
+                  <span className="text-xs text-gray-500">{formatTimeAgo(lastOperation.timestamp)}</span>
+                </div>
+
+                <div className="space-y-2 text-sm">
+                  {/* Cost */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600 flex items-center gap-1">
+                      <Zap className="h-4 w-4" /> Cost:
+                    </span>
+                    <span className="font-semibold text-gray-900">INR {lastOperation.cost.toFixed(2)}</span>
+                  </div>
+
+                  {/* Balance */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-600 flex items-center gap-1">
+                      <Wallet className="h-4 w-4" /> Balance:
+                    </span>
+                    <span className={`font-semibold ${lastOperation.balance < 100 ? "text-orange-600" : "text-green-600"}`}>
+                      INR {lastOperation.balance.toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Tokens */}
+                  {lastOperation.tokens && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-600 flex items-center gap-1">
+                        <Cpu className="h-4 w-4" /> Tokens:
+                      </span>
+                      <span className="font-medium text-gray-700">
+                        {lastOperation.tokens.total.toLocaleString()}
+                        <span className="text-xs text-gray-500 ml-1">
+                          ({lastOperation.tokens.input.toLocaleString()} in / {lastOperation.tokens.output.toLocaleString()} out)
+                        </span>
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Processing Time */}
+                  {lastOperation.processingTime !== undefined && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-600 flex items-center gap-1">
+                        <Clock className="h-4 w-4" /> Duration:
+                      </span>
+                      <span className="font-medium text-gray-700">
+                        {formatDuration(lastOperation.processingTime)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => setShowMinimizedIcon(false)}
+                  className="mt-3 w-full text-xs text-gray-500 hover:text-gray-700 underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Minimized Icon Button */}
+            <button
+              onClick={handleReviewClick}
+              className={`
+                flex items-center gap-2 px-3 py-2 rounded-full shadow-lg transition-all duration-200
+                ${isExpanded
+                  ? "bg-blue-600 text-white"
+                  : "bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+                }
+              `}
+              title="View last operation details"
+            >
+              <Receipt className="h-4 w-4" />
+              <span className="text-sm font-medium">INR {lastOperation.cost.toFixed(2)}</span>
+              <ChevronUp className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+            </button>
+          </div>
+        )}
       </div>
     </BillingNotificationContext.Provider>
   );
+}
+
+// Format duration in human readable format
+function formatDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${remainingMinutes}m`;
 }
 
 // Individual Toast Card
@@ -177,7 +375,7 @@ function ToastCard({
         animate-in slide-in-from-right-full duration-300
         ${config.bgColor} ${config.borderColor}
       `}
-      style={{ minWidth: "320px" }}
+      style={{ minWidth: "340px" }}
     >
       {/* Progress bar for processing */}
       {toast.type === "processing" && (
@@ -209,8 +407,51 @@ function ToastCard({
 
             <p className="mt-1 text-sm text-gray-600">{toast.message}</p>
 
-            {/* Balance/Cost Info */}
-            {(toast.balance !== undefined || toast.cost !== undefined) && (
+            {/* Detailed Info for cost type */}
+            {toast.type === "cost" && (
+              <div className="mt-3 space-y-1.5 text-sm">
+                {/* Balance */}
+                {toast.balance !== undefined && (
+                  <div className="flex items-center gap-2">
+                    <Wallet className="h-4 w-4 text-gray-400" />
+                    <span className="text-gray-600">Balance:</span>
+                    <span className={`font-semibold ${
+                      toast.balance < 100 ? "text-orange-600" : "text-green-600"
+                    }`}>
+                      INR {toast.balance.toFixed(2)}
+                    </span>
+                  </div>
+                )}
+
+                {/* Tokens */}
+                {toast.tokens && (
+                  <div className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-gray-400" />
+                    <span className="text-gray-600">Tokens:</span>
+                    <span className="font-medium text-gray-700">
+                      {toast.tokens.total.toLocaleString()}
+                      <span className="text-xs text-gray-500 ml-1">
+                        ({toast.tokens.input.toLocaleString()} in / {toast.tokens.output.toLocaleString()} out)
+                      </span>
+                    </span>
+                  </div>
+                )}
+
+                {/* Processing Time */}
+                {toast.processingTime !== undefined && (
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-gray-400" />
+                    <span className="text-gray-600">Duration:</span>
+                    <span className="font-medium text-gray-700">
+                      {formatDuration(toast.processingTime)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Balance/Cost Info for other types */}
+            {toast.type !== "cost" && (toast.balance !== undefined || toast.cost !== undefined) && (
               <div className="mt-2 flex items-center gap-4 text-sm">
                 {toast.balance !== undefined && (
                   <div className="flex items-center gap-1">
