@@ -397,7 +397,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                         end_char_index=segment_info["end_char_index"],
                         document_id=document_id,
                         analysis_run_id=analysis_run_id
-                    ))
+                    ), tenant_id=tenant_id)
                 
                 self.logger.info(f"Created {len(valid_segments)} document segments")
                 return True
@@ -505,7 +505,7 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                             document_id=document_id,
                             structured_data=structured_data,
                             status=AnalysisResultStatus.SUCCESS
-                        ))
+                        ), tenant_id=tenant_id)
                         segment.status = SegmentStatus.COMPLETED
                     else:
                         segment.status = SegmentStatus.FAILED
