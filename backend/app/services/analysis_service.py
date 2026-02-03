@@ -245,7 +245,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
                 segments_created = await self._pass_2_content_segmentation(
-                    db, document_id, document.raw_text, composition_analysis, analysis_run_id
+                    db, document_id, document.raw_text, composition_analysis, document.tenant_id, analysis_run_id
                 )
                 
                 # --- CHECK 3: Before Pass 3 ---
@@ -253,7 +253,7 @@ class DocumentAnalysisEngine(LoggerMixin):
 
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
-                await self._pass_3_structured_extraction(db, document_id, analysis_run_id)
+                await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
                 
                 # --- CHECK 4: Before Learning Mode ---
                 if self._check_stop_signal(db, document_id, document.tenant_id): return False
@@ -348,16 +348,16 @@ class DocumentAnalysisEngine(LoggerMixin):
             raise AIAnalysisException("Composition classification failed", model="gemini", details={"error": str(e)})
     
     async def _pass_2_content_segmentation(
-        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, analysis_run_id: int = None
+        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, tenant_id: int, analysis_run_id: int = None
     ) -> bool:
         """Pass 2: Creates document segments."""
         try:
             # Clean up existing segments
             self.logger.info(f"Cleaning up existing segments for document {document_id}")
-            existing_segments = crud.document_segment.get_multi_by_document(db=db, document_id=document_id)
+            existing_segments = crud.document_segment.get_multi_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             for segment in existing_segments:
-                crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id)
-            crud.document_segment.delete_by_document(db=db, document_id=document_id)
+                crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id, tenant_id=tenant_id)
+            crud.document_segment.delete_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             
             prompt = prompt_manager.get_prompt(PromptType.CONTENT_SEGMENTATION)
             full_prompt = f"{prompt}\n\nCOMPOSITION ANALYSIS:\n{json.dumps(composition_analysis, indent=2)}\n\nDOCUMENT TEXT:\n{raw_text}"
@@ -409,11 +409,11 @@ class DocumentAnalysisEngine(LoggerMixin):
             self.logger.error(f"Error in Pass 2: {e}")
             raise DocumentProcessingException("Content segmentation failed", document_id=document_id, details={"error": str(e)})
     
-    async def _pass_3_structured_extraction(self, db: Session, document_id: int, analysis_run_id: int = None) -> bool:
+    async def _pass_3_structured_extraction(self, db: Session, document_id: int, tenant_id: int, analysis_run_id: int = None) -> bool:
         """Pass 3: Performs structured extraction on each document segment."""
         try:
             run_service = AnalysisRunService() if analysis_run_id else None
-            segments = crud.document_segment.get_by_document(db=db, document_id=document_id)
+            segments = crud.document_segment.get_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             
             if not segments:
                 self.logger.warning(f"No segments found for document {document_id}")
