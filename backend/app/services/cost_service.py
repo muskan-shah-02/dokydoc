@@ -15,10 +15,19 @@ class CostService:
     """
     Service for calculating AI API costs based on token usage.
 
-    Pricing (Gemini 2.5 Flash - as of Jan 2025):
-    - Input: $0.00001875 per 1K tokens
-    - Output: $0.000075 per 1K tokens
-    - USD to INR: ~84.0 (fetched from API in production)
+    Pricing (Gemini 1.5 Flash - CORRECTED Feb 2025):
+    IMPORTANT: These must match Google's official pricing!
+    https://ai.google.dev/pricing
+
+    Under 128K context window:
+    - Input:  $0.075 per 1M tokens  = $0.000075 per 1K tokens
+    - Output: $0.30 per 1M tokens   = $0.0003 per 1K tokens
+
+    Over 128K context window:
+    - Input:  $0.15 per 1M tokens
+    - Output: $0.60 per 1M tokens
+
+    USD to INR: ~84.0 (auto-updated from API)
     """
 
     def __init__(self):
@@ -31,14 +40,15 @@ class CostService:
             logger.error(f"❌ Failed to initialize tokenizer: {e}")
             self.encoder = None
 
-        # Gemini 2.5 Flash pricing (USD per 1000 tokens)
-        self.cost_per_1k_input_usd = Decimal("0.00001875")
-        self.cost_per_1k_output_usd = Decimal("0.000075")
+        # CORRECTED: Gemini 1.5 Flash pricing (USD per 1000 tokens)
+        # Under 128K context - this is what we use for document analysis
+        self.cost_per_1k_input_usd = Decimal("0.000075")   # $0.075 per 1M tokens
+        self.cost_per_1k_output_usd = Decimal("0.0003")    # $0.30 per 1M tokens
 
-        # CONFIG-01 FIX: Exchange rate (USD to INR) with automatic updates
+        # Exchange rate (USD to INR) with automatic updates
         self.usd_to_inr = Decimal("84.0")  # Fallback if API fetch fails
 
-        # CONFIG-01 FIX: Try to fetch latest exchange rate on initialization
+        # Try to fetch latest exchange rate on initialization
         if not self.update_exchange_rate():
             logger.warning(
                 f"⚠️ Using fallback exchange rate: $1 = ₹{self.usd_to_inr}. "
@@ -97,9 +107,47 @@ class CostService:
         # Convert to INR
         cost_inr = float(total_cost_usd * self.usd_to_inr)
 
-        logger.debug(
-            f"Cost calculation: {input_tokens} input + {output_tokens} output tokens "
-            f"= ${total_cost_usd:.6f} = ₹{cost_inr:.4f}"
+        logger.info(
+            f"💰 Cost calculation: {input_tokens:,} input + {output_tokens:,} output = {input_tokens + output_tokens:,} total tokens | "
+            f"${float(total_cost_usd):.6f} USD = ₹{cost_inr:.4f} INR"
+        )
+
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": float(total_cost_usd),
+            "cost_inr": cost_inr
+        }
+
+    def calculate_cost_from_actual_tokens(
+        self,
+        input_tokens: int,
+        output_tokens: int
+    ) -> Dict[str, any]:
+        """
+        Calculate cost using actual token counts from Gemini API response.
+
+        Use this when you have actual token counts from response.usage_metadata
+        instead of estimating with tiktoken.
+
+        Args:
+            input_tokens: Actual prompt_token_count from Gemini
+            output_tokens: Actual candidates_token_count from Gemini
+
+        Returns:
+            Dict with cost breakdown
+        """
+        # Calculate cost in USD using actual tokens
+        input_cost_usd = (Decimal(input_tokens) / 1000) * self.cost_per_1k_input_usd
+        output_cost_usd = (Decimal(output_tokens) / 1000) * self.cost_per_1k_output_usd
+        total_cost_usd = input_cost_usd + output_cost_usd
+
+        # Convert to INR
+        cost_inr = float(total_cost_usd * self.usd_to_inr)
+
+        logger.info(
+            f"💰 ACTUAL TOKEN COST: {input_tokens:,} input + {output_tokens:,} output = {input_tokens + output_tokens:,} total | "
+            f"${float(total_cost_usd):.6f} USD = ₹{cost_inr:.4f} INR"
         )
 
         return {
