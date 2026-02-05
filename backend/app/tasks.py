@@ -9,8 +9,8 @@ from app.services.analysis_service import DocumentAnalysisEngine
 from app.services.lock_service import lock_service
 from app.core.logging import logger
 
-@celery_app.task(name="process_document_pipeline")
-def process_document_pipeline(document_id: int, storage_path: str, tenant_id: int = None):
+@celery_app.task(name="process_document_pipeline", bind=True)
+def process_document_pipeline(self, document_id: int, storage_path: str, tenant_id: int):
     """
     Celery task to orchestrate the full document pipeline.
     This runs in a separate worker process.
@@ -18,13 +18,22 @@ def process_document_pipeline(document_id: int, storage_path: str, tenant_id: in
     FLAW-10 FIX: Uses distributed locks to prevent race conditions
     when multiple workers try to process the same document.
 
-    SPRINT 2 Phase 4: tenant_id added for billing enforcement.
+    SPRINT 2 Phase 4: tenant_id is REQUIRED for multi-tenancy isolation.
+    SA REVIEW: Made tenant_id required (was optional), task is bound for context.
 
     Args:
         document_id: ID of document to process
         storage_path: File path to document
-        tenant_id: Tenant ID for billing (optional for backwards compat)
+        tenant_id: REQUIRED - Tenant ID for billing and data isolation
+
+    Raises:
+        ValueError: If tenant_id is not provided
     """
+    # SA REVIEW: Fail-fast validation - tenant_id MUST be provided
+    if tenant_id is None:
+        logger.error(f"CRITICAL: process_document_pipeline called without tenant_id for document {document_id}")
+        raise ValueError("tenant_id is REQUIRED for document processing. This is a security requirement.")
+
     logger.info(f"CELERY_TASK started for document_id: {document_id}, tenant_id: {tenant_id}")
 
     # FLAW-10 FIX: Acquire distributed lock to prevent concurrent processing

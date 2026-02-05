@@ -7,7 +7,37 @@ from app.schemas.user import UserCreate, UserUpdate, Role
 
 class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
     def get_user_by_email(self, db: Session, *, email: str) -> User | None:
+        """
+        Get user by email (global lookup - used for login).
+
+        Note: This is intentionally NOT tenant-scoped because:
+        1. Email is globally unique across all tenants
+        2. Login must work before tenant context is established
+        3. After fetching, deps.py validates tenant_id matches JWT
+        """
         return db.query(User).filter(User.email == email).first()
+
+    def get_user_by_email_and_tenant(self, db: Session, *, email: str, tenant_id: int) -> User | None:
+        """
+        Get user by email with tenant isolation (defense-in-depth).
+
+        SA REVIEW: Added for strict tenant isolation when tenant context is known.
+        Use this when you have tenant_id available and want strict filtering.
+
+        Args:
+            db: Database session
+            email: User's email
+            tenant_id: Tenant ID for isolation
+
+        Returns:
+            User if found in tenant, None otherwise
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for tenant-scoped user lookup")
+        return db.query(User).filter(
+            User.email == email,
+            User.tenant_id == tenant_id
+        ).first()
 
     def get_by_email(self, db: Session, *, email: str) -> User | None:
         """Alias for get_user_by_email for compatibility."""
