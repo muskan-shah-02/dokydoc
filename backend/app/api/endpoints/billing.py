@@ -277,3 +277,67 @@ def get_billing_usage(
     )
 
     return usage
+
+
+@router.get("/pricing")
+def get_pricing_info():
+    """
+    Get complete pricing information for transparency.
+
+    SPRINT 2: Returns all pricing factors, formulas, and current rates
+    for display on billing dashboards.
+
+    No authentication required - pricing is public information.
+
+    Returns:
+        {
+            "model": "gemini-2.5-flash",
+            "rates_usd": {
+                "input_per_1m_tokens": 0.30,
+                "output_per_1m_tokens": 2.50,
+                ...
+            },
+            "rates_inr": {...},
+            "exchange_rate": {...},
+            "formula": {...},
+            "cost_factors": [...]
+        }
+    """
+    from app.services.cost_service import cost_service
+
+    pricing_info = cost_service.get_pricing_info()
+
+    logger.info(
+        f"Pricing info requested: model={pricing_info['model']}, "
+        f"input=${pricing_info['rates_usd']['input_per_1m_tokens']}/1M, "
+        f"output=${pricing_info['rates_usd']['output_per_1m_tokens']}/1M"
+    )
+
+    return pricing_info
+
+
+@router.get("/estimate")
+def estimate_document_cost(
+    doc_size_kb: float = 10.0,
+    passes: int = 3,
+    current_user: User = Depends(deps.get_current_user)
+):
+    """
+    Estimate cost for processing a document.
+
+    Args:
+        doc_size_kb: Document size in KB (default: 10)
+        passes: Number of analysis passes (default: 3)
+
+    Returns:
+        Cost estimate with detailed breakdown
+    """
+    from app.services.cost_service import cost_service
+
+    estimate = cost_service.estimate_document_cost(doc_size_kb, passes)
+
+    logger.info(
+        f"Cost estimate requested: {doc_size_kb}KB doc, {passes} passes = ₹{estimate['cost_inr']:.2f}"
+    )
+
+    return estimate
