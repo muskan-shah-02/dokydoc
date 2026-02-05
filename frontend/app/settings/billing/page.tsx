@@ -26,6 +26,10 @@ import {
   X,
   AlertTriangle,
   Zap,
+  Cpu,
+  Calculator,
+  Info,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,10 +41,12 @@ export default function BillingSettingsPage() {
   const { tenant, isCXO, isAdmin } = useAuth();
 
   const [billingData, setBillingData] = useState<any>(null);
+  const [pricingData, setPricingData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showAddBalanceModal, setShowAddBalanceModal] = useState(false);
   const [showUpgradePlanModal, setShowUpgradePlanModal] = useState(false);
   const [showSwitchTypeModal, setShowSwitchTypeModal] = useState(false);
+  const [showPricingDetails, setShowPricingDetails] = useState(false);
 
   // Redirect if not CXO or Admin
   useEffect(() => {
@@ -56,8 +62,12 @@ export default function BillingSettingsPage() {
   const loadBillingData = async () => {
     setIsLoading(true);
     try {
-      const data = await api.get("/billing/usage");
-      setBillingData(data);
+      const [billingResponse, pricingResponse] = await Promise.all([
+        api.get("/billing/usage"),
+        api.get("/billing/pricing"),
+      ]);
+      setBillingData(billingResponse);
+      setPricingData(pricingResponse);
     } catch (error) {
       console.error("Failed to load billing data:", error);
     } finally {
@@ -304,6 +314,159 @@ export default function BillingSettingsPage() {
                 </div>
               )}
             </div>
+
+            {/* Pricing Transparency Section */}
+            {pricingData && (
+              <div className="rounded-lg border bg-white shadow-sm overflow-hidden">
+                <button
+                  onClick={() => setShowPricingDetails(!showPricingDetails)}
+                  className="w-full p-6 flex items-center justify-between text-left hover:bg-gray-50 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-lg bg-purple-100 p-2">
+                      <Calculator className="h-5 w-5 text-purple-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-gray-900">Pricing Transparency</h3>
+                      <p className="text-sm text-gray-600">
+                        Model: {pricingData.model} • Input: ${pricingData.rates_usd?.input_per_1m_tokens}/1M • Output: ${pricingData.rates_usd?.output_per_1m_tokens}/1M
+                      </p>
+                    </div>
+                  </div>
+                  <div className={`transform transition-transform ${showPricingDetails ? "rotate-180" : ""}`}>
+                    <svg className="h-5 w-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </div>
+                </button>
+
+                {showPricingDetails && (
+                  <div className="p-6 pt-0 space-y-6 border-t bg-gray-50/50">
+                    {/* Pricing Table */}
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                        <Cpu className="h-4 w-4" />
+                        AI Token Pricing ({pricingData.model})
+                      </h4>
+                      <div className="overflow-hidden rounded-lg border bg-white">
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-100">
+                            <tr>
+                              <th className="px-4 py-3 text-left font-semibold text-gray-700">Factor</th>
+                              <th className="px-4 py-3 text-right font-semibold text-gray-700">USD Rate</th>
+                              <th className="px-4 py-3 text-right font-semibold text-gray-700">INR Rate</th>
+                              <th className="px-4 py-3 text-left font-semibold text-gray-700">Description</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y">
+                            <tr>
+                              <td className="px-4 py-3 font-medium text-gray-900">Input Tokens</td>
+                              <td className="px-4 py-3 text-right text-gray-700">${pricingData.rates_usd?.input_per_1m_tokens} / 1M</td>
+                              <td className="px-4 py-3 text-right text-gray-700">₹{pricingData.rates_inr?.input_per_1m_tokens?.toFixed(2)} / 1M</td>
+                              <td className="px-4 py-3 text-gray-600">Prompts, documents, context</td>
+                            </tr>
+                            <tr className="bg-yellow-50">
+                              <td className="px-4 py-3 font-medium text-gray-900 flex items-center gap-2">
+                                Output Tokens
+                                <span className="px-1.5 py-0.5 text-xs font-medium bg-yellow-200 text-yellow-800 rounded">8.3x</span>
+                              </td>
+                              <td className="px-4 py-3 text-right font-semibold text-yellow-700">${pricingData.rates_usd?.output_per_1m_tokens} / 1M</td>
+                              <td className="px-4 py-3 text-right font-semibold text-yellow-700">₹{pricingData.rates_inr?.output_per_1m_tokens?.toFixed(2)} / 1M</td>
+                              <td className="px-4 py-3 text-yellow-700">AI responses, JSON results ⚠️</td>
+                            </tr>
+                            <tr>
+                              <td className="px-4 py-3 font-medium text-gray-900">Cached Tokens</td>
+                              <td className="px-4 py-3 text-right text-green-600">${pricingData.rates_usd?.cached_per_1m_tokens} / 1M</td>
+                              <td className="px-4 py-3 text-right text-green-600">₹{pricingData.rates_inr?.cached_per_1m_tokens?.toFixed(2)} / 1M</td>
+                              <td className="px-4 py-3 text-gray-600">90% discount if cached</td>
+                            </tr>
+                            <tr>
+                              <td className="px-4 py-3 font-medium text-gray-900">Search Queries</td>
+                              <td className="px-4 py-3 text-right text-gray-700">${pricingData.rates_usd?.search_per_1k_queries} / 1K</td>
+                              <td className="px-4 py-3 text-right text-gray-700">₹{pricingData.rates_inr?.search_per_1k_queries?.toFixed(2)} / 1K</td>
+                              <td className="px-4 py-3 text-gray-600">Grounding (not currently used)</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Formula */}
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                        <Info className="h-4 w-4" />
+                        Cost Calculation Formula
+                      </h4>
+                      <div className="rounded-lg bg-slate-900 p-4 font-mono text-sm text-slate-300 overflow-x-auto">
+                        <div className="text-slate-500 mb-2">// Step 1: Calculate USD cost</div>
+                        <div className="text-green-400">cost_usd = (input_tokens / 1,000,000 × ${pricingData.rates_usd?.input_per_1m_tokens})</div>
+                        <div className="text-yellow-400 ml-10">+ (output_tokens / 1,000,000 × ${pricingData.rates_usd?.output_per_1m_tokens})</div>
+                        <div className="text-slate-500 mt-3 mb-2">// Step 2: Convert to INR</div>
+                        <div className="text-blue-400">cost_inr = cost_usd × {pricingData.exchange_rate?.usd_to_inr}</div>
+                      </div>
+                    </div>
+
+                    {/* Example Calculation */}
+                    {pricingData.formula?.example && (
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-900 mb-3">Example Calculation</h4>
+                        <div className="rounded-lg border bg-white p-4">
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                            <div>
+                              <p className="text-gray-500">Input Tokens</p>
+                              <p className="font-semibold text-gray-900">{pricingData.formula.example.input_tokens.toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500">Output Tokens</p>
+                              <p className="font-semibold text-gray-900">{pricingData.formula.example.output_tokens.toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500">Total (USD)</p>
+                              <p className="font-semibold text-gray-900">${pricingData.formula.example.total_usd?.toFixed(6)}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-500">Total (INR)</p>
+                              <p className="font-semibold text-green-600">₹{pricingData.formula.example.total_inr?.toFixed(4)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Exchange Rate & Source */}
+                    <div className="flex items-center justify-between text-sm text-gray-500 pt-2 border-t">
+                      <div className="flex items-center gap-4">
+                        <span>Exchange Rate: $1 = ₹{pricingData.exchange_rate?.usd_to_inr}</span>
+                        <span>•</span>
+                        <span>Last Updated: {pricingData.last_updated}</span>
+                      </div>
+                      <a
+                        href="https://ai.google.dev/pricing"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-blue-600 hover:text-blue-700"
+                      >
+                        Google AI Pricing <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+
+                    {/* Warning Note */}
+                    <div className="rounded-lg bg-yellow-50 border border-yellow-200 p-4">
+                      <div className="flex gap-3">
+                        <AlertTriangle className="h-5 w-5 text-yellow-600 flex-shrink-0" />
+                        <div className="text-sm">
+                          <p className="font-medium text-yellow-800">Output tokens are 8.3x more expensive than input tokens!</p>
+                          <p className="mt-1 text-yellow-700">
+                            AI-generated responses (JSON analysis results, summaries) cost significantly more than the document text you send.
+                            This is the primary cost driver for document analysis.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Plan Details */}
             <div className="rounded-lg border bg-white p-6 shadow-sm">
