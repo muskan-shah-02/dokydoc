@@ -41,7 +41,7 @@ class CRUDUsageLog:
             cost_usd=obj_in.cost_usd,
             cost_inr=obj_in.cost_inr,
             processing_time_seconds=obj_in.processing_time_seconds,
-            metadata=obj_in.metadata,
+            extra_data=obj_in.extra_data,
             created_at=datetime.now(),
         )
         db.add(db_obj)
@@ -65,7 +65,7 @@ class CRUDUsageLog:
         model_used: str = "gemini-2.5-flash",
         cached_tokens: int = 0,
         processing_time_seconds: Optional[float] = None,
-        metadata: Optional[dict] = None,
+        extra_data: Optional[dict] = None,
     ) -> UsageLog:
         """
         Convenience method to log AI usage.
@@ -84,7 +84,7 @@ class CRUDUsageLog:
             cost_usd=cost_usd,
             cost_inr=cost_inr,
             processing_time_seconds=processing_time_seconds,
-            metadata=metadata,
+            extra_data=extra_data,
         )
         return self.create(db, obj_in=obj_in)
 

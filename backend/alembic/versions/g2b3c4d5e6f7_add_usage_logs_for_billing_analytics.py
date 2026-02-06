@@ -59,8 +59,8 @@ def upgrade() -> None:
         # Processing time in seconds
         sa.Column('processing_time_seconds', sa.Numeric(10, 2), nullable=True),
 
-        # Additional metadata (JSON)
-        sa.Column('metadata', sa.JSON(), nullable=True),
+        # Additional data (JSON) - named 'extra_data' since 'metadata' is reserved by SQLAlchemy
+        sa.Column('extra_data', sa.JSON(), nullable=True),
 
         # Timestamp (indexed for time-based queries)
         sa.Column('created_at', sa.DateTime(), nullable=False, index=True, server_default=sa.func.now()),

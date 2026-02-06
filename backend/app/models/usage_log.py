@@ -101,8 +101,9 @@ class UsageLog(Base):
     # Processing time in seconds
     processing_time_seconds: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
 
-    # Additional metadata (JSON for flexibility)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Additional context data (JSON for flexibility)
+    # Note: Can't use 'metadata' as it's reserved by SQLAlchemy
+    extra_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Timestamp
     created_at: Mapped[datetime] = mapped_column(

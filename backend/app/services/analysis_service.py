@@ -172,7 +172,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 cost_usd=cost_usd,
                 cost_inr=cost_inr,
                 processing_time_seconds=processing_time,
-                metadata={"document_id": document_id},
+                extra_data={"document_id": document_id},
             )
             self.logger.debug(f"📊 Logged usage: {operation}, ₹{cost_inr:.4f}")
         except Exception as e:

@@ -64,7 +64,7 @@ class UsageLogCreate(BaseModel):
     cost_usd: float = Field(default=0.0, ge=0)
     cost_inr: float = Field(default=0.0, ge=0)
     processing_time_seconds: Optional[float] = None
-    metadata: Optional[dict] = None
+    extra_data: Optional[dict] = None
 
 
 # --- Response Schema ---
@@ -84,7 +84,7 @@ class UsageLogResponse(BaseModel):
     cost_usd: float
     cost_inr: float
     processing_time_seconds: Optional[float] = None
-    metadata: Optional[dict] = None
+    extra_data: Optional[dict] = None
     created_at: datetime
 
     class Config:
