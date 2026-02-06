@@ -36,7 +36,7 @@ class Document(DocumentBase):
     storage_path: str
     created_at: datetime
     updated_at: datetime
-    
+
     # Add the new fields so they are included in API responses
     content: Optional[str] = None
     status: Optional[str] = None
@@ -44,6 +44,11 @@ class Document(DocumentBase):
     raw_text: Optional[str] = None
     composition_analysis: Optional[dict] = None
     progress: Optional[int] = None
+
+    # Billing/cost fields for transparency
+    ai_cost_inr: Optional[float] = None
+    token_count_input: Optional[int] = None
+    token_count_output: Optional[int] = None
 
     # Pydantic v2 uses `from_attributes`
     class Config:

@@ -35,6 +35,7 @@ import {
   Trash2,
   Wallet,
   RefreshCw,
+  IndianRupee,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import Link from "next/link";
@@ -51,6 +52,7 @@ interface Document {
   progress: number;
   error_message?: string | null;
   link_count?: number;
+  ai_cost_inr?: number | null;
 }
 
 interface CodeComponent {
@@ -773,6 +775,7 @@ export default function DocumentsPage() {
                 <TableHead>Type</TableHead>
                 <TableHead>Version</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Analysis Cost</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -811,6 +814,18 @@ export default function DocumentsPage() {
                         onUpdate={handleDocumentUpdate}
                       />
                     </TableCell>
+                    <TableCell>
+                      {doc.status === "completed" && doc.ai_cost_inr != null ? (
+                        <span className="flex items-center gap-1 text-green-700 font-medium">
+                          <IndianRupee className="h-3 w-3" />
+                          {doc.ai_cost_inr.toFixed(2)}
+                        </span>
+                      ) : doc.status === "completed" ? (
+                        <span className="text-gray-400 text-sm">-</span>
+                      ) : (
+                        <span className="text-gray-400 text-sm">-</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end items-center gap-2">
                         <ManageLinksDialog
@@ -840,7 +855,7 @@ export default function DocumentsPage() {
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={5}
+                    colSpan={6}
                     className="text-center h-24 text-muted-foreground"
                   >
                     No documents found. Upload your first document to get

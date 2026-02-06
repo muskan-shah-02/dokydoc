@@ -251,8 +251,8 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
           <ToastCard key={toast.id} toast={toast} onDismiss={dismissToast} />
         ))}
 
-        {/* Minimized Re-view Icon (shows after toast dismisses) */}
-        {showMinimizedIcon && toasts.length === 0 && lastOperation && (
+        {/* Minimized Re-view Icon (always shows after any processing completes) */}
+        {showMinimizedIcon && lastOperation && (
           <div className="relative">
             {/* Expanded Card */}
             {isExpanded && (
@@ -320,20 +320,21 @@ export function BillingNotificationProvider({ children }: { children: ReactNode 
               </div>
             )}
 
-            {/* Minimized Icon Button */}
+            {/* Minimized Icon Button - Prominent and always visible */}
             <button
               onClick={handleReviewClick}
               className={`
-                flex items-center gap-2 px-3 py-2 rounded-full shadow-lg transition-all duration-200
+                flex items-center gap-2 px-4 py-2.5 rounded-full shadow-xl transition-all duration-200
+                animate-in slide-in-from-right-2 duration-300
                 ${isExpanded
-                  ? "bg-blue-600 text-white"
-                  : "bg-white border border-gray-200 text-gray-700 hover:bg-gray-50"
+                  ? "bg-blue-600 text-white ring-2 ring-blue-300"
+                  : "bg-gradient-to-r from-green-500 to-emerald-600 text-white hover:from-green-600 hover:to-emerald-700 ring-2 ring-green-300/50"
                 }
               `}
-              title="View last operation details"
+              title="Click to view last billing details"
             >
-              <Receipt className="h-4 w-4" />
-              <span className="text-sm font-medium">INR {lastOperation.cost.toFixed(2)}</span>
+              <Receipt className="h-5 w-5" />
+              <span className="text-sm font-semibold">₹{lastOperation.cost.toFixed(2)}</span>
               <ChevronUp className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
             </button>
           </div>
