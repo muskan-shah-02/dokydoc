@@ -30,6 +30,7 @@ import {
   Calculator,
   Info,
   ExternalLink,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -134,12 +135,20 @@ export default function BillingSettingsPage() {
               Monitor billing, usage metrics, and manage your subscription
             </p>
           </div>
-          {isPrepaid && (
-            <Button onClick={() => setShowAddBalanceModal(true)}>
-              <DollarSign className="mr-2 h-4 w-4" />
-              Add Balance
-            </Button>
-          )}
+          <div className="flex items-center gap-3">
+            <Link href="/settings/billing/analytics">
+              <Button variant="outline">
+                <BarChart3 className="mr-2 h-4 w-4" />
+                View Analytics
+              </Button>
+            </Link>
+            {isPrepaid && (
+              <Button onClick={() => setShowAddBalanceModal(true)}>
+                <DollarSign className="mr-2 h-4 w-4" />
+                Add Balance
+              </Button>
+            )}
+          </div>
         </div>
 
         {isLoading ? (

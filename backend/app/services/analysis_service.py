@@ -13,6 +13,8 @@ from app.services.billing_enforcement_service import billing_enforcement_service
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
+from app.models.usage_log import FeatureType, OperationType  # ✅ SPRINT 2: Usage logging
+from app.schemas.usage_log import UsageLogCreate  # ✅ SPRINT 2: Usage logging
 
 # Configuration: Context window for segment analysis (characters)
 # Provides surrounding text to AI for better understanding
@@ -139,6 +141,44 @@ class DocumentAnalysisEngine(LoggerMixin):
         if document_id in self._api_call_counter:
             self._api_call_counter[document_id] += 1
 
+    def _log_usage(
+        self,
+        db: Session,
+        tenant_id: int,
+        document_id: int,
+        operation: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        cost_inr: float,
+        processing_time: Optional[float] = None,
+        user_id: Optional[int] = None,
+    ):
+        """
+        Log AI usage to usage_logs table for billing analytics.
+        SPRINT 2: Enables feature-based cost breakdown and transparency.
+        """
+        try:
+            crud.usage_log.log_usage(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                document_id=document_id,
+                feature_type=FeatureType.DOCUMENT_ANALYSIS.value,
+                operation=operation,
+                model_used="gemini-2.5-flash",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                cost_inr=cost_inr,
+                processing_time_seconds=processing_time,
+                metadata={"document_id": document_id},
+            )
+            self.logger.debug(f"📊 Logged usage: {operation}, ₹{cost_inr:.4f}")
+        except Exception as e:
+            # Don't fail the analysis if logging fails
+            self.logger.warning(f"Failed to log usage for {operation}: {e}")
+
     # --- NEW: Helper to check for stop signal ---
     def _check_stop_signal(self, db: Session, document_id: int, tenant_id: int) -> bool:
         """Checks if the user has requested to stop the analysis."""
@@ -233,27 +273,78 @@ class DocumentAnalysisEngine(LoggerMixin):
 
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
+                start_time = time.time()
                 composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
-                
+                pass_1_duration = time.time() - start_time
+
                 # Save composition analysis to document
                 document.composition_analysis = composition_analysis
                 db.commit()
+
+                # ✅ SPRINT 2: Log Pass 1 usage for analytics
+                pass_1_data = self._cost_tracker.get(document_id, {}).get('pass_1_composition', {})
+                if pass_1_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_1_COMPOSITION.value,
+                        input_tokens=pass_1_data.get('input_tokens', 0),
+                        output_tokens=pass_1_data.get('output_tokens', 0),
+                        cost_usd=pass_1_data.get('cost_inr', 0) / 84,  # Approximate conversion
+                        cost_inr=pass_1_data.get('cost_inr', 0),
+                        processing_time=pass_1_duration,
+                    )
                 
                 # --- CHECK 2: Before Pass 2 ---
                 if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
+                start_time = time.time()
                 segments_created = await self._pass_2_content_segmentation(
                     db, document_id, document.raw_text, composition_analysis, document.tenant_id, analysis_run_id
                 )
+                pass_2_duration = time.time() - start_time
+
+                # ✅ SPRINT 2: Log Pass 2 usage for analytics
+                pass_2_data = self._cost_tracker.get(document_id, {}).get('pass_2_segmentation', {})
+                if pass_2_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_2_SEGMENTING.value,
+                        input_tokens=pass_2_data.get('input_tokens', 0),
+                        output_tokens=pass_2_data.get('output_tokens', 0),
+                        cost_usd=pass_2_data.get('cost_inr', 0) / 84,
+                        cost_inr=pass_2_data.get('cost_inr', 0),
+                        processing_time=pass_2_duration,
+                    )
                 
                 # --- CHECK 3: Before Pass 3 ---
                 if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
+                start_time = time.time()
                 await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
+                pass_3_duration = time.time() - start_time
+
+                # ✅ SPRINT 2: Log Pass 3 usage for analytics
+                pass_3_data = self._cost_tracker.get(document_id, {}).get('pass_3_extraction', {})
+                if pass_3_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_3_EXTRACTION.value,
+                        input_tokens=pass_3_data.get('input_tokens', 0),
+                        output_tokens=pass_3_data.get('output_tokens', 0),
+                        cost_usd=pass_3_data.get('cost_inr', 0) / 84,
+                        cost_inr=pass_3_data.get('cost_inr', 0),
+                        processing_time=pass_3_duration,
+                    )
                 
                 # --- CHECK 4: Before Learning Mode ---
                 if self._check_stop_signal(db, document_id, document.tenant_id): return False
@@ -329,10 +420,13 @@ class DocumentAnalysisEngine(LoggerMixin):
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
 
             cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            actual_input = input_tokens or cost_data['input_tokens']
+            actual_output = output_tokens or cost_data['output_tokens']
+
             self._cost_tracker[document_id]['pass_1_composition'] = {
                 'cost_inr': cost_data['cost_inr'],
-                'input_tokens': input_tokens or cost_data['input_tokens'],  # Use real count if available
-                'output_tokens': output_tokens or cost_data['output_tokens']
+                'input_tokens': actual_input,
+                'output_tokens': actual_output
             }
 
             cleaned_response = repair_json_response(response.text)
