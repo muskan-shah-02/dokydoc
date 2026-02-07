@@ -14,3 +14,6 @@ from .crud_ontology_concept import ontology_concept
 from .crud_ontology_relationship import ontology_relationship
 from .crud_initiative import initiative
 from .crud_initiative_asset import initiative_asset
+
+# SPRINT 3: Code Analysis Engine
+from .crud_repository import repository

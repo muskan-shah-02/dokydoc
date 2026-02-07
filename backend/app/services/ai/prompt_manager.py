@@ -18,6 +18,8 @@ class PromptType(Enum):
     ENTITY_EXTRACTION = "entity_extraction"
     RELATIONSHIP_INFERENCE = "relationship_inference"
     SYNONYM_DETECTION = "synonym_detection"
+    # SPRINT 3: Code Analysis Engine
+    REPO_FILE_ANALYSIS = "repo_file_analysis"
 
 class PromptManager(LoggerMixin):
     """
@@ -461,9 +463,90 @@ CONCEPT NAMES TO ANALYZE:
                     },
                     "required": ["synonym_pairs"]
                 }
+            },
+
+            # ============================================================
+            # SPRINT 3: Code Analysis Engine — Enhanced Repo File Prompt
+            # ============================================================
+
+            PromptType.REPO_FILE_ANALYSIS.value: {
+                "version": "1.0",
+                "description": "Enhanced analysis for files within a repository context — extracts inter-file dependencies and domain signals",
+                "prompt": """
+You are an expert software architect performing deep analysis of a source file within a larger repository.
+
+CONTEXT:
+- Repository: {repo_name}
+- File path: {file_path}
+- Language hint: {language}
+
+TASK:
+Analyze this file with emphasis on:
+1. **Purpose & Role**: What does this file do within the repository?
+2. **Public API**: Functions, classes, endpoints, or exports that other files depend on
+3. **Internal Dependencies**: Which other files/modules does this file import from the SAME repo?
+4. **External Dependencies**: Third-party libraries or frameworks used
+5. **Domain Concepts**: Business terms, domain entities, or domain-specific patterns
+6. **Quality Signals**: Error handling, test coverage hints, security patterns
+
+STRICT RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "summary": "2-3 sentences describing the file's purpose and role in the system",
+    "structured_analysis": {{
+        "language_info": {{
+            "primary_language": "Detected language",
+            "framework": "Framework if any",
+            "file_type": "Service|Controller|Model|Component|Utility|Config|Test|Migration"
+        }},
+        "public_api": [
+            {{
+                "name": "Exported function/class/const name",
+                "type": "Function|Class|Constant|Type|Endpoint",
+                "signature": "Simplified signature or description",
+                "purpose": "One sentence"
+            }}
+        ],
+        "internal_imports": [
+            "Relative imports from the same repository (e.g., ../utils/helpers)"
+        ],
+        "external_imports": [
+            "Third-party packages (e.g., fastapi, react, lodash)"
+        ],
+        "domain_concepts": [
+            {{
+                "term": "Business term found in the code",
+                "context": "How it's used (variable name, class name, comment, etc.)"
+            }}
+        ],
+        "components": [
+            {{
+                "name": "Element name",
+                "type": "Function|Class|Method|Component|Route|Hook",
+                "purpose": "What it does",
+                "details": "Parameters, return type, key logic"
+            }}
+        ],
+        "patterns_and_architecture": {{
+            "design_patterns": ["Patterns observed"],
+            "architectural_style": "Overall style",
+            "key_concepts": ["Programming concepts used"]
+        }},
+        "quality_assessment": "Brief quality assessment"
+    }}
+}}
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "structured_analysis": {"type": "object"}
+                    },
+                    "required": ["summary", "structured_analysis"]
+                }
             }
         }
-    
+
     def get_prompt(self, prompt_type: PromptType, **kwargs) -> str:
         """
         Get a prompt of the specified type.

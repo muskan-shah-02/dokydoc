@@ -15,7 +15,8 @@ from app.db.session import init_database, close_database_connections, check_data
 from app.api.endpoints import (
     login, dashboard, documents, code_components,
     document_code_links, analysis_results, validation, billing, tenants, users, tasks,  # SPRINT 2 Phase 10
-    ontology, initiatives  # SPRINT 3: Business Ontology Engine + Governance
+    ontology, initiatives,  # SPRINT 3: Business Ontology Engine + Governance
+    repositories  # SPRINT 3: Code Analysis Engine
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -339,6 +340,13 @@ app.include_router(
     initiatives.router,
     prefix=f"/api/{settings.API_VERSION}/initiatives",
     tags=["Initiatives"]
+)
+
+# SPRINT 3: Code Analysis Engine — Repository Management
+app.include_router(
+    repositories.router,
+    prefix=f"/api/{settings.API_VERSION}/repositories",
+    tags=["Repositories"]
 )
 
 # --- Startup Event (Legacy support) ---

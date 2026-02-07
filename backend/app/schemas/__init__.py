@@ -21,3 +21,6 @@ from .initiative import (
     InitiativeCreate, InitiativeUpdate, InitiativeResponse, InitiativeWithAssets,
     InitiativeAssetCreate, InitiativeAssetUpdate, InitiativeAssetResponse
 )
+
+# SPRINT 3: Code Analysis Engine
+from .repository import RepositoryCreate, RepositoryUpdate, RepositoryResponse, RepositoryWithProgress

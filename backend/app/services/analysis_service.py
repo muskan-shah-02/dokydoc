@@ -222,17 +222,21 @@ class DocumentAnalysisEngine(LoggerMixin):
 
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
+                # CAE-04 FIX: Update progress before each pass for smooth UI feedback
+                crud.document.update(db=db, db_obj=document, obj_in={"progress": 30, "status": "pass_1_composition"})
                 composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
-                
+
                 # Save composition analysis to document
                 document.composition_analysis = composition_analysis
                 db.commit()
-                
+
                 # --- CHECK 2: Before Pass 2 ---
                 if self._check_stop_signal(db, document_id): return False
 
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
+                # CAE-04 FIX: Update progress between passes
+                crud.document.update(db=db, db_obj=document, obj_in={"progress": 45, "status": "pass_2_segmentation"})
                 segments_created = await self._pass_2_content_segmentation(
                     db, document_id, document.raw_text, composition_analysis, analysis_run_id
                 )
@@ -242,6 +246,8 @@ class DocumentAnalysisEngine(LoggerMixin):
 
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
+                # CAE-04 FIX: Update progress before Pass 3
+                crud.document.update(db=db, db_obj=document, obj_in={"progress": 55, "status": "pass_3_extraction"})
                 await self._pass_3_structured_extraction(db, document_id, analysis_run_id)
                 
                 # --- CHECK 4: Before Learning Mode ---
@@ -376,7 +382,14 @@ class DocumentAnalysisEngine(LoggerMixin):
                 
                 valid_segments = []
                 for segment_info in segments:
-                    if composition.get(segment_info["segment_type"], 0) > 0:
+                    seg_type = segment_info.get("segment_type", "UNKNOWN")
+                    seg_confidence = segment_info.get("confidence", "LOW")
+                    # CAE-03 FIX: Accept segments even when composition % is 0
+                    # Multi-column documents often have subsections the composition
+                    # pass underestimates. Trust the segmentation AI if confidence is HIGH/MEDIUM.
+                    has_composition = composition.get(seg_type, 0) > 0
+                    high_confidence = seg_confidence in ("HIGH", "MEDIUM")
+                    if has_composition or high_confidence:
                         valid_segments.append(segment_info)
                 
                 for segment_info in valid_segments:
