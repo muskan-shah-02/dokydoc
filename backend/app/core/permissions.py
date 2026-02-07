@@ -64,6 +64,13 @@ class Permission(str, Enum):
     DASHBOARD_CXO = "dashboard:cxo"
     DASHBOARD_ADMIN = "dashboard:admin"
     DASHBOARD_PM = "dashboard:pm"
+    DASHBOARD_AUDITOR = "dashboard:auditor"
+
+    # Audit & Compliance Permissions
+    AUDIT_VIEW = "audit:view"  # View audit trails
+    AUDIT_EXPORT = "audit:export"  # Export audit reports
+    COMPLIANCE_VIEW = "compliance:view"  # View compliance status
+    COMPLIANCE_REPORT = "compliance:report"  # Generate compliance reports
 
 
 # Role-to-Permissions Mapping
@@ -103,6 +110,12 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.DASHBOARD_DEVELOPER,
         Permission.DASHBOARD_BA,
         Permission.DASHBOARD_PM,
+        Permission.DASHBOARD_AUDITOR,
+        # Audit & Compliance - Full access
+        Permission.AUDIT_VIEW,
+        Permission.AUDIT_EXPORT,
+        Permission.COMPLIANCE_VIEW,
+        Permission.COMPLIANCE_REPORT,
     },
 
     Role.ADMIN: {
@@ -180,6 +193,30 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
         Permission.DASHBOARD_PM,
+    },
+
+    Role.AUDITOR: {
+        # Auditor - Read-only access focused on compliance and audit trails
+        # Document access - READ ONLY for audit purposes
+        Permission.DOCUMENT_READ,
+        Permission.ANALYSIS_VIEW,
+        Permission.VALIDATION_VIEW,
+        # Code access - READ ONLY
+        Permission.CODE_READ,
+        # Task access - READ ONLY
+        Permission.TASK_READ,
+        # Billing view (for cost audits)
+        Permission.BILLING_VIEW,
+        # User/Tenant view (for access audits)
+        Permission.USER_VIEW,
+        Permission.TENANT_VIEW,
+        # Full Audit & Compliance permissions
+        Permission.AUDIT_VIEW,
+        Permission.AUDIT_EXPORT,
+        Permission.COMPLIANCE_VIEW,
+        Permission.COMPLIANCE_REPORT,
+        # Auditor dashboard
+        Permission.DASHBOARD_AUDITOR,
     },
 }
 

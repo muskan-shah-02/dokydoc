@@ -10,6 +10,7 @@ class Role(str, Enum):
     BA = "BA"  # Business Analyst - Documents, Analysis
     DEVELOPER = "Developer"  # Technical execution - Code, Tasks, Validation
     PRODUCT_MANAGER = "Product Manager"  # Product features - limited access
+    AUDITOR = "Auditor"  # Compliance & audit - Read-only, compliance focus
 
 # --- Base Schema ---
 # Shared properties that are common to other schemas

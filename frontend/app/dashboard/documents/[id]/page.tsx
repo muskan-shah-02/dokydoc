@@ -59,6 +59,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useBillingNotification } from "@/components/BillingToast";
 import { api } from "@/lib/api";
 import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
+import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
 
 // --- 1. Types ---
 
@@ -1037,25 +1038,25 @@ export default function DocumentDetailPage() {
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
 
-      <Tabs defaultValue="smart" className="space-y-6">
+      <Tabs defaultValue="insights" className="space-y-6">
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
           <TabsTrigger
-            value="smart"
+            value="insights"
             className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6"
           >
-            <Sparkles className="w-4 h-4 mr-2" /> Smart Analysis
+            <Sparkles className="w-4 h-4 mr-2" /> Insights
           </TabsTrigger>
           <TabsTrigger
-            value="executive"
+            value="smart"
             className="data-[state=active]:bg-gray-100 h-10 px-6"
           >
-            <LayoutDashboard className="w-4 h-4 mr-2" /> Legacy View
+            <BrainCircuit className="w-4 h-4 mr-2" /> Detailed View
           </TabsTrigger>
           <TabsTrigger
             value="technical"
             className="data-[state=active]:bg-gray-100 h-10 px-6"
           >
-            <Database className="w-4 h-4 mr-2" /> Technical Details
+            <Database className="w-4 h-4 mr-2" /> Technical
           </TabsTrigger>
           <TabsTrigger
             value="raw"
@@ -1065,18 +1066,14 @@ export default function DocumentDetailPage() {
           </TabsTrigger>
         </TabsList>
 
-        {/* New Smart Analysis View - Beautiful, User-Friendly */}
-        <TabsContent value="smart">
-          <SmartAnalysisView segments={segments} document={doc} />
+        {/* Dynamic Analysis View - Adapts to Document Type & User Role */}
+        <TabsContent value="insights">
+          <DynamicAnalysisView segments={segments} document={doc} />
         </TabsContent>
 
-        {/* Legacy Executive View */}
-        <TabsContent value="executive">
-          <VitalSignsBar
-            segments={segments}
-            composition={doc.composition_analysis}
-          />
-          <ExecutiveReport segments={segments} />
+        {/* Smart Analysis View - Detailed Structured View */}
+        <TabsContent value="smart">
+          <SmartAnalysisView segments={segments} document={doc} />
         </TabsContent>
 
         <TabsContent value="technical">
