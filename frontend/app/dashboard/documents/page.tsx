@@ -69,6 +69,7 @@ const formatStatus = (status: string) => {
     case "pass_1_composition":
       return "Classifying...";
     case "pass_2_segmenting":
+    case "pass_2_segmentation":
       return "Segmenting...";
     case "pass_3_extraction":
       return "Extracting Data...";
@@ -87,6 +88,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
   const [uploadStep, setUploadStep] = useState<
     "idle" | "uploading" | "triggering" | "done"
   >("idle");
+  const [uploadProgress, setUploadProgress] = useState(0); // BUG-02 FIX
   const [error, setError] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -104,30 +106,48 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
 
     const token = localStorage.getItem("accessToken");
     setError(null);
+    setUploadProgress(0);
 
     try {
-      // --- Step 1: Upload ---
+      // --- Step 1: Upload with progress tracking (BUG-02 FIX) ---
       setUploadStep("uploading");
       const formData = new FormData();
       formData.append("file", selectedFile);
       formData.append("version", version);
       formData.append("document_type", documentType);
 
-      const uploadRes = await fetch(
-        "http://localhost:8000/api/v1/documents/upload",
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData,
-        }
-      );
+      const docData = await new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "http://localhost:8000/api/v1/documents/upload");
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
-      if (!uploadRes.ok) {
-        const errData = await uploadRes.json();
-        throw new Error(errData.detail || "Upload failed");
-      }
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const pct = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress(pct);
+          }
+        };
 
-      const docData = await uploadRes.json();
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch {
+              reject(new Error("Invalid response from server"));
+            }
+          } else {
+            try {
+              const errData = JSON.parse(xhr.responseText);
+              reject(new Error(errData.detail || "Upload failed"));
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`));
+            }
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(formData);
+      });
 
       // --- Step 2: Trigger Analysis ---
       setUploadStep("triggering");
@@ -153,10 +173,12 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
         setUploadStep("idle");
         setSelectedFile(null);
         setVersion("");
+        setUploadProgress(0);
       }, 1000);
     } catch (err) {
       setError((err as Error).message);
       setUploadStep("idle");
+      setUploadProgress(0);
     }
   };
 
@@ -210,6 +232,16 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
             </select>
           </div>
           {error && <p className="text-red-500 text-sm">{error}</p>}
+          {/* BUG-02 FIX: Show upload progress bar */}
+          {uploadStep === "uploading" && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>Uploading file...</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <Progress value={uploadProgress} className="h-2" />
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button
@@ -219,7 +251,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
             {uploadStep === "idle" && "Upload & Analyze"}
             {uploadStep === "uploading" && (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Uploading...
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Uploading {uploadProgress}%
               </>
             )}
             {uploadStep === "triggering" && (
@@ -400,6 +432,7 @@ const DocumentStatusCell = ({
       "analyzing",
       "pass_1_composition",
       "pass_2_segmenting",
+      "pass_2_segmentation",
       "pass_3_extraction",
     ];
 

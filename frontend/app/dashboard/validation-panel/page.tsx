@@ -221,11 +221,34 @@ export default function ValidationPanelPage() {
         throw new Error(errData.detail || "Failed to start validation scan.");
       }
 
-      // Switch to results tab and refresh data after scan
+      // BUG-01 FIX: Poll for fresh mismatches instead of single 3s timeout.
+      // Scans may take 10-30s depending on document count and AI latency.
       setActiveTab("results");
-      setTimeout(() => {
-        fetchData().finally(() => setIsScanning(false));
-      }, 3000);
+      const pollForResults = async () => {
+        const maxAttempts = 15;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const mismatchRes = await fetch(
+              "http://localhost:8000/api/v1/validation/mismatches",
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (mismatchRes.ok) {
+              const freshMismatches: Mismatch[] = await mismatchRes.json();
+              setMismatches(freshMismatches);
+              // Stop once results change or we've waited long enough
+              if (freshMismatches.length !== mismatches.length || attempt >= 2) {
+                break;
+              }
+            }
+          } catch {
+            // Silently retry on network errors
+          }
+        }
+        await fetchData();
+        setIsScanning(false);
+      };
+      pollForResults();
     } catch (err: any) {
       setError(err.message);
       setIsScanning(false);

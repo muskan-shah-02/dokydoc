@@ -56,6 +56,7 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DocumentAnalysisView } from "@/components/analysis/DocumentAnalysisView";
 
 // --- 1. Types ---
 
@@ -1013,28 +1014,12 @@ export default function DocumentDetailPage() {
         </TabsContent>
 
         <TabsContent value="technical">
-          <Card className="border-gray-200 shadow-sm">
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                <List className="w-5 h-5 mr-2" /> Segment Analysis Breakdown
-              </CardTitle>
-              <CardDescription>
-                Detailed view of all {segments.length} identified document
-                segments.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {segments.length > 0 ? (
-                segments.map((item, idx) => (
-                  <SegmentCard key={idx} index={idx} item={item} />
-                ))
-              ) : (
-                <div className="text-center py-12 text-gray-400 border-2 border-dashed rounded-xl">
-                  No segments found. Run analysis to populate this list.
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          {/* SPRINT 3: Rich DocumentAnalysisView replaces raw JSON cards */}
+          <DocumentAnalysisView
+            segments={segments}
+            documentType={doc.document_type}
+            filename={doc.filename}
+          />
         </TabsContent>
 
         <TabsContent value="raw">
