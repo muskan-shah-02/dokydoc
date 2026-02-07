@@ -14,7 +14,8 @@ from app.core.exceptions import DokyDocException, handle_dokydoc_exception, crea
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
     login, dashboard, documents, code_components,
-    document_code_links, analysis_results, validation, billing, tenants, users, tasks  # SPRINT 2 Phase 10
+    document_code_links, analysis_results, validation, billing, tenants, users, tasks,  # SPRINT 2 Phase 10
+    ontology, initiatives  # SPRINT 3: Business Ontology Engine + Governance
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -324,6 +325,20 @@ app.include_router(
     tasks.router,
     prefix=f"/api/{settings.API_VERSION}/tasks",
     tags=["Tasks"]
+)
+
+# SPRINT 3: Business Ontology Engine
+app.include_router(
+    ontology.router,
+    prefix=f"/api/{settings.API_VERSION}/ontology",
+    tags=["Ontology"]
+)
+
+# SPRINT 3: Initiative Governance
+app.include_router(
+    initiatives.router,
+    prefix=f"/api/{settings.API_VERSION}/initiatives",
+    tags=["Initiatives"]
 )
 
 # --- Startup Event (Legacy support) ---

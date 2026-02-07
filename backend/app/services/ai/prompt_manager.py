@@ -14,6 +14,10 @@ class PromptType(Enum):
     IMAGE_ANALYSIS = "image_analysis"
     VALIDATION = "validation"
     BUSINESS_ONTOLOGY = "business_ontology"
+    # SPRINT 3: Business Ontology Engine
+    ENTITY_EXTRACTION = "entity_extraction"
+    RELATIONSHIP_INFERENCE = "relationship_inference"
+    SYNONYM_DETECTION = "synonym_detection"
 
 class PromptManager(LoggerMixin):
     """
@@ -307,15 +311,156 @@ class PromptManager(LoggerMixin):
                 "description": "Analyzes images from technical documents",
                 "prompt": """
                 Analyze this image from a technical document. Provide a clear, concise description that would be useful for understanding the document's content.
-                
+
                 Focus on:
                 - What the image shows (diagrams, charts, screenshots, etc.)
                 - Key information or data presented
                 - How it relates to technical documentation
-                
+
                 Return a brief, professional description suitable for inclusion in document text.
                 """,
                 "expected_schema": {"type": "string"}
+            },
+
+            # ============================================================
+            # SPRINT 3: Business Ontology Engine Prompts
+            # ============================================================
+
+            PromptType.ENTITY_EXTRACTION.value: {
+                "version": "1.0",
+                "description": "Extracts named entities from document analysis results to populate the business ontology",
+                "prompt": """
+You are an expert business analyst extracting domain entities from structured document analysis data.
+
+TASK:
+From the structured analysis data below, extract all meaningful business entities that should be tracked in a knowledge graph. These entities represent the key concepts, actors, systems, and rules that define this business domain.
+
+ENTITY TYPES TO EXTRACT:
+- ACTOR: People, roles, or personas (e.g., "Admin User", "Payment Gateway")
+- SYSTEM: Software systems, services, or platforms (e.g., "Order Management System", "Redis Cache")
+- FEATURE: Product features or capabilities (e.g., "User Authentication", "Report Generation")
+- TECHNOLOGY: Programming languages, frameworks, tools (e.g., "React", "PostgreSQL", "Docker")
+- PROCESS: Business processes or workflows (e.g., "Order Fulfillment", "User Onboarding")
+- RULE: Business rules or constraints (e.g., "Max 3 login attempts", "Orders over $500 need approval")
+- DATA_ENTITY: Data objects or models (e.g., "Customer Record", "Invoice", "Product Catalog")
+- REQUIREMENT: Specific requirements (e.g., "Response time < 200ms", "GDPR Compliance")
+
+EXTRACTION RULES:
+1. Extract specific, named entities — not generic terms
+2. Normalize names: use Title Case, be consistent
+3. Assign a confidence score (0.0-1.0) based on how clearly the entity appears
+4. Include brief context showing WHERE in the analysis you found this entity
+5. Deduplicate: if the same concept appears multiple times, list it once with the highest confidence
+
+RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "entities": [
+        {{
+            "name": "Entity Name",
+            "type": "ACTOR|SYSTEM|FEATURE|TECHNOLOGY|PROCESS|RULE|DATA_ENTITY|REQUIREMENT",
+            "context": "Brief quote or description of where this entity was found",
+            "confidence": 0.85
+        }}
+    ],
+    "relationships": [
+        {{
+            "source": "Entity Name A",
+            "target": "Entity Name B",
+            "relationship_type": "implements|depends_on|is_part_of|validates|uses|produces|consumes",
+            "confidence": 0.75
+        }}
+    ]
+}}
+
+STRUCTURED ANALYSIS DATA TO PROCESS:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "context": {"type": "string"},
+                                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                },
+                                "required": ["name", "type", "context", "confidence"]
+                            }
+                        },
+                        "relationships": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": {"type": "string"},
+                                    "target": {"type": "string"},
+                                    "relationship_type": {"type": "string"},
+                                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                },
+                                "required": ["source", "target", "relationship_type", "confidence"]
+                            }
+                        }
+                    },
+                    "required": ["entities", "relationships"]
+                }
+            },
+
+            PromptType.SYNONYM_DETECTION.value: {
+                "version": "1.0",
+                "description": "Detects synonym pairs from a list of ontology concept names",
+                "prompt": """
+You are a domain terminology expert. Given a list of concept names from a business knowledge graph, identify pairs that are synonyms or near-synonyms within a software/business context.
+
+RULES:
+1. Only flag genuine synonyms — terms that mean the SAME thing in a software/business context
+2. Do NOT flag terms that are merely related (e.g., "Database" and "Cache" are related but NOT synonyms)
+3. Consider abbreviations as synonyms (e.g., "API" and "Application Programming Interface")
+4. Consider naming variations as synonyms (e.g., "User Auth" and "User Authentication")
+5. Assign a confidence score (0.0-1.0) for each pair
+6. For each pair, recommend which term should be the canonical (preferred) name
+
+RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "synonym_pairs": [
+        {{
+            "term_a": "First term",
+            "term_b": "Second term",
+            "canonical": "The preferred term to keep",
+            "confidence": 0.9,
+            "reasoning": "Brief explanation of why these are synonyms"
+        }}
+    ]
+}}
+
+If no synonyms are found, return: {{"synonym_pairs": []}}
+
+CONCEPT NAMES TO ANALYZE:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "synonym_pairs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "term_a": {"type": "string"},
+                                    "term_b": {"type": "string"},
+                                    "canonical": {"type": "string"},
+                                    "confidence": {"type": "number"},
+                                    "reasoning": {"type": "string"}
+                                },
+                                "required": ["term_a", "term_b", "canonical", "confidence"]
+                            }
+                        }
+                    },
+                    "required": ["synonym_pairs"]
+                }
             }
         }
     

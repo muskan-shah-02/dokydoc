@@ -96,7 +96,7 @@ def read_document_segments(
     Get all segments for a specific document.
 
     SPRINT 2: Segments are scoped to tenant.
-    Note: This still has the N+1 query from bug BE-02 (will fix in Sprint 3).
+    SPRINT 3 FIX (FLAW-11-B): N+1 query eliminated — uses eager-loaded relationships.
     """
     document_endpoints.logger.info(f"Fetching segments for document {document_id}, tenant {tenant_id}")
 
@@ -113,17 +113,15 @@ def read_document_segments(
         limit=50
     )
 
-    segments_with_analysis = []
-    for segment in segments:
-        # SPRINT 2: Get analysis results with tenant filtering
-        analysis_result = crud.analysis_result.get_by_segment(
-            db=db,
-            segment_id=segment.id,
-            tenant_id=tenant_id  # SPRINT 2: Mandatory tenant filtering
+    # SPRINT 3 FIX (FLAW-11-B): Use eager-loaded analysis_results from joinedload
+    # instead of N+1 queries per segment. The relationship is already loaded by
+    # crud.document_segment.get_multi_by_document() which uses joinedload.
+    segments_with_analysis = [
+        segment for segment in segments
+        if segment.analysis_results and any(
+            ar.structured_data for ar in segment.analysis_results
         )
-        if analysis_result and analysis_result.structured_data:
-            segments_with_analysis.append(segment)
-
+    ]
     segments_with_analysis.sort(key=lambda x: x.id)
 
     document_endpoints.logger.info(
@@ -160,21 +158,21 @@ def get_document_analysis(
         limit=50
     )
 
+    # SPRINT 3 FIX (FLAW-11-B): Use eager-loaded analysis_results instead of N+1 queries
     segments_with_analysis = []
     analysis_stats = {"analyzed": 0, "failed": 0, "total": len(segments)}
 
     for segment in segments:
-        # SPRINT 2: Get analysis results with tenant filtering
-        analysis_result = crud.analysis_result.get_by_segment(
-            db=db,
-            segment_id=segment.id,
-            tenant_id=tenant_id  # SPRINT 2: Mandatory tenant filtering
-        )
+        # Use the already-loaded relationship (joinedload in CRUD)
+        successful_results = [
+            ar for ar in (segment.analysis_results or [])
+            if ar.structured_data
+        ]
 
-        if analysis_result and analysis_result.structured_data:
+        if successful_results:
             segments_with_analysis.append({
                 "segment": schemas.DocumentSegment.model_validate(segment).model_dump(),
-                "analysis_result": schemas.AnalysisResult.model_validate(analysis_result).model_dump(),
+                "analysis_result": schemas.AnalysisResult.model_validate(successful_results[0]).model_dump(),
                 "status": "analyzed"
             })
             analysis_stats["analyzed"] += 1

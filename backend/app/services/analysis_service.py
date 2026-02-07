@@ -526,14 +526,22 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
             raise DocumentProcessingException("Structured extraction failed", document_id=document_id, details={"error": str(e)})
     
     async def _feed_to_business_ontology(self, db: Session, document_id: int) -> bool:
-        """Feeds extracted entities to the Business Ontology Engine."""
-        try:
-            self.logger.info(f"Feeding document {document_id} to Business Ontology Engine")
-            # Placeholder for BOE integration
-            return True
-        except Exception as e:
-            self.logger.error(f"Error feeding to Business Ontology Engine: {e}")
-            return False
+        """
+        SPRINT 3: Business Ontology Engine integration.
+
+        Entity extraction now runs as a separate, non-blocking Celery task
+        (extract_ontology_entities) that fires AFTER the document is marked
+        "completed" in the pipeline. See app/tasks/ontology_tasks.py and
+        app/tasks.py where the task is enqueued.
+
+        This method is kept as a no-op for backwards compatibility with
+        the learning_mode flag in analyze_document().
+        """
+        self.logger.info(
+            f"Document {document_id}: BOE enrichment delegated to async Celery task. "
+            f"Skipping in-pipeline execution."
+        )
+        return True
 
 # Create a global instance
 dae = DocumentAnalysisEngine()

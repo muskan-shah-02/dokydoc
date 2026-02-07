@@ -136,6 +136,17 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100, "error_message": None})
             logger.info(f"Multi-pass analysis completed successfully for document_id: {document_id}")
 
+            # SPRINT 3: Fire-and-forget ontology enrichment (non-blocking)
+            # Document is already "completed" — user sees results immediately
+            # Entity extraction runs in a separate Celery task
+            if tenant_id:
+                try:
+                    from app.tasks.ontology_tasks import extract_ontology_entities
+                    extract_ontology_entities.delay(document_id, tenant_id)
+                    logger.info(f"🧠 Ontology extraction task enqueued for document {document_id}")
+                except Exception as ontology_err:
+                    logger.warning(f"Failed to enqueue ontology task (non-critical): {ontology_err}")
+
             # SPRINT 2 Phase 4: Deduct cost from tenant after successful analysis
             if tenant_id:
                 try:

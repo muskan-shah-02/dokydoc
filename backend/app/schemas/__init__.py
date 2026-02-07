@@ -9,3 +9,15 @@ from .analysis_result import AnalysisResult, AnalysisResultCreate
 from .mismatch import Mismatch, MismatchCreate, MismatchUpdate
 from .document_segment import DocumentSegment, DocumentSegmentCreate, DocumentSegmentUpdate
 from . import billing
+
+# SPRINT 3: Business Ontology Engine
+from .ontology import (
+    OntologyConceptCreate, OntologyConceptUpdate, OntologyConceptResponse,
+    OntologyConceptWithRelationships,
+    OntologyRelationshipCreate, OntologyRelationshipUpdate, OntologyRelationshipResponse,
+    OntologyGraphResponse
+)
+from .initiative import (
+    InitiativeCreate, InitiativeUpdate, InitiativeResponse, InitiativeWithAssets,
+    InitiativeAssetCreate, InitiativeAssetUpdate, InitiativeAssetResponse
+)

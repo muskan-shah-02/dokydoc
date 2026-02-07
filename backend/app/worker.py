@@ -8,7 +8,7 @@ celery_app = Celery(
     "dokydoc_worker",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,  # Changed from CELERY_RESULT_BACKEND_URL
-    include=["app.tasks"]  # Point to our tasks file
+    include=["app.tasks", "app.tasks.ontology_tasks"]  # Document pipeline + Sprint 3 ontology tasks
 )
 
 # Configure Celery from our settings object
