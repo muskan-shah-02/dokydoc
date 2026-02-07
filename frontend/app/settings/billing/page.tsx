@@ -31,6 +31,7 @@ import {
   Info,
   ExternalLink,
   BarChart3,
+  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -136,6 +137,12 @@ export default function BillingSettingsPage() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <Link href="/settings/billing/users">
+              <Button variant="outline">
+                <Users className="mr-2 h-4 w-4" />
+                Team Usage
+              </Button>
+            </Link>
             <Link href="/settings/billing/analytics">
               <Button variant="outline">
                 <BarChart3 className="mr-2 h-4 w-4" />

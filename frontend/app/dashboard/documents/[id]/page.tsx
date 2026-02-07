@@ -58,6 +58,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useBillingNotification } from "@/components/BillingToast";
 import { api } from "@/lib/api";
+import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
 
 // --- 1. Types ---
 
@@ -1036,13 +1037,19 @@ export default function DocumentDetailPage() {
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
 
-      <Tabs defaultValue="executive" className="space-y-6">
+      <Tabs defaultValue="smart" className="space-y-6">
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
           <TabsTrigger
-            value="executive"
+            value="smart"
             className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6"
           >
-            <LayoutDashboard className="w-4 h-4 mr-2" /> Executive Summary
+            <Sparkles className="w-4 h-4 mr-2" /> Smart Analysis
+          </TabsTrigger>
+          <TabsTrigger
+            value="executive"
+            className="data-[state=active]:bg-gray-100 h-10 px-6"
+          >
+            <LayoutDashboard className="w-4 h-4 mr-2" /> Legacy View
           </TabsTrigger>
           <TabsTrigger
             value="technical"
@@ -1058,6 +1065,12 @@ export default function DocumentDetailPage() {
           </TabsTrigger>
         </TabsList>
 
+        {/* New Smart Analysis View - Beautiful, User-Friendly */}
+        <TabsContent value="smart">
+          <SmartAnalysisView segments={segments} document={doc} />
+        </TabsContent>
+
+        {/* Legacy Executive View */}
         <TabsContent value="executive">
           <VitalSignsBar
             segments={segments}

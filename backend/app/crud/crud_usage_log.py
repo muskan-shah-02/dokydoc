@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from app.models.usage_log import UsageLog, FeatureType, OperationType
 from app.models.document import Document
+from app.models.user import User
 from app.schemas.usage_log import (
     UsageLogCreate,
     FeatureUsageSummary,
@@ -474,6 +475,248 @@ class CRUDUsageLog:
 
         summaries.reverse()  # Back to newest first
         return summaries
+
+    # =========================================================================
+    # USER-LEVEL ANALYTICS (For Admin/CXO Dashboard)
+    # =========================================================================
+
+    def get_all_users_summary(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get usage summary for ALL users in a tenant.
+        For Admin/CXO dashboard to see billing breakdown by user.
+        """
+        # Get total cost for percentage calculation
+        total_result = db.query(
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total")
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).first()
+
+        total_cost = float(total_result.total or 0)
+
+        # Get breakdown by user
+        results = db.query(
+            UsageLog.user_id,
+            User.email,
+            User.full_name,
+            func.count(UsageLog.id).label("total_calls"),
+            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total_cost_inr"),
+            func.max(UsageLog.created_at).label("last_activity"),
+        ).outerjoin(
+            User, UsageLog.user_id == User.id
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).group_by(
+            UsageLog.user_id, User.email, User.full_name
+        ).order_by(desc("total_cost_inr")).all()
+
+        summaries = []
+        for r in results:
+            cost_inr = float(r.total_cost_inr or 0)
+            summaries.append({
+                "user_id": r.user_id,
+                "user_email": r.email or f"User #{r.user_id}" if r.user_id else "System/Unknown",
+                "user_name": r.full_name or "Unknown",
+                "total_calls": r.total_calls or 0,
+                "total_input_tokens": int(r.total_input_tokens or 0),
+                "total_output_tokens": int(r.total_output_tokens or 0),
+                "total_tokens": int(r.total_input_tokens or 0) + int(r.total_output_tokens or 0),
+                "total_cost_usd": float(r.total_cost_usd or 0),
+                "total_cost_inr": cost_inr,
+                "percentage_of_total": (cost_inr / total_cost * 100) if total_cost > 0 else 0,
+                "last_activity": r.last_activity,
+            })
+
+        return summaries
+
+    def get_user_summary(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> Dict[str, Any]:
+        """Get detailed usage summary for a specific user."""
+        result = db.query(
+            func.count(UsageLog.id).label("total_calls"),
+            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.sum(UsageLog.cached_tokens), 0).label("total_cached_tokens"),
+            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total_cost_inr"),
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.user_id == user_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).first()
+
+        # Get user info
+        user = db.query(User).filter(User.id == user_id).first()
+
+        return {
+            "user_id": user_id,
+            "user_email": user.email if user else f"User #{user_id}",
+            "user_name": user.full_name if user else "Unknown",
+            "total_calls": result.total_calls or 0,
+            "total_input_tokens": int(result.total_input_tokens or 0),
+            "total_output_tokens": int(result.total_output_tokens or 0),
+            "total_cached_tokens": int(result.total_cached_tokens or 0),
+            "total_tokens": int(result.total_input_tokens or 0) + int(result.total_output_tokens or 0),
+            "total_cost_usd": float(result.total_cost_usd or 0),
+            "total_cost_inr": float(result.total_cost_inr or 0),
+        }
+
+    def get_user_by_feature(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> List[FeatureUsageSummary]:
+        """Get feature breakdown for a specific user."""
+        # Get total for this user for percentage
+        total_result = db.query(
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total")
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.user_id == user_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).first()
+
+        total_cost = float(total_result.total or 0)
+
+        results = db.query(
+            UsageLog.feature_type,
+            func.count(UsageLog.id).label("total_calls"),
+            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total_cost_inr"),
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.user_id == user_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).group_by(UsageLog.feature_type).all()
+
+        summaries = []
+        for r in results:
+            total_tokens = int(r.total_input_tokens or 0) + int(r.total_output_tokens or 0)
+            cost_inr = float(r.total_cost_inr or 0)
+            calls = r.total_calls or 1
+
+            summaries.append(FeatureUsageSummary(
+                feature_type=r.feature_type,
+                total_calls=r.total_calls or 0,
+                total_input_tokens=int(r.total_input_tokens or 0),
+                total_output_tokens=int(r.total_output_tokens or 0),
+                total_tokens=total_tokens,
+                total_cost_usd=float(r.total_cost_usd or 0),
+                total_cost_inr=cost_inr,
+                avg_cost_per_call_inr=cost_inr / calls if calls > 0 else 0,
+                percentage_of_total=(cost_inr / total_cost * 100) if total_cost > 0 else 0,
+            ))
+
+        return sorted(summaries, key=lambda x: x.total_cost_inr, reverse=True)
+
+    def get_user_daily_usage(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> List[TimeSeriesDataPoint]:
+        """Get daily usage for a specific user."""
+        results = db.query(
+            func.date(UsageLog.created_at).label("date"),
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total_cost_inr"),
+            func.coalesce(func.sum(UsageLog.input_tokens + UsageLog.output_tokens), 0).label("total_tokens"),
+            func.count(UsageLog.id).label("call_count"),
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.user_id == user_id,
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).group_by(func.date(UsageLog.created_at)).order_by("date").all()
+
+        return [
+            TimeSeriesDataPoint(
+                date=r.date,
+                total_cost_inr=float(r.total_cost_inr or 0),
+                total_tokens=int(r.total_tokens or 0),
+                call_count=r.call_count or 0,
+            )
+            for r in results
+        ]
+
+    def get_user_documents(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+        limit: int = 10,
+    ) -> List[DocumentUsageSummary]:
+        """Get top documents by cost for a specific user."""
+        results = db.query(
+            UsageLog.document_id,
+            Document.filename,
+            UsageLog.feature_type,
+            func.count(UsageLog.id).label("total_calls"),
+            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total_cost_inr"),
+            func.max(UsageLog.created_at).label("last_used"),
+        ).join(
+            Document, UsageLog.document_id == Document.id
+        ).filter(
+            UsageLog.tenant_id == tenant_id,
+            UsageLog.user_id == user_id,
+            UsageLog.document_id.isnot(None),
+            UsageLog.created_at >= start,
+            UsageLog.created_at <= end,
+        ).group_by(
+            UsageLog.document_id, Document.filename, UsageLog.feature_type
+        ).order_by(desc("total_cost_inr")).limit(limit).all()
+
+        return [
+            DocumentUsageSummary(
+                document_id=r.document_id,
+                filename=r.filename or f"Document {r.document_id}",
+                feature_type=r.feature_type,
+                total_calls=r.total_calls or 0,
+                total_input_tokens=int(r.total_input_tokens or 0),
+                total_output_tokens=int(r.total_output_tokens or 0),
+                total_tokens=int(r.total_input_tokens or 0) + int(r.total_output_tokens or 0),
+                total_cost_inr=float(r.total_cost_inr or 0),
+                last_used=r.last_used,
+            )
+            for r in results
+        ]
 
 
 # Singleton instance

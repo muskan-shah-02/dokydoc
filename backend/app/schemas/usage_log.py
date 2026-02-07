@@ -207,3 +207,46 @@ class MonthlyUsageSummary(BaseModel):
     total_tokens: int
     call_count: int
     by_feature: List[FeatureUsageSummary]
+
+
+# --- User-Level Analytics (For Admin/CXO Dashboard) ---
+class UserUsageSummary(BaseModel):
+    """Usage summary for a specific user - for Admin/CXO billing view."""
+    user_id: Optional[int] = None
+    user_email: str
+    user_name: str
+    total_calls: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_tokens: int
+    total_cost_usd: float
+    total_cost_inr: float
+    percentage_of_total: float = Field(..., description="Percentage of total tenant cost")
+    last_activity: Optional[datetime] = None
+
+
+class UserBillingAnalyticsResponse(BaseModel):
+    """Detailed billing analytics for a specific user."""
+    user_id: int
+    user_email: str
+    user_name: str
+    time_range: str
+    start_date: datetime
+    end_date: datetime
+    total_cost_inr: float
+    total_cost_usd: float
+    total_api_calls: int
+    total_tokens: int
+    by_feature: List[FeatureUsageSummary]
+    daily_usage: List[TimeSeriesDataPoint]
+    top_documents: List[DocumentUsageSummary]
+
+
+class AllUsersAnalyticsResponse(BaseModel):
+    """Analytics response showing all users' billing breakdown."""
+    time_range: str
+    start_date: datetime
+    end_date: datetime
+    total_tenant_cost_inr: float
+    total_tenant_calls: int
+    users: List[UserUsageSummary]

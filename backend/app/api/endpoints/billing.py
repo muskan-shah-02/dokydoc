@@ -24,6 +24,9 @@ from app.schemas.usage_log import (
     TokenSummary,
     WeeklyUsageSummary,
     UsageLogResponse,
+    UserUsageSummary,
+    UserBillingAnalyticsResponse,
+    AllUsersAnalyticsResponse,
 )
 
 logger = get_logger("api.billing")
@@ -654,8 +657,237 @@ def get_usage_logs(
             cost_usd=float(log.cost_usd),
             cost_inr=float(log.cost_inr),
             processing_time_seconds=float(log.processing_time_seconds) if log.processing_time_seconds else None,
-            metadata=log.metadata,
+            extra_data=log.extra_data,
             created_at=log.created_at,
         )
         for log in logs
     ]
+
+
+# =============================================================================
+# USER-LEVEL ANALYTICS (For Admin/CXO Dashboard)
+# Sprint 2: Billing transparency by user
+# =============================================================================
+
+@router.get("/analytics/users", response_model=AllUsersAnalyticsResponse)
+def get_all_users_analytics(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.THIS_MONTH),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """
+    Get billing breakdown by user for Admin/CXO dashboard.
+
+    SPRINT 2: Enables admins to see total AI cost by each team member.
+
+    Returns:
+    - Total tenant cost and calls for the period
+    - Per-user breakdown with:
+      - User email and name
+      - Total calls, tokens, cost
+      - Percentage of total tenant cost
+      - Last activity timestamp
+
+    Access: Requires admin/CXO role (TODO: add role check)
+    """
+    logger.info(
+        f"Fetching all users analytics for tenant {tenant_id}, "
+        f"range={time_range.value}, requested by {current_user.email}"
+    )
+
+    # Get date range
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+
+    # Get total summary for tenant
+    total_summary = crud.usage_log.get_total_summary(
+        db, tenant_id=tenant_id, start=start, end=end
+    )
+
+    # Get per-user breakdown
+    users_data = crud.usage_log.get_all_users_summary(
+        db, tenant_id=tenant_id, start=start, end=end
+    )
+
+    # Convert to response format
+    users = [
+        UserUsageSummary(
+            user_id=u["user_id"],
+            user_email=u["user_email"],
+            user_name=u["user_name"],
+            total_calls=u["total_calls"],
+            total_input_tokens=u["total_input_tokens"],
+            total_output_tokens=u["total_output_tokens"],
+            total_tokens=u["total_tokens"],
+            total_cost_usd=u["total_cost_usd"],
+            total_cost_inr=u["total_cost_inr"],
+            percentage_of_total=u["percentage_of_total"],
+            last_activity=u["last_activity"],
+        )
+        for u in users_data
+    ]
+
+    response = AllUsersAnalyticsResponse(
+        time_range=time_range.value,
+        start_date=start,
+        end_date=end,
+        total_tenant_cost_inr=total_summary["total_cost_inr"],
+        total_tenant_calls=total_summary["total_calls"],
+        users=users,
+    )
+
+    logger.info(
+        f"Users analytics retrieved: {len(users)} users, "
+        f"₹{total_summary['total_cost_inr']:.2f} total"
+    )
+
+    return response
+
+
+@router.get("/analytics/users/{user_id}", response_model=UserBillingAnalyticsResponse)
+def get_user_analytics(
+    *,
+    user_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.THIS_MONTH),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """
+    Get detailed billing analytics for a specific user.
+
+    SPRINT 2: Deep-dive into individual user's AI usage.
+
+    Returns:
+    - User info and total costs
+    - Feature breakdown (document_analysis, code_analysis, etc.)
+    - Daily usage time series
+    - Top documents by cost
+
+    Access: Requires admin/CXO role or user viewing own data (TODO: add role check)
+    """
+    logger.info(
+        f"Fetching user {user_id} analytics for tenant {tenant_id}, "
+        f"range={time_range.value}, requested by {current_user.email}"
+    )
+
+    # Get date range
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+
+    # Get user summary
+    user_summary = crud.usage_log.get_user_summary(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end
+    )
+
+    # Get feature breakdown for user
+    by_feature = crud.usage_log.get_user_by_feature(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end
+    )
+
+    # Get daily usage for user
+    daily_usage = crud.usage_log.get_user_daily_usage(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end
+    )
+
+    # Get top documents for user
+    top_documents = crud.usage_log.get_user_documents(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end, limit=10
+    )
+
+    response = UserBillingAnalyticsResponse(
+        user_id=user_id,
+        user_email=user_summary["user_email"],
+        user_name=user_summary["user_name"],
+        time_range=time_range.value,
+        start_date=start,
+        end_date=end,
+        total_cost_inr=user_summary["total_cost_inr"],
+        total_cost_usd=user_summary["total_cost_usd"],
+        total_api_calls=user_summary["total_calls"],
+        total_tokens=user_summary["total_tokens"],
+        by_feature=by_feature,
+        daily_usage=daily_usage,
+        top_documents=top_documents,
+    )
+
+    logger.info(
+        f"User {user_id} analytics retrieved: {user_summary['total_calls']} calls, "
+        f"₹{user_summary['total_cost_inr']:.2f} total"
+    )
+
+    return response
+
+
+@router.get("/analytics/users/{user_id}/by-feature", response_model=List[FeatureUsageSummary])
+def get_user_feature_breakdown(
+    *,
+    user_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.THIS_MONTH),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """
+    Get feature breakdown for a specific user.
+
+    Returns cost and usage by feature type for the specified user.
+    """
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+
+    return crud.usage_log.get_user_by_feature(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end
+    )
+
+
+@router.get("/analytics/users/{user_id}/daily", response_model=List[TimeSeriesDataPoint])
+def get_user_daily_usage(
+    *,
+    user_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.LAST_30_DAYS),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """
+    Get daily usage time series for a specific user.
+
+    Returns daily data points for charts and trend analysis.
+    """
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+
+    return crud.usage_log.get_user_daily_usage(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end
+    )
+
+
+@router.get("/analytics/users/{user_id}/documents", response_model=List[DocumentUsageSummary])
+def get_user_document_usage(
+    *,
+    user_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.THIS_MONTH),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """
+    Get top documents by cost for a specific user.
+
+    Returns document-level usage breakdown for the specified user.
+    """
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+
+    return crud.usage_log.get_user_documents(
+        db, tenant_id=tenant_id, user_id=user_id, start=start, end=end, limit=limit
+    )
