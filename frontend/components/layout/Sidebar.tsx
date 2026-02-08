@@ -26,6 +26,7 @@ import {
   Shield,
   BarChart3,
   FolderOpen,
+  Network,
   X,
 } from "lucide-react";
 import { ReactNode } from "react";
@@ -97,6 +98,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     {
       title: "Analytics",
       items: [
+        {
+          label: "Business Ontology",
+          href: "/dashboard/ontology",
+          icon: <Network className="h-5 w-5" />,
+          permission: Permission.ANALYSIS_VIEW,
+        },
         {
           label: "Analysis",
           href: "/analysis",

@@ -1,4 +1,5 @@
-# This is a NEW file at backend/app/tasks.py
+# backend/app/tasks/document_pipeline.py
+# Moved from app/tasks.py to resolve package conflict
 
 import asyncio
 from app.worker import celery_app
@@ -92,16 +93,16 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
         document_id: Document ID
         tenant_id: Tenant ID for billing (optional)
     """
-    
+
     # --- Step 1: Text Extraction ---
     try:
         parser = MultiModalDocumentParser()
-        
+
         # Fix for UX-02: Granular status update
         crud.document.update(db=db, db_obj=document, obj_in={"progress": 25, "status": "parsing"})
-        
+
         content = await parser.parse_with_images(storage_path)
-        
+
         update_data = {
             "raw_text": content,
             "status": "analyzing" if content else "parsing_failed",
@@ -109,17 +110,17 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             "error_message": None if content else "Parsing failed - no content extracted" # Fix for DAE-01
         }
         document = crud.document.update(db=db, db_obj=document, obj_in=update_data)
-        
+
         if not content:
             logger.warning(f"Parsing failed for document {document_id} - no content extracted")
             return # Stop pipeline
-            
+
     except Exception as e:
         logger.error(f"An error occurred during parsing for document {document_id}: {e}")
         # Fix for DAE-01: Save the actual error message
         crud.document.update(db=db, db_obj=document, obj_in={
-            "status": "parsing_failed", 
-            "progress": 100, 
+            "status": "parsing_failed",
+            "progress": 100,
             "error_message": str(e)
         })
         return # Stop pipeline
@@ -127,7 +128,7 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
     # --- Step 2: Multi-Pass Analysis ---
     try:
         dae = DocumentAnalysisEngine()
-        
+
         # This DAE service will provide its own granular status updates
         # (e.g., "pass_1_composition") as it runs, fulfilling UX-02.
         success = await dae.analyze_document(db=db, document_id=document.id, learning_mode=True)
@@ -192,12 +193,12 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             # If 'success' is false, the DAE service should have already
             # set the error_message in the DB, per DAE-01.
             logger.warning(f"Multi-pass analysis failed for document_id: {document_id}")
-        
+
     except Exception as e:
         logger.error(f"A top-level error occurred during multi-pass analysis for document {document_id}: {e}")
         # Fix for DAE-01: Save the actual error message
         crud.document.update(db=db, db_obj=document, obj_in={
-            "status": "analysis_failed", 
-            "progress": 100, 
+            "status": "analysis_failed",
+            "progress": 100,
             "error_message": str(e)
         })
