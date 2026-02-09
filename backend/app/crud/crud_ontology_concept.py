@@ -11,11 +11,20 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
 
     def get_or_create(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
-        description: str = None, confidence_score: float = None
+        description: str = None, confidence_score: float = None,
+        source_type: str = "document"
     ) -> OntologyConcept:
         """
-        Idempotent concept creation. Returns existing concept if name+type+tenant match,
-        otherwise creates a new one. Name is normalized to lowercase+stripped.
+        Idempotent concept creation with cross-reference promotion.
+
+        Returns existing concept if name+type+tenant match, otherwise creates new.
+        Name is normalized to lowercase+stripped.
+
+        Cross-reference logic:
+        - If concept exists from "document" and new source is "code" → promote to "both"
+        - If concept exists from "code" and new source is "document" → promote to "both"
+        - If already "both" → no change
+        This marks concepts validated by both BRD documents AND production code.
         """
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for get_or_create()")
@@ -29,9 +38,16 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         ).first()
 
         if existing:
+            changed = False
             # Update confidence if new score is higher
             if confidence_score and (existing.confidence_score is None or confidence_score > existing.confidence_score):
                 existing.confidence_score = confidence_score
+                changed = True
+            # Cross-reference promotion: document+code → both
+            if existing.source_type != source_type and existing.source_type != "both":
+                existing.source_type = "both"
+                changed = True
+            if changed:
                 db.commit()
                 db.refresh(existing)
             return existing
@@ -41,12 +57,27 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             concept_type=concept_type,
             description=description,
             confidence_score=confidence_score,
+            source_type=source_type,
             tenant_id=tenant_id
         )
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
         return db_obj
+
+    def get_by_source_type(
+        self, db: Session, *, source_type: str, tenant_id: int,
+        skip: int = 0, limit: int = 100
+    ) -> List[OntologyConcept]:
+        """Get concepts filtered by source_type (document, code, both)."""
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_by_source_type()")
+
+        return db.query(self.model).filter(
+            self.model.source_type == source_type,
+            self.model.tenant_id == tenant_id,
+            self.model.is_active == True
+        ).offset(skip).limit(limit).all()
 
     def search_by_name(
         self, db: Session, *, query: str, tenant_id: int, limit: int = 20

@@ -240,15 +240,17 @@ def repo_analysis_task(
             f"{completed} succeeded, {failed} failed out of {len(file_list)} files"
         )
 
-        # Fire ontology extraction for newly analyzed code if concepts are relevant
+        # Fire code ontology extraction to populate graph from code analysis
         if completed > 0 and tenant_id:
             try:
-                from app.tasks.ontology_tasks import extract_ontology_entities
-                # Ontology extraction runs per-document, not per-repo
-                # This is handled at the component level in future iterations
-                logger.info(f"Repo {repo_id} analysis complete — ontology will enrich on next document link")
-            except Exception:
-                pass
+                from app.tasks.ontology_tasks import extract_code_ontology_entities
+                extract_code_ontology_entities.delay(repo_id, tenant_id)
+                logger.info(
+                    f"Repo {repo_id} analysis complete — dispatched code ontology extraction. "
+                    f"Concepts matching BRD entities will be cross-referenced (source_type='both')."
+                )
+            except Exception as ontology_err:
+                logger.warning(f"Failed to dispatch code ontology task (non-critical): {ontology_err}")
 
         return {
             "status": final_status,

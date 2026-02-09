@@ -20,6 +20,7 @@ class OntologyConcept(Base):
     concept_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., "FEATURE", "TECHNOLOGY", "PROCESS"
     description: Mapped[str] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float] = mapped_column(nullable=True)  # AI confidence in this concept
+    source_type: Mapped[str] = mapped_column(String(20), default="document", nullable=False, index=True)  # "document", "code", or "both"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

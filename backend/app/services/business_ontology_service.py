@@ -1,11 +1,17 @@
 """
 Business Ontology Service (SPRINT 3)
 
-The "brain" of DokyDoc. Extracts business entities from document analysis results
-and builds a knowledge graph of concepts and relationships per tenant.
+The "brain" of DokyDoc. Extracts business entities from BOTH document analysis
+results AND code analysis results, building a unified knowledge graph.
+
+Dual-Source Architecture:
+- DOCUMENTS (BRD/SRS): Extracts actors, processes, rules, requirements — the "what should be"
+- CODE (Repositories): Extracts systems, APIs, data models, dependencies — the "what is"
+- Cross-reference: When a concept appears in BOTH sources, it's promoted to source_type="both"
+  with boosted confidence — these are the most reliable graph nodes.
 
 Architecture:
-- Called asynchronously AFTER document analysis completes (non-blocking)
+- Called asynchronously AFTER document/code analysis completes (non-blocking)
 - Uses Gemini AI for entity extraction and relationship inference
 - Stores results in OntologyConcept + OntologyRelationship tables
 - All operations are tenant-scoped
@@ -32,16 +38,17 @@ class BusinessOntologyService(LoggerMixin):
 
     def get_or_create_concept(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
-        description: str = None, confidence_score: float = None
+        description: str = None, confidence_score: float = None,
+        source_type: str = "document"
     ):
         """
-        Idempotent concept creation with name normalization.
-        Delegates to CRUD layer which handles deduplication.
+        Idempotent concept creation with name normalization and cross-reference.
+        Delegates to CRUD layer which handles deduplication and source_type promotion.
         """
         return crud.ontology_concept.get_or_create(
             db=db, name=name, concept_type=concept_type,
             tenant_id=tenant_id, description=description,
-            confidence_score=confidence_score
+            confidence_score=confidence_score, source_type=source_type
         )
 
     def link_concepts(
@@ -139,11 +146,16 @@ class BusinessOntologyService(LoggerMixin):
 
     def _ingest_extraction_result(
         self, db: Session, *, entities: List[Dict], relationships: List[Dict],
-        document_id: int, tenant_id: int
+        document_id: int = None, tenant_id: int, source_type: str = "document"
     ) -> Tuple[int, int]:
         """
         Takes the AI-extracted entities and relationships and persists them
         to the ontology tables. Returns (entities_created, relationships_created).
+
+        The source_type parameter enables cross-referencing:
+        - "document" for entities extracted from BRD/SRS analysis
+        - "code" for entities extracted from code analysis
+        If a concept already exists from the other source, CRUD promotes it to "both".
         """
         entities_created = 0
         concept_map = {}  # name -> OntologyConcept object (for relationship linking)
@@ -162,7 +174,7 @@ class BusinessOntologyService(LoggerMixin):
                 concept = self.get_or_create_concept(
                     db=db, name=name, concept_type=concept_type,
                     tenant_id=tenant_id, description=context,
-                    confidence_score=confidence
+                    confidence_score=confidence, source_type=source_type
                 )
                 concept_map[name] = concept
                 entities_created += 1
@@ -197,6 +209,106 @@ class BusinessOntologyService(LoggerMixin):
                 continue
 
         return entities_created, relationships_created
+
+    async def extract_entities_from_code(
+        self, db: Session, *, repo_id: int, tenant_id: int
+    ) -> Dict:
+        """
+        Dual-source extraction: Extracts business entities from CODE analysis results.
+
+        Reads all CodeComponent.structured_analysis for a repository and feeds them
+        through the CODE_ENTITY_EXTRACTION prompt. Concepts are created with
+        source_type="code", which triggers cross-reference promotion to "both" if
+        the same concept already exists from document analysis.
+
+        This is the code counterpart to extract_entities_from_analysis() (documents).
+        """
+        self.logger.info(f"🔧 Starting CODE entity extraction for repo {repo_id}")
+
+        # Get all completed code components for this repository
+        components = db.query(crud.code_component.model).filter(
+            crud.code_component.model.repository_id == repo_id,
+            crud.code_component.model.tenant_id == tenant_id,
+            crud.code_component.model.analysis_status == "completed"
+        ).all()
+
+        if not components:
+            self.logger.warning(f"No completed code components for repo {repo_id}")
+            return {"entities_created": 0, "relationships_created": 0, "cost_inr": 0}
+
+        # Combine structured_analysis from all analyzed files into a payload
+        combined_data = []
+        for comp in components:
+            if comp.structured_analysis:
+                combined_data.append({
+                    "file": comp.name,
+                    "location": comp.location,
+                    "summary": comp.summary or "",
+                    "analysis": comp.structured_analysis
+                })
+
+        if not combined_data:
+            self.logger.warning(f"No structured analysis data in code components for repo {repo_id}")
+            return {"entities_created": 0, "relationships_created": 0, "cost_inr": 0}
+
+        # For large repos, batch to avoid hitting token limits (max ~20 files per call)
+        batch_size = 20
+        total_entities = 0
+        total_relationships = 0
+        total_cost = 0.0
+
+        for i in range(0, len(combined_data), batch_size):
+            batch = combined_data[i:i + batch_size]
+
+            prompt = prompt_manager.get_prompt(PromptType.CODE_ENTITY_EXTRACTION)
+            full_prompt = f"{prompt}\n{json.dumps(batch, indent=2)}"
+
+            # Rate limiting: respect Gemini 15 RPM limit
+            time.sleep(4)
+
+            try:
+                response = await gemini_service.generate_content(full_prompt)
+                cleaned = repair_json_response(response.text)
+                extraction_result = json.loads(cleaned)
+            except Exception as e:
+                self.logger.error(f"Code entity extraction failed for repo {repo_id} batch {i}: {e}")
+                continue
+
+            # Calculate cost
+            cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            total_cost += cost_data.get("cost_inr", 0)
+
+            # Ingest with source_type="code" — triggers cross-reference if concept exists from documents
+            entities = extraction_result.get("entities", [])
+            relationships = extraction_result.get("relationships", [])
+
+            batch_entities, batch_rels = self._ingest_extraction_result(
+                db=db, entities=entities, relationships=relationships,
+                tenant_id=tenant_id, source_type="code"
+            )
+            total_entities += batch_entities
+            total_relationships += batch_rels
+
+        # Count how many concepts were promoted to "both" (cross-referenced)
+        cross_referenced = db.query(crud.ontology_concept.model).filter(
+            crud.ontology_concept.model.tenant_id == tenant_id,
+            crud.ontology_concept.model.source_type == "both",
+            crud.ontology_concept.model.is_active == True
+        ).count()
+
+        self.logger.info(
+            f"🔧 Code entity extraction complete for repo {repo_id}: "
+            f"{total_entities} concepts, {total_relationships} relationships, "
+            f"{cross_referenced} cross-referenced with documents, "
+            f"₹{total_cost:.4f}"
+        )
+
+        return {
+            "entities_created": total_entities,
+            "relationships_created": total_relationships,
+            "cross_referenced": cross_referenced,
+            "cost_inr": total_cost
+        }
 
     async def detect_synonyms(
         self, db: Session, *, tenant_id: int

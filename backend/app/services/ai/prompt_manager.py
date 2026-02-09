@@ -20,6 +20,7 @@ class PromptType(Enum):
     SYNONYM_DETECTION = "synonym_detection"
     # SPRINT 3: Code Analysis Engine
     REPO_FILE_ANALYSIS = "repo_file_analysis"
+    CODE_ENTITY_EXTRACTION = "code_entity_extraction"
 
 class PromptManager(LoggerMixin):
     """
@@ -543,6 +544,105 @@ Return ONLY valid JSON:
                         "structured_analysis": {"type": "object"}
                     },
                     "required": ["summary", "structured_analysis"]
+                }
+            },
+
+            # ============================================================
+            # SPRINT 3: Dual-Source BOE — Code Entity Extraction Prompt
+            # ============================================================
+
+            PromptType.CODE_ENTITY_EXTRACTION.value: {
+                "version": "1.0",
+                "description": "Extracts business-relevant entities from code analysis results to populate the ontology from code sources",
+                "prompt": """
+You are an expert software architect extracting business-relevant entities from code analysis data.
+
+CONTEXT:
+Unlike document analysis (which extracts from BRDs/specs), this extraction runs on CODE analysis results.
+Your job is to identify entities that bridge the gap between what documents describe and what code implements.
+
+ENTITY TYPES TO EXTRACT:
+- SYSTEM: Services, microservices, modules (e.g., "Payment Service", "Auth Module")
+- FEATURE: Implemented features or capabilities visible in the code (e.g., "JWT Authentication", "File Upload")
+- TECHNOLOGY: Frameworks, libraries, tools actually used (e.g., "FastAPI", "SQLAlchemy", "Redis")
+- DATA_ENTITY: Database models, schemas, data structures (e.g., "User Model", "Order Table", "Invoice Schema")
+- API_ENDPOINT: REST/GraphQL endpoints (e.g., "POST /api/v1/documents/upload", "GET /users")
+- PROCESS: Business workflows implemented in code (e.g., "Document Analysis Pipeline", "Checkout Flow")
+- RULE: Business rules enforced in code (e.g., "Rate Limit 15 RPM", "Tenant Isolation Check")
+- DEPENDENCY: Key external dependencies (e.g., "Google Gemini API", "Stripe SDK")
+
+EXTRACTION RULES:
+1. Focus on BUSINESS-RELEVANT entities — skip generic utilities, test helpers, boilerplate
+2. Use the same naming conventions as document extraction for cross-referencing:
+   - Title Case for names
+   - Be specific: "User Authentication Service" not just "Auth"
+3. For API endpoints, include the HTTP method and path
+4. For business rules, describe the constraint as found in code
+5. Assign confidence 0.7-1.0 (code is explicit, so confidence should generally be high)
+6. Include the file path or function name as context
+
+RELATIONSHIP TYPES:
+- implements: Code entity implements a business concept
+- depends_on: One entity requires another
+- uses: Entity uses a technology/library
+- exposes: Service exposes an API endpoint
+- enforces: Code enforces a business rule
+- persists: Code manages a data entity
+
+RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "entities": [
+        {{
+            "name": "Entity Name",
+            "type": "SYSTEM|FEATURE|TECHNOLOGY|DATA_ENTITY|API_ENDPOINT|PROCESS|RULE|DEPENDENCY",
+            "context": "File path or function where this was found",
+            "confidence": 0.85
+        }}
+    ],
+    "relationships": [
+        {{
+            "source": "Entity Name A",
+            "target": "Entity Name B",
+            "relationship_type": "implements|depends_on|uses|exposes|enforces|persists",
+            "confidence": 0.75
+        }}
+    ]
+}}
+
+CODE ANALYSIS DATA TO PROCESS:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "entities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "context": {"type": "string"},
+                                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                },
+                                "required": ["name", "type", "context", "confidence"]
+                            }
+                        },
+                        "relationships": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": {"type": "string"},
+                                    "target": {"type": "string"},
+                                    "relationship_type": {"type": "string"},
+                                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                                },
+                                "required": ["source", "target", "relationship_type", "confidence"]
+                            }
+                        }
+                    },
+                    "required": ["entities", "relationships"]
                 }
             }
         }

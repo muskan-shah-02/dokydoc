@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 
@@ -13,7 +13,7 @@ class OntologyConceptBase(BaseModel):
 
 
 class OntologyConceptCreate(OntologyConceptBase):
-    pass
+    source_type: Literal["document", "code"] = "document"
 
 
 class OntologyConceptUpdate(BaseModel):
@@ -26,6 +26,7 @@ class OntologyConceptUpdate(BaseModel):
 
 class OntologyConceptResponse(OntologyConceptBase):
     id: int
+    source_type: str = "document"  # "document", "code", or "both"
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -76,6 +77,7 @@ class OntologyGraphNode(BaseModel):
     id: int
     name: str
     concept_type: str
+    source_type: str = "document"
     confidence_score: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)

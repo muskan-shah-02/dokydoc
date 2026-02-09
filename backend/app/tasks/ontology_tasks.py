@@ -1,11 +1,15 @@
 """
-SPRINT 3: Ontology Entity Extraction Celery Task
+SPRINT 3: Ontology Entity Extraction Celery Tasks
 
-Runs ASYNCHRONOUSLY after document analysis completes.
-Does NOT block the user — document is already marked "completed" before this fires.
+Dual-source architecture:
+1. extract_ontology_entities — Runs after DOCUMENT analysis (BRD/SRS → ontology)
+2. extract_code_ontology_entities — Runs after REPO analysis (code → ontology)
+
+Both are fire-and-forget. If a concept already exists from the other source,
+it gets promoted to source_type="both" (cross-referenced).
 
 The frontend can poll /ontology/document/{id}/status to show a subtle
-"X entities extracted" badge when this task finishes.
+"X entities extracted" badge when these tasks finish.
 """
 
 import asyncio
@@ -76,5 +80,72 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
             self.retry(countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
             logger.error(f"🧠 ONTOLOGY_TASK permanently failed for document {document_id} after retries")
+    finally:
+        db.close()
+
+
+@celery_app.task(name="extract_code_ontology_entities", bind=True, max_retries=2)
+def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
+    """
+    Celery task: Extract business entities from a repository's code analysis
+    and populate the ontology graph with source_type="code".
+
+    Fires AFTER repo_analysis_task completes. If a concept already exists from
+    document analysis, the CRUD layer promotes it to source_type="both" —
+    marking it as cross-validated by both BRD and code.
+
+    This is fire-and-forget. Repo stays "completed" regardless of outcome.
+    """
+    logger.info(f"🔧 CODE_ONTOLOGY_TASK started for repo_id: {repo_id}, tenant_id: {tenant_id}")
+
+    db = SessionLocal()
+    try:
+        # Verify repository exists and is completed
+        repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+        if not repo:
+            logger.error(f"Code ontology task: Repository {repo_id} not found")
+            return
+
+        if repo.analysis_status != "completed":
+            logger.warning(
+                f"Code ontology task: Repo {repo_id} status is '{repo.analysis_status}', "
+                f"expected 'completed'. Skipping code entity extraction."
+            )
+            return
+
+        # Run the async code entity extraction
+        result = asyncio.run(
+            business_ontology_service.extract_entities_from_code(
+                db=db, repo_id=repo_id, tenant_id=tenant_id
+            )
+        )
+
+        logger.info(
+            f"🔧 CODE_ONTOLOGY_TASK complete for repo {repo_id}: "
+            f"{result.get('entities_created', 0)} entities, "
+            f"{result.get('relationships_created', 0)} relationships, "
+            f"{result.get('cross_referenced', 0)} cross-referenced with documents"
+        )
+
+        # Deduct code ontology extraction cost from billing
+        cost_inr = result.get("cost_inr", 0)
+        if cost_inr > 0 and tenant_id:
+            try:
+                from app.services.billing_enforcement_service import billing_enforcement_service
+                billing_enforcement_service.deduct_cost(
+                    db=db,
+                    tenant_id=tenant_id,
+                    cost_inr=cost_inr,
+                    description=f"Code ontology extraction: {repo.name}"
+                )
+            except Exception as billing_error:
+                logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
+
+    except Exception as e:
+        logger.error(f"🔧 CODE_ONTOLOGY_TASK failed for repo {repo_id}: {e}")
+        try:
+            self.retry(countdown=30 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            logger.error(f"🔧 CODE_ONTOLOGY_TASK permanently failed for repo {repo_id} after retries")
     finally:
         db.close()
