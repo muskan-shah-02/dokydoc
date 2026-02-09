@@ -141,11 +141,81 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             except Exception as billing_error:
                 logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
 
+        # After code extraction succeeds, trigger reconciliation
+        # This creates bridge relationships between document and code layers
+        try:
+            reconcile_ontology_sources.delay(tenant_id)
+            logger.info(f"Dispatched reconciliation task for tenant {tenant_id}")
+        except Exception as recon_err:
+            logger.warning(f"Failed to dispatch reconciliation (non-critical): {recon_err}")
+
     except Exception as e:
         logger.error(f"🔧 CODE_ONTOLOGY_TASK failed for repo {repo_id}: {e}")
         try:
             self.retry(countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
             logger.error(f"🔧 CODE_ONTOLOGY_TASK permanently failed for repo {repo_id} after retries")
+    finally:
+        db.close()
+
+
+@celery_app.task(name="reconcile_ontology_sources", bind=True, max_retries=1)
+def reconcile_ontology_sources(self, tenant_id: int):
+    """
+    Celery task: Reconciliation pass — connects document-layer and code-layer concepts.
+
+    This is the CRITICAL step that makes the dual-source graph useful:
+    1. Creates bridge relationships (implements, enforces, extends)
+    2. Detects contradictions (document says X, code does Y)
+    3. Identifies unimplemented requirements (document concepts with no code)
+    4. Identifies undocumented features (code concepts with no document)
+
+    Only promotes concepts to source_type="both" when AI confirms high-confidence
+    "implements" match — NOT on naive name matching.
+
+    Fires automatically after code ontology extraction, but can also be triggered
+    manually via the API.
+    """
+    logger.info(f"🔗 RECONCILIATION_TASK started for tenant_id: {tenant_id}")
+
+    db = SessionLocal()
+    try:
+        result = asyncio.run(
+            business_ontology_service.reconcile_document_code_concepts(
+                db=db, tenant_id=tenant_id
+            )
+        )
+
+        bridges = result.get("bridges_created", 0)
+        contradictions = result.get("contradictions_found", 0)
+        unimplemented = len(result.get("unimplemented_requirements", []))
+        undocumented = len(result.get("undocumented_features", []))
+
+        logger.info(
+            f"🔗 RECONCILIATION_TASK complete for tenant {tenant_id}: "
+            f"{bridges} bridges, {contradictions} contradictions, "
+            f"{unimplemented} unimplemented, {undocumented} undocumented"
+        )
+
+        # Deduct reconciliation cost
+        cost_inr = result.get("cost_inr", 0)
+        if cost_inr > 0:
+            try:
+                from app.services.billing_enforcement_service import billing_enforcement_service
+                billing_enforcement_service.deduct_cost(
+                    db=db,
+                    tenant_id=tenant_id,
+                    cost_inr=cost_inr,
+                    description="Ontology source reconciliation"
+                )
+            except Exception as billing_error:
+                logger.warning(f"Reconciliation billing deduction failed: {billing_error}")
+
+    except Exception as e:
+        logger.error(f"🔗 RECONCILIATION_TASK failed for tenant {tenant_id}: {e}")
+        try:
+            self.retry(countdown=60)
+        except self.MaxRetriesExceededError:
+            logger.error(f"🔗 RECONCILIATION_TASK permanently failed for tenant {tenant_id}")
     finally:
         db.close()

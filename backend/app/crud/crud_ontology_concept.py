@@ -15,39 +15,41 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         source_type: str = "document"
     ) -> OntologyConcept:
         """
-        Idempotent concept creation with cross-reference promotion.
+        Idempotent concept creation within a SINGLE source layer.
 
-        Returns existing concept if name+type+tenant match, otherwise creates new.
-        Name is normalized to lowercase+stripped.
+        Deduplication matches on name + type + tenant + source_type.
+        This keeps document-layer and code-layer concepts SEPARATE:
+        - "User Authentication" (FEATURE, document) is a different concept from
+          "User Authentication" (SYSTEM, code)
+        - They live in different layers and are connected via bridge relationships
+          created by the reconciliation pass, NOT by auto-merging.
 
-        Cross-reference logic:
-        - If concept exists from "document" and new source is "code" → promote to "both"
-        - If concept exists from "code" and new source is "document" → promote to "both"
-        - If already "both" → no change
-        This marks concepts validated by both BRD documents AND production code.
+        Within the SAME layer, if a concept with the same name+type already exists,
+        update confidence if higher.
+
+        Cross-referencing between layers is handled by reconcile_document_code_concepts(),
+        NOT here. This prevents:
+        - Type collisions (FEATURE vs SYSTEM for the same name)
+        - Description overwrites (losing provenance)
+        - False matches across abstraction levels
         """
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for get_or_create()")
 
         normalized_name = name.strip().lower()
 
+        # Match within the SAME source layer only
         existing = db.query(self.model).filter(
             func.lower(self.model.name) == normalized_name,
             self.model.concept_type == concept_type,
-            self.model.tenant_id == tenant_id
+            self.model.tenant_id == tenant_id,
+            self.model.source_type == source_type
         ).first()
 
         if existing:
-            changed = False
             # Update confidence if new score is higher
             if confidence_score and (existing.confidence_score is None or confidence_score > existing.confidence_score):
                 existing.confidence_score = confidence_score
-                changed = True
-            # Cross-reference promotion: document+code → both
-            if existing.source_type != source_type and existing.source_type != "both":
-                existing.source_type = "both"
-                changed = True
-            if changed:
                 db.commit()
                 db.refresh(existing)
             return existing
@@ -64,6 +66,24 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         db.commit()
         db.refresh(db_obj)
         return db_obj
+
+    def promote_to_both(
+        self, db: Session, *, concept_id: int, tenant_id: int
+    ) -> Optional[OntologyConcept]:
+        """
+        Explicitly promote a concept to source_type='both'.
+        Only called by the reconciliation pass when AI confirms a concept
+        is genuinely the same thing in both document and code.
+        """
+        concept = db.query(self.model).filter(
+            self.model.id == concept_id,
+            self.model.tenant_id == tenant_id
+        ).first()
+        if concept and concept.source_type != "both":
+            concept.source_type = "both"
+            db.commit()
+            db.refresh(concept)
+        return concept
 
     def get_by_source_type(
         self, db: Session, *, source_type: str, tenant_id: int,

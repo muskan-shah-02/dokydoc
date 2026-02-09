@@ -289,24 +289,175 @@ class BusinessOntologyService(LoggerMixin):
             total_entities += batch_entities
             total_relationships += batch_rels
 
-        # Count how many concepts were promoted to "both" (cross-referenced)
-        cross_referenced = db.query(crud.ontology_concept.model).filter(
-            crud.ontology_concept.model.tenant_id == tenant_id,
-            crud.ontology_concept.model.source_type == "both",
-            crud.ontology_concept.model.is_active == True
-        ).count()
-
         self.logger.info(
             f"🔧 Code entity extraction complete for repo {repo_id}: "
             f"{total_entities} concepts, {total_relationships} relationships, "
-            f"{cross_referenced} cross-referenced with documents, "
-            f"₹{total_cost:.4f}"
+            f"₹{total_cost:.4f}. Reconciliation pass will create bridge relationships."
         )
 
         return {
             "entities_created": total_entities,
             "relationships_created": total_relationships,
-            "cross_referenced": cross_referenced,
+            "cost_inr": total_cost
+        }
+
+    async def reconcile_document_code_concepts(
+        self, db: Session, *, tenant_id: int
+    ) -> Dict:
+        """
+        RECONCILIATION PASS: The critical step that connects the two layers.
+
+        Takes all document-layer concepts and all code-layer concepts for a tenant,
+        sends them to Gemini to determine:
+        1. Which code concepts implement which document concepts (bridge relationships)
+        2. Which document concepts have NO code counterpart (unimplemented requirements)
+        3. Which code concepts have NO document counterpart (undocumented features)
+        4. Where code CONTRADICTS what documents say (mismatches)
+
+        This is what makes the dual-source graph actually useful — without it, you just
+        have two disconnected subgraphs.
+        """
+        self.logger.info(f"🔗 Starting source reconciliation for tenant {tenant_id}")
+
+        # Get concepts from each layer
+        doc_concepts = crud.ontology_concept.get_by_source_type(
+            db=db, source_type="document", tenant_id=tenant_id, limit=500
+        )
+        code_concepts = crud.ontology_concept.get_by_source_type(
+            db=db, source_type="code", tenant_id=tenant_id, limit=500
+        )
+
+        if not doc_concepts or not code_concepts:
+            self.logger.info(
+                f"Reconciliation skipped: {len(doc_concepts or [])} document concepts, "
+                f"{len(code_concepts or [])} code concepts — need both."
+            )
+            return {"bridges_created": 0, "contradictions_found": 0}
+
+        # Build the payload for AI
+        doc_payload = [
+            {"name": c.name, "type": c.concept_type, "description": c.description or ""}
+            for c in doc_concepts
+        ]
+        code_payload = [
+            {"name": c.name, "type": c.concept_type, "description": c.description or ""}
+            for c in code_concepts
+        ]
+
+        reconciliation_data = {
+            "document_concepts": doc_payload,
+            "code_concepts": code_payload
+        }
+
+        prompt = prompt_manager.get_prompt(PromptType.SOURCE_RECONCILIATION)
+        full_prompt = f"{prompt}\n{json.dumps(reconciliation_data, indent=2)}"
+
+        time.sleep(4)  # Rate limiting
+
+        try:
+            response = await gemini_service.generate_content(full_prompt)
+            cleaned = repair_json_response(response.text)
+            result = json.loads(cleaned)
+        except Exception as e:
+            self.logger.error(f"Reconciliation AI call failed for tenant {tenant_id}: {e}")
+            return {"bridges_created": 0, "contradictions_found": 0, "error": str(e)}
+
+        cost_data = cost_service.calculate_cost(full_prompt, response.text)
+        total_cost = cost_data.get("cost_inr", 0)
+
+        # Build name->concept lookups for each layer
+        doc_lookup = {c.name.lower(): c for c in doc_concepts}
+        code_lookup = {c.name.lower(): c for c in code_concepts}
+
+        # Process bridge relationships
+        bridges_created = 0
+        for bridge in result.get("bridges", []):
+            doc_name = bridge.get("document_concept", "").strip().lower()
+            code_name = bridge.get("code_concept", "").strip().lower()
+            rel_type = bridge.get("relationship", "implements")
+            confidence = bridge.get("confidence", 0.5)
+            reasoning = bridge.get("reasoning", "")
+
+            doc_concept = doc_lookup.get(doc_name)
+            code_concept = code_lookup.get(code_name)
+
+            if not doc_concept or not code_concept:
+                continue
+
+            try:
+                link = self.link_concepts(
+                    db=db,
+                    source_id=code_concept.id,  # code → implements → document
+                    target_id=doc_concept.id,
+                    relationship_type=rel_type,
+                    tenant_id=tenant_id,
+                    description=reasoning,
+                    confidence_score=confidence
+                )
+                if link:
+                    bridges_created += 1
+
+                    # If it's a strong "implements" match, promote BOTH concepts to "both"
+                    if rel_type == "implements" and confidence >= 0.8:
+                        crud.ontology_concept.promote_to_both(
+                            db=db, concept_id=doc_concept.id, tenant_id=tenant_id
+                        )
+                        crud.ontology_concept.promote_to_both(
+                            db=db, concept_id=code_concept.id, tenant_id=tenant_id
+                        )
+            except Exception as e:
+                self.logger.warning(f"Failed to create bridge {code_name} → {doc_name}: {e}")
+
+        # Process contradictions — create "contradicts" relationships
+        contradictions_found = 0
+        for contradiction in result.get("contradictions", []):
+            doc_name = contradiction.get("document_concept", "").strip().lower()
+            code_name = contradiction.get("code_concept", "").strip().lower()
+            severity = contradiction.get("severity", "medium")
+
+            doc_concept = doc_lookup.get(doc_name)
+            code_concept = code_lookup.get(code_name)
+
+            if not doc_concept or not code_concept:
+                continue
+
+            try:
+                detail = (
+                    f"MISMATCH [{severity.upper()}]: "
+                    f"Document says: {contradiction.get('document_says', '?')}. "
+                    f"Code does: {contradiction.get('code_does', '?')}. "
+                    f"Action: {contradiction.get('recommended_action', '?')}"
+                )
+                self.link_concepts(
+                    db=db,
+                    source_id=code_concept.id,
+                    target_id=doc_concept.id,
+                    relationship_type="contradicts",
+                    tenant_id=tenant_id,
+                    description=detail,
+                    confidence_score=0.9
+                )
+                contradictions_found += 1
+            except Exception as e:
+                self.logger.warning(f"Failed to create contradiction link: {e}")
+
+        # Log unimplemented/undocumented for visibility (these don't create relationships)
+        unimplemented = result.get("unimplemented", [])
+        undocumented = result.get("undocumented", [])
+
+        self.logger.info(
+            f"🔗 Reconciliation complete for tenant {tenant_id}: "
+            f"{bridges_created} bridges, {contradictions_found} contradictions, "
+            f"{len(unimplemented)} unimplemented requirements, "
+            f"{len(undocumented)} undocumented code features, "
+            f"₹{total_cost:.4f}"
+        )
+
+        return {
+            "bridges_created": bridges_created,
+            "contradictions_found": contradictions_found,
+            "unimplemented_requirements": unimplemented,
+            "undocumented_features": undocumented,
             "cost_inr": total_cost
         }
 

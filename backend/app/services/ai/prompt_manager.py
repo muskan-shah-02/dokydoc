@@ -21,6 +21,7 @@ class PromptType(Enum):
     # SPRINT 3: Code Analysis Engine
     REPO_FILE_ANALYSIS = "repo_file_analysis"
     CODE_ENTITY_EXTRACTION = "code_entity_extraction"
+    SOURCE_RECONCILIATION = "source_reconciliation"
 
 class PromptManager(LoggerMixin):
     """
@@ -643,6 +644,97 @@ CODE ANALYSIS DATA TO PROCESS:
                         }
                     },
                     "required": ["entities", "relationships"]
+                }
+            },
+
+            # ============================================================
+            # SPRINT 3: Dual-Source BOE — Reconciliation Prompt
+            # ============================================================
+
+            PromptType.SOURCE_RECONCILIATION.value: {
+                "version": "1.0",
+                "description": "Maps document-layer concepts to code-layer concepts, creating bridge relationships and detecting contradictions",
+                "prompt": """
+You are an expert solution architect reconciling business requirements (from BRD/SRS documents) with their implementation (from production code analysis).
+
+CONTEXT:
+You are given two sets of concepts:
+1. DOCUMENT CONCEPTS — extracted from BRD/SRS documents (the "what should be")
+2. CODE CONCEPTS — extracted from production code analysis (the "what is")
+
+Your job is to find which code concepts IMPLEMENT, ENFORCE, or CONTRADICT which document concepts.
+
+IMPORTANT RULES:
+1. Documents describe things at a BUSINESS level (features, processes, rules)
+2. Code describes things at an IMPLEMENTATION level (services, APIs, data models)
+3. They are at DIFFERENT abstraction levels — a single document "Feature" may map to MULTIPLE code "Systems"
+4. A code "System" may implement parts of MULTIPLE document "Features"
+5. Not every document concept will have a code counterpart (unimplemented requirements)
+6. Not every code concept will have a document counterpart (undocumented features)
+
+BRIDGE RELATIONSHIP TYPES:
+- "implements": Code concept fully implements what the document concept describes
+- "partially_implements": Code concept covers SOME aspects of the document concept
+- "enforces": Code concept enforces a business rule described in the document
+- "contradicts": Code does something DIFFERENT from what the document says (THIS IS A MISMATCH!)
+- "extends": Code adds functionality beyond what the document specified
+- "undocumented": Code concept exists but has NO corresponding document concept
+
+MISMATCH DETECTION:
+- If a document says "Max 3 login attempts" but code has MAX_RETRIES=5 → "contradicts"
+- If a document says "Payment requires approval over $500" but code has no such check → the document concept has no bridge (unimplemented)
+- If code has a feature the document doesn't mention → "undocumented"
+
+RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "bridges": [
+        {{
+            "document_concept": "Exact name of the document concept",
+            "code_concept": "Exact name of the code concept",
+            "relationship": "implements|partially_implements|enforces|contradicts|extends",
+            "confidence": 0.85,
+            "reasoning": "Brief explanation of WHY this mapping exists",
+            "mismatch_detail": null
+        }}
+    ],
+    "unimplemented": [
+        {{
+            "document_concept": "Name of document concept with NO code counterpart",
+            "severity": "high|medium|low",
+            "reasoning": "Why this is concerning"
+        }}
+    ],
+    "undocumented": [
+        {{
+            "code_concept": "Name of code concept with NO document counterpart",
+            "severity": "high|medium|low",
+            "reasoning": "Why this matters (e.g., 'Critical payment logic not in any BRD')"
+        }}
+    ],
+    "contradictions": [
+        {{
+            "document_concept": "What the document says",
+            "code_concept": "What the code does",
+            "document_says": "Specific claim from the document",
+            "code_does": "What the code actually implements",
+            "severity": "high|medium|low",
+            "recommended_action": "Which side should change and why"
+        }}
+    ]
+}}
+
+CONCEPTS TO RECONCILE:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bridges": {"type": "array"},
+                        "unimplemented": {"type": "array"},
+                        "undocumented": {"type": "array"},
+                        "contradictions": {"type": "array"}
+                    },
+                    "required": ["bridges", "unimplemented", "undocumented", "contradictions"]
                 }
             }
         }
