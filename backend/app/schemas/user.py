@@ -5,6 +5,7 @@ from enum import Enum
 
 # Define the available roles using an Enum for consistency and validation
 class Role(str, Enum):
+    ADMIN = "Admin"
     CXO = "CXO"
     BA = "BA"
     DEVELOPER = "Developer"
