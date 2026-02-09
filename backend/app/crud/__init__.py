@@ -8,6 +8,7 @@ from .crud_document_segment import document_segment
 from .crud_consolidated_analysis import crud_consolidated_analysis as consolidated_analysis
 from .crud_tenant_billing import tenant_billing
 from .crud_tenant import tenant  # SPRINT 2 Phase 3: Tenant registration
+from .crud_usage_log import crud_usage_log as usage_log  # Billing analytics
 
 # SPRINT 3: Business Ontology Engine
 from .crud_ontology_concept import ontology_concept

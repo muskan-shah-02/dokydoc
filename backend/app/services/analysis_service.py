@@ -13,6 +13,8 @@ from app.services.billing_enforcement_service import billing_enforcement_service
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
+from app.models.usage_log import FeatureType, OperationType  # ✅ SPRINT 2: Usage logging
+from app.schemas.usage_log import UsageLogCreate  # ✅ SPRINT 2: Usage logging
 
 # Configuration: Context window for segment analysis (characters)
 # Provides surrounding text to AI for better understanding
@@ -139,25 +141,70 @@ class DocumentAnalysisEngine(LoggerMixin):
         if document_id in self._api_call_counter:
             self._api_call_counter[document_id] += 1
 
+    def _log_usage(
+        self,
+        db: Session,
+        tenant_id: int,
+        document_id: int,
+        operation: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        cost_inr: float,
+        processing_time: Optional[float] = None,
+        user_id: Optional[int] = None,
+    ):
+        """
+        Log AI usage to usage_logs table for billing analytics.
+        SPRINT 2: Enables feature-based cost breakdown and transparency.
+        """
+        try:
+            crud.usage_log.log_usage(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                document_id=document_id,
+                feature_type=FeatureType.DOCUMENT_ANALYSIS.value,
+                operation=operation,
+                model_used="gemini-2.5-flash",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                cost_inr=cost_inr,
+                processing_time_seconds=processing_time,
+                extra_data={"document_id": document_id},
+            )
+            self.logger.debug(f"📊 Logged usage: {operation}, ₹{cost_inr:.4f}")
+        except Exception as e:
+            # Don't fail the analysis if logging fails
+            self.logger.warning(f"Failed to log usage for {operation}: {e}")
+
     # --- NEW: Helper to check for stop signal ---
-    def _check_stop_signal(self, db: Session, document_id: int) -> bool:
+    def _check_stop_signal(self, db: Session, document_id: int, tenant_id: int) -> bool:
         """Checks if the user has requested to stop the analysis."""
         # We must re-fetch the document from DB to see the latest status
-        doc = crud.document.get(db=db, id=document_id)
+        doc = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
         if doc and doc.status == "stopping":
             self.logger.info(f"🛑 Analysis STOPPED by user for document {document_id}")
             # Set final stopped state
             crud.document.update(
-                db=db, 
-                db_obj=doc, 
+                db=db,
+                db_obj=doc,
                 obj_in={"status": "stopped", "error_message": "Analysis manually halted by user."}
             )
             return True
         return False
-    
-    async def analyze_document(self, db: Session, document_id: int, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
+
+    async def analyze_document(self, db: Session, document_id: int, tenant_id: int = None, learning_mode: bool = False, analysis_run_id: int = None) -> bool:
         """
         Performs the complete multi-pass analysis on a document.
+
+        Args:
+            db: Database session
+            document_id: ID of the document to analyze
+            tenant_id: Tenant ID for multi-tenancy filtering
+            learning_mode: Whether to use learning mode
+            analysis_run_id: Optional analysis run ID for tracking
         """
         # Check if document is already being analyzed
         if document_id in self._running_documents:
@@ -167,16 +214,20 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document_id=document_id,
                 details={"status": "already_running"}
             )
-        
+
         # Add document to running set and initialize API call counter + cost tracker
         self._running_documents.add(document_id)
         self._api_call_counter[document_id] = 0
         self._cost_tracker[document_id] = {}  # ✅ Initialize cost tracking
         self.logger.info(f"📊 Starting multi-pass analysis for document_id: {document_id}")
-        
+
         try:
-            # Get the document
-            document = crud.document.get(db=db, id=document_id)
+            # Get the document - use tenant_id if provided, otherwise query without it
+            if tenant_id:
+                document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+            else:
+                # Fallback: query without tenant_id filter for backwards compatibility
+                document = db.query(models.Document).filter(models.Document.id == document_id).first()
             if not document:
                 self.logger.error(f"Document {document_id} not found")
                 return False
@@ -218,40 +269,91 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             try:
                 # --- CHECK 1: Before Pass 1 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 1: Composition & Classification
                 self.logger.info(f"Document {document_id}: Starting Pass 1 - Composition & Classification")
                 # CAE-04 FIX: Update progress before each pass for smooth UI feedback
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 30, "status": "pass_1_composition"})
+                start_time = time.time()
                 composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
+                pass_1_duration = time.time() - start_time
 
                 # Save composition analysis to document
                 document.composition_analysis = composition_analysis
                 db.commit()
 
+                # SPRINT 2: Log Pass 1 usage for analytics
+                pass_1_data = self._cost_tracker.get(document_id, {}).get('pass_1_composition', {})
+                if pass_1_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_1_COMPOSITION.value,
+                        input_tokens=pass_1_data.get('input_tokens', 0),
+                        output_tokens=pass_1_data.get('output_tokens', 0),
+                        cost_usd=pass_1_data.get('cost_inr', 0) / 84,
+                        cost_inr=pass_1_data.get('cost_inr', 0),
+                        processing_time=pass_1_duration,
+                    )
+
                 # --- CHECK 2: Before Pass 2 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 2: Deep Content Segmentation
                 self.logger.info(f"Document {document_id}: Starting Pass 2 - Deep Content Segmentation")
                 # CAE-04 FIX: Update progress between passes
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 45, "status": "pass_2_segmentation"})
+                start_time = time.time()
                 segments_created = await self._pass_2_content_segmentation(
-                    db, document_id, document.raw_text, composition_analysis, analysis_run_id
+                    db, document_id, document.raw_text, composition_analysis, document.tenant_id, analysis_run_id
                 )
-                
+                pass_2_duration = time.time() - start_time
+
+                # SPRINT 2: Log Pass 2 usage for analytics
+                pass_2_data = self._cost_tracker.get(document_id, {}).get('pass_2_segmentation', {})
+                if pass_2_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_2_SEGMENTING.value,
+                        input_tokens=pass_2_data.get('input_tokens', 0),
+                        output_tokens=pass_2_data.get('output_tokens', 0),
+                        cost_usd=pass_2_data.get('cost_inr', 0) / 84,
+                        cost_inr=pass_2_data.get('cost_inr', 0),
+                        processing_time=pass_2_duration,
+                    )
+
                 # --- CHECK 3: Before Pass 3 ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Pass 3: Profile-Based Structured Extraction
                 self.logger.info(f"Document {document_id}: Starting Pass 3 - Profile-Based Structured Extraction")
                 # CAE-04 FIX: Update progress before Pass 3
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 55, "status": "pass_3_extraction"})
-                await self._pass_3_structured_extraction(db, document_id, analysis_run_id)
+                start_time = time.time()
+                await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
+                pass_3_duration = time.time() - start_time
+
+                # SPRINT 2: Log Pass 3 usage for analytics
+                pass_3_data = self._cost_tracker.get(document_id, {}).get('pass_3_extraction', {})
+                if pass_3_data:
+                    self._log_usage(
+                        db=db,
+                        tenant_id=document.tenant_id,
+                        document_id=document_id,
+                        operation=OperationType.PASS_3_EXTRACTION.value,
+                        input_tokens=pass_3_data.get('input_tokens', 0),
+                        output_tokens=pass_3_data.get('output_tokens', 0),
+                        cost_usd=pass_3_data.get('cost_inr', 0) / 84,
+                        cost_inr=pass_3_data.get('cost_inr', 0),
+                        processing_time=pass_3_duration,
+                    )
                 
                 # --- CHECK 4: Before Learning Mode ---
-                if self._check_stop_signal(db, document_id): return False
+                if self._check_stop_signal(db, document_id, document.tenant_id): return False
 
                 # Learning Mode: Feed to Business Ontology Engine
                 if learning_mode:
@@ -278,7 +380,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                     )
 
                 # Final Success State (only update if we haven't stopped)
-                final_check = crud.document.get(db=db, id=document_id)
+                final_check = crud.document.get(db=db, id=document_id, tenant_id=document.tenant_id)
                 if final_check.status != "stopped":
                     crud.document.update(
                         db=db,
@@ -298,8 +400,8 @@ class DocumentAnalysisEngine(LoggerMixin):
             except Exception as e:
                 self.logger.error(f"Error during multi-pass analysis for document {document_id}: {e}")
                 # Only set to failed if it wasn't a user stop
-                current_doc = crud.document.get(db=db, id=document_id)
-                if current_doc.status != "stopped":
+                current_doc = crud.document.get(db=db, id=document_id, tenant_id=document.tenant_id if document else tenant_id)
+                if current_doc and current_doc.status != "stopped":
                     crud.document.update(db=db, db_obj=current_doc, obj_in={"status": "analysis_failed", "error_message": str(e)})
                 return False
         finally:
@@ -324,10 +426,13 @@ class DocumentAnalysisEngine(LoggerMixin):
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
 
             cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            actual_input = input_tokens or cost_data['input_tokens']
+            actual_output = output_tokens or cost_data['output_tokens']
+
             self._cost_tracker[document_id]['pass_1_composition'] = {
                 'cost_inr': cost_data['cost_inr'],
-                'input_tokens': input_tokens or cost_data['input_tokens'],  # Use real count if available
-                'output_tokens': output_tokens or cost_data['output_tokens']
+                'input_tokens': actual_input,
+                'output_tokens': actual_output
             }
 
             cleaned_response = repair_json_response(response.text)
@@ -343,16 +448,16 @@ class DocumentAnalysisEngine(LoggerMixin):
             raise AIAnalysisException("Composition classification failed", model="gemini", details={"error": str(e)})
     
     async def _pass_2_content_segmentation(
-        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, analysis_run_id: int = None
+        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, tenant_id: int, analysis_run_id: int = None
     ) -> bool:
         """Pass 2: Creates document segments."""
         try:
             # Clean up existing segments
             self.logger.info(f"Cleaning up existing segments for document {document_id}")
-            existing_segments = crud.document_segment.get_multi_by_document(db=db, document_id=document_id)
+            existing_segments = crud.document_segment.get_multi_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             for segment in existing_segments:
-                crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id)
-            crud.document_segment.delete_by_document(db=db, document_id=document_id)
+                crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id, tenant_id=tenant_id)
+            crud.document_segment.delete_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             
             prompt = prompt_manager.get_prompt(PromptType.CONTENT_SEGMENTATION)
             full_prompt = f"{prompt}\n\nCOMPOSITION ANALYSIS:\n{json.dumps(composition_analysis, indent=2)}\n\nDOCUMENT TEXT:\n{raw_text}"
@@ -399,7 +504,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                         end_char_index=segment_info["end_char_index"],
                         document_id=document_id,
                         analysis_run_id=analysis_run_id
-                    ))
+                    ), tenant_id=tenant_id)
                 
                 self.logger.info(f"Created {len(valid_segments)} document segments")
                 return True
@@ -411,11 +516,11 @@ class DocumentAnalysisEngine(LoggerMixin):
             self.logger.error(f"Error in Pass 2: {e}")
             raise DocumentProcessingException("Content segmentation failed", document_id=document_id, details={"error": str(e)})
     
-    async def _pass_3_structured_extraction(self, db: Session, document_id: int, analysis_run_id: int = None) -> bool:
+    async def _pass_3_structured_extraction(self, db: Session, document_id: int, tenant_id: int, analysis_run_id: int = None) -> bool:
         """Pass 3: Performs structured extraction on each document segment."""
         try:
             run_service = AnalysisRunService() if analysis_run_id else None
-            segments = crud.document_segment.get_by_document(db=db, document_id=document_id)
+            segments = crud.document_segment.get_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
             
             if not segments:
                 self.logger.warning(f"No segments found for document {document_id}")
@@ -423,7 +528,13 @@ class DocumentAnalysisEngine(LoggerMixin):
             
             self.logger.info(f"🔍 PASS 3: Starting structured extraction - {len(segments)} segments")
             base_prompt = prompt_manager.get_prompt(PromptType.STRUCTURED_EXTRACTION)
-            document = crud.document.get(db=db, id=document_id)
+
+            # Get document - get tenant_id from segments if available
+            tenant_id = segments[0].tenant_id if segments else None
+            if tenant_id:
+                document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+            else:
+                document = db.query(models.Document).filter(models.Document.id == document_id).first()
 
             # ✅ SPRINT 1 PHASE 2: Initialize Pass 3 cost tracking
             pass_3_cost_inr = 0
@@ -432,7 +543,7 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             for i, segment in enumerate(segments):
                 # --- CRITICAL: Check stop signal inside the loop ---
-                if self._check_stop_signal(db, document_id): 
+                if self._check_stop_signal(db, document_id, document.tenant_id if document else tenant_id):
                     return False
                 
                 # --- Rate Limit Throttle (Fix for 429 Error) ---
@@ -501,7 +612,7 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                             document_id=document_id,
                             structured_data=structured_data,
                             status=AnalysisResultStatus.SUCCESS
-                        ))
+                        ), tenant_id=tenant_id)
                         segment.status = SegmentStatus.COMPLETED
                     else:
                         segment.status = SegmentStatus.FAILED

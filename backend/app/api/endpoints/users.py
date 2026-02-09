@@ -185,8 +185,8 @@ def update_user_roles(
         f"by admin {current_user.email}: {roles_update.roles}"
     )
 
-    # Get target user
-    target_user = crud.user.get(db, id=user_id)
+    # Get target user (use tenant_id for multi-tenancy)
+    target_user = crud.user.get(db, id=user_id, tenant_id=tenant_id)
     if not target_user:
         logger_instance.warning(f"User {user_id} not found for role update")
         raise HTTPException(
@@ -262,8 +262,8 @@ def delete_user_from_tenant(
         f"Deleting user {user_id} from tenant {tenant_id} by admin {current_user.email}"
     )
 
-    # Get target user
-    target_user = crud.user.get(db, id=user_id)
+    # Get target user (use tenant_id for multi-tenancy)
+    target_user = crud.user.get(db, id=user_id, tenant_id=tenant_id)
     if not target_user:
         logger_instance.warning(f"User {user_id} not found for deletion")
         raise HTTPException(
@@ -414,8 +414,8 @@ def update_user_status(
         f"by admin {current_user.email}"
     )
 
-    # Get target user
-    target_user = crud.user.get(db, id=user_id)
+    # Get target user (use tenant_id for multi-tenancy)
+    target_user = crud.user.get(db, id=user_id, tenant_id=tenant_id)
     if not target_user:
         logger_instance.warning(f"User {user_id} not found for status update")
         raise HTTPException(

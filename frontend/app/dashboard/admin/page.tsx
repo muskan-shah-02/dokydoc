@@ -12,9 +12,9 @@
 "use client";
 
 import { AppLayout } from "@/components/layout/AppLayout";
-import { useAuth } from "@/contexts/AuthContext";
+import { useAuth, Permission } from "@/contexts/AuthContext";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Users,
@@ -28,21 +28,56 @@ import {
   CheckCircle2,
   Clock,
   TrendingUp,
+  UserPlus,
+  Receipt,
 } from "lucide-react";
 
 export default function AdminDashboardPage() {
-  const { user, tenant, isCXO } = useAuth();
+  const { user, tenant, isCXO, isAdmin, hasPermission, isLoading, getPrimaryDashboardUrl } = useAuth();
   const router = useRouter();
+  const [permissionChecked, setPermissionChecked] = useState(false);
 
-  // Redirect non-admin users
+  // Check if user has admin dashboard permission (CXO or Admin role)
+  const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
+
+  // Check permission after auth is loaded
   useEffect(() => {
-    if (user && !isCXO()) {
-      router.push("/dashboard");
+    if (!isLoading && user && !permissionChecked) {
+      setPermissionChecked(true);
+      if (user.roles && user.roles.length > 0 && !canAccessAdminDashboard) {
+        const primaryUrl = getPrimaryDashboardUrl();
+        if (primaryUrl !== "/dashboard/admin") {
+          router.replace(primaryUrl);
+        }
+      }
     }
-  }, [user, isCXO, router]);
+  }, [user, isLoading, canAccessAdminDashboard, router, permissionChecked, getPrimaryDashboardUrl]);
 
-  if (!isCXO()) {
-    return null; // Will redirect
+  if (isLoading) {
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-96">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Loading Admin Dashboard...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
+  }
+
+  if (!canAccessAdminDashboard) {
+    // Show loading while redirect happens
+    return (
+      <AppLayout>
+        <div className="flex items-center justify-center h-96">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
+            <p className="text-gray-600">Redirecting...</p>
+          </div>
+        </div>
+      </AppLayout>
+    );
   }
 
   return (
@@ -64,7 +99,7 @@ export default function AdminDashboardPage() {
             max={tenant?.max_users || 10}
             icon={<Users className="h-5 w-5" />}
             color="blue"
-            href="/users"
+            href="/settings/user_management"
           />
           <MetricCard
             label="Documents"
@@ -72,14 +107,14 @@ export default function AdminDashboardPage() {
             max={tenant?.max_documents || 100}
             icon={<FileText className="h-5 w-5" />}
             color="green"
-            href="/documents"
+            href="/dashboard/documents"
           />
           <MetricCard
             label="Monthly Cost"
             value="$0"
             icon={<DollarSign className="h-5 w-5" />}
             color="orange"
-            href="/billing"
+            href="/settings/billing"
           />
           <MetricCard
             label="Active Tasks"
@@ -96,7 +131,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Organization</h2>
-              <Link href="/settings" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/settings/organization" className="text-sm text-blue-600 hover:text-blue-700">
                 Manage
               </Link>
             </div>
@@ -122,7 +157,7 @@ export default function AdminDashboardPage() {
           <div className="rounded-lg border bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900">Billing Overview</h2>
-              <Link href="/billing" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link href="/settings/billing" className="text-sm text-blue-600 hover:text-blue-700">
                 View Details
               </Link>
             </div>
@@ -186,17 +221,17 @@ export default function AdminDashboardPage() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <ActionLink
-                href="/users"
+                href="/settings/user_management"
                 icon={<Users className="h-5 w-5" />}
                 label="Manage Users"
               />
               <ActionLink
-                href="/billing"
+                href="/settings/billing"
                 icon={<CreditCard className="h-5 w-5" />}
                 label="View Billing"
               />
               <ActionLink
-                href="/analysis"
+                href="/dashboard/validation-panel"
                 icon={<BarChart3 className="h-5 w-5" />}
                 label="Analytics"
               />

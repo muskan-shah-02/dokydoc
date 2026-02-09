@@ -5,11 +5,12 @@ from enum import Enum
 
 # Define the available roles using an Enum for consistency and validation
 class Role(str, Enum):
-    ADMIN = "Admin"
-    CXO = "CXO"
-    BA = "BA"
-    DEVELOPER = "Developer"
-    PRODUCT_MANAGER = "Product Manager"
+    CXO = "CXO"  # Tenant Owner - "God Mode" access to everything
+    ADMIN = "Admin"  # Operations manager - Users, Billing, Org settings (no code/docs)
+    BA = "BA"  # Business Analyst - Documents, Analysis
+    DEVELOPER = "Developer"  # Technical execution - Code, Tasks, Validation
+    PRODUCT_MANAGER = "Product Manager"  # Product features - limited access
+    AUDITOR = "Auditor"  # Compliance & audit - Read-only, compliance focus
 
 # --- Base Schema ---
 # Shared properties that are common to other schemas

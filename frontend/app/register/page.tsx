@@ -80,7 +80,7 @@ const TIERS = [
 
 export default function RegisterPage() {
   const router = useRouter();
-  const { login } = useAuth();
+  const { setAuthFromResponse } = useAuth();
 
   // Form state
   const [step, setStep] = useState(1);
@@ -212,10 +212,8 @@ export default function RegisterPage() {
         admin_password: adminPassword,
       });
 
-      // Store token and login
-      localStorage.setItem("accessToken", response.access_token);
-      localStorage.setItem("user", JSON.stringify(response.user));
-      localStorage.setItem("tenant", JSON.stringify(response.tenant));
+      // Set auth state from registration response
+      setAuthFromResponse(response.user, response.tenant, response.access_token);
 
       // Redirect to dashboard
       router.push("/dashboard");

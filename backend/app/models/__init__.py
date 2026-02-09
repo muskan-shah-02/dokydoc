@@ -13,4 +13,6 @@ from .initiative import Initiative
 from .initiative_asset import InitiativeAsset
 from .tenant_billing import TenantBilling
 from .tenant import Tenant
+from .task import Task, TaskComment, TaskStatus, TaskPriority
+from .usage_log import UsageLog, FeatureType, OperationType
 from .repository import Repository  # SPRINT 3: Code Analysis Engine

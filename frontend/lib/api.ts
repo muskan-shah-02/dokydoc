@@ -26,7 +26,7 @@ export class ApiClient {
   /**
    * Get authorization header with token
    */
-  private getAuthHeaders(): HeadersInit {
+  private getAuthHeaders(): Record<string, string> {
     const token = localStorage.getItem('accessToken');
 
     // Check if token is expired
@@ -211,6 +211,8 @@ export interface Tenant {
   billing_type: string;
   max_users: number;
   max_documents: number;
+  monthly_limit_inr?: number;
+  balance_inr?: number;
   settings: Record<string, any>;
   created_at: string;
 }

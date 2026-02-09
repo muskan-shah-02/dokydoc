@@ -16,6 +16,15 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import { useRouter } from 'next/navigation';
 import { api, User, Tenant, ApiError } from '@/lib/api';
 
+// Role enum matching backend
+export enum Role {
+  CXO = 'CXO',
+  ADMIN = 'Admin',
+  BA = 'BA',
+  DEVELOPER = 'Developer',
+  PRODUCT_MANAGER = 'Product Manager',
+}
+
 // Permission enum matching backend
 export enum Permission {
   DOCUMENT_READ = 'document:read',
@@ -43,7 +52,25 @@ export enum Permission {
   USER_DELETE = 'user:delete',
   TENANT_VIEW = 'tenant:view',
   TENANT_MANAGE = 'tenant:manage',
+  // Dashboard Permissions
+  DASHBOARD_DEVELOPER = 'dashboard:developer',
+  DASHBOARD_BA = 'dashboard:ba',
+  DASHBOARD_CXO = 'dashboard:cxo',
+  DASHBOARD_ADMIN = 'dashboard:admin',
+  DASHBOARD_PM = 'dashboard:pm',
 }
+
+// Role priority for determining primary dashboard
+const ROLE_PRIORITY: Role[] = [Role.CXO, Role.ADMIN, Role.DEVELOPER, Role.BA, Role.PRODUCT_MANAGER];
+
+// Role to dashboard URL mapping
+export const ROLE_DASHBOARD_MAP: Record<Role, string> = {
+  [Role.CXO]: '/dashboard/cxo',
+  [Role.ADMIN]: '/dashboard/admin',
+  [Role.DEVELOPER]: '/dashboard/developer',
+  [Role.BA]: '/dashboard/ba',
+  [Role.PRODUCT_MANAGER]: '/dashboard/developer', // PM uses developer dashboard
+};
 
 interface AuthContextType {
   // State
@@ -56,12 +83,22 @@ interface AuthContextType {
   // Actions
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
+  setAuthFromResponse: (user: User, tenant: Tenant, accessToken: string) => void;
 
   // Permission checking
   hasPermission: (permission: Permission | string) => boolean;
   hasAnyPermission: (permissions: (Permission | string)[]) => boolean;
   hasAllPermissions: (permissions: (Permission | string)[]) => boolean;
+
+  // Role checking
   isCXO: () => boolean;
+  isAdmin: () => boolean;
+  isDeveloper: () => boolean;
+  isBA: () => boolean;
+  hasRole: (role: Role | string) => boolean;
+  getPrimaryRole: () => Role | null;
+  getPrimaryDashboardUrl: () => string;
+  getAvailableDashboards: () => { role: Role; url: string; label: string }[];
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -85,8 +122,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const response = await api.get<{ permissions: string[] }>('/users/me/permissions');
-      setPermissions(response.permissions || []);
+      // Backend returns List[str] directly, not wrapped in object
+      const response = await api.get<string[]>('/users/me/permissions');
+      setPermissions(response || []);
     } catch (error) {
       console.error('Failed to load permissions:', error);
       setPermissions([]);
@@ -175,6 +213,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
+   * Set auth state from registration response
+   * Used after successful tenant registration to initialize auth without re-login
+   */
+  const setAuthFromResponse = (newUser: User, newTenant: Tenant, accessToken: string) => {
+    // Store in localStorage
+    localStorage.setItem('accessToken', accessToken);
+    localStorage.setItem('user', JSON.stringify(newUser));
+    localStorage.setItem('tenant', JSON.stringify(newTenant));
+
+    // Update state
+    setUser(newUser);
+    setTenant(newTenant);
+    // Permissions will be loaded by the useEffect that watches user changes
+  };
+
+  /**
    * Check if user has a specific permission
    */
   const hasPermission = (permission: Permission | string): boolean => {
@@ -199,10 +253,85 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
-   * Check if user is a CXO (tenant admin)
+   * Check if user has a specific role
    */
-  const isCXO = (): boolean => {
-    return user?.roles.includes('CXO') || false;
+  const hasRole = (role: Role | string): boolean => {
+    if (!user?.roles) return false;
+    return user.roles.includes(role);
+  };
+
+  /**
+   * Check if user is a CXO (tenant owner - "God Mode")
+   */
+  const isCXO = (): boolean => hasRole(Role.CXO);
+
+  /**
+   * Check if user is an Admin (operations manager)
+   */
+  const isAdmin = (): boolean => hasRole(Role.ADMIN);
+
+  /**
+   * Check if user is a Developer
+   */
+  const isDeveloper = (): boolean => hasRole(Role.DEVELOPER);
+
+  /**
+   * Check if user is a Business Analyst
+   */
+  const isBA = (): boolean => hasRole(Role.BA);
+
+  /**
+   * Get user's primary role (highest priority)
+   * Used to determine default dashboard
+   */
+  const getPrimaryRole = (): Role | null => {
+    if (!user?.roles) return null;
+    for (const role of ROLE_PRIORITY) {
+      if (user.roles.includes(role)) {
+        return role;
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Get the URL for the user's primary dashboard
+   */
+  const getPrimaryDashboardUrl = (): string => {
+    const primaryRole = getPrimaryRole();
+    if (primaryRole && ROLE_DASHBOARD_MAP[primaryRole]) {
+      return ROLE_DASHBOARD_MAP[primaryRole];
+    }
+    return '/dashboard/developer'; // Default fallback
+  };
+
+  /**
+   * Get list of all dashboards the user can access
+   * Used for the Role Switcher component
+   */
+  const getAvailableDashboards = (): { role: Role; url: string; label: string }[] => {
+    if (!user?.roles) return [];
+
+    const dashboards: { role: Role; url: string; label: string }[] = [];
+    const roleLabels: Record<Role, string> = {
+      [Role.CXO]: 'Executive',
+      [Role.ADMIN]: 'Admin',
+      [Role.DEVELOPER]: 'Developer',
+      [Role.BA]: 'Analyst',
+      [Role.PRODUCT_MANAGER]: 'Product Manager',
+    };
+
+    for (const role of ROLE_PRIORITY) {
+      if (user.roles.includes(role)) {
+        dashboards.push({
+          role,
+          url: ROLE_DASHBOARD_MAP[role],
+          label: roleLabels[role],
+        });
+      }
+    }
+
+    return dashboards;
   };
 
   const value: AuthContextType = {
@@ -213,10 +342,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated,
     login,
     logout,
+    setAuthFromResponse,
     hasPermission,
     hasAnyPermission,
     hasAllPermissions,
     isCXO,
+    isAdmin,
+    isDeveloper,
+    isBA,
+    hasRole,
+    getPrimaryRole,
+    getPrimaryDashboardUrl,
+    getAvailableDashboards,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

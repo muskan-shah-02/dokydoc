@@ -14,17 +14,14 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { api } from "@/lib/api";
 import {
   Building2,
   Users,
   CreditCard,
   Settings as SettingsIcon,
-  Save,
-  CheckCircle2,
   ArrowLeft,
+  Lock,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
@@ -33,12 +30,8 @@ export default function OrganizationSettingsPage() {
   const router = useRouter();
   const { tenant, isCXO } = useAuth();
   
-  // State
-  const [name, setName] = useState(tenant?.name || "");
+  // State - Organization name is READ-ONLY per FR-06
   const [subdomain, setSubdomain] = useState(tenant?.subdomain || "");
-  const [isLoading, setIsLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
-  const [error, setError] = useState("");
 
   // Redirect if not CXO
   useEffect(() => {
@@ -49,26 +42,9 @@ export default function OrganizationSettingsPage() {
 
   useEffect(() => {
     if (tenant) {
-      setName(tenant.name);
       setSubdomain(tenant.subdomain);
     }
   }, [tenant]);
-
-  const handleSave = async () => {
-    setIsLoading(true);
-    setSuccess(false);
-    setError("");
-
-    try {
-      await api.put("/tenants/me/", { name });
-      setSuccess(true);
-      setTimeout(() => setSuccess(false), 3000);
-    } catch (err: any) {
-      setError(err.detail || "Failed to update organization settings");
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   if (!isCXO()) {
     return null;
@@ -154,14 +130,19 @@ export default function OrganizationSettingsPage() {
             <div className="space-y-4">
               <div>
                 <Label htmlFor="orgName">Organization Name</Label>
-                <Input
-                  id="orgName"
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="My Company"
-                  className="mt-2"
-                />
+                <div className="mt-2 flex items-center space-x-2">
+                  <Input
+                    id="orgName"
+                    type="text"
+                    value={tenant?.name || ""}
+                    disabled
+                    className="flex-1 bg-gray-50"
+                  />
+                  <Lock className="h-4 w-4 text-gray-400" />
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  Organization name cannot be changed. Contact support if needed.
+                </p>
               </div>
 
               <div>
@@ -172,7 +153,7 @@ export default function OrganizationSettingsPage() {
                     type="text"
                     value={subdomain}
                     disabled
-                    className="flex-1"
+                    className="flex-1 bg-gray-50"
                   />
                   <span className="text-sm text-gray-500">.dokydoc.com</span>
                 </div>
@@ -188,32 +169,15 @@ export default function OrganizationSettingsPage() {
                   type="text"
                   value={tenant?.billing_type || "prepaid"}
                   disabled
-                  className="mt-2 capitalize"
+                  className="mt-2 capitalize bg-gray-50"
                 />
               </div>
             </div>
 
-            {error && (
-              <div className="rounded-md bg-red-50 p-3">
-                <p className="text-sm text-red-800">{error}</p>
-              </div>
-            )}
-
-            {success && (
-              <div className="flex items-center space-x-2 rounded-md bg-green-50 p-3">
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
-                <p className="text-sm text-green-800">Settings saved successfully!</p>
-              </div>
-            )}
-
-            <div className="flex justify-end">
-              <Button
-                onClick={handleSave}
-                disabled={isLoading || !name}
-              >
-                <Save className="mr-2 h-4 w-4" />
-                {isLoading ? "Saving..." : "Save Changes"}
-              </Button>
+            <div className="rounded-md bg-blue-50 p-3">
+              <p className="text-sm text-blue-800">
+                Organization settings are read-only. To make changes, please contact your account manager or support.
+              </p>
             </div>
           </div>
         </div>

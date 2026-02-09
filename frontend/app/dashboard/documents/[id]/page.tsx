@@ -2,11 +2,11 @@
   frontend/app/dashboard/documents/[id]/page.tsx
   -----------------------------------------------
   Status: FINAL MASTER
-  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal
+  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal + Billing Notifications
 */
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -57,6 +57,10 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DocumentAnalysisView } from "@/components/analysis/DocumentAnalysisView";
+import { useBillingNotification } from "@/components/BillingToast";
+import { api } from "@/lib/api";
+import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
+import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
 
 // --- 1. Types ---
 
@@ -72,6 +76,9 @@ interface Document {
   progress: number | null;
   file_size_kb?: number | null;
   error_message?: string | null;
+  ai_cost_inr?: number | null;
+  token_count_input?: number | null;
+  token_count_output?: number | null;
 }
 
 interface DocumentSegment {
@@ -830,6 +837,9 @@ export default function DocumentDetailPage() {
   const [segments, setSegments] = useState<AnalyzedSegment[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
+  const notifiedProcessingRef = useRef(false);
+  const previousStatusRef = useRef<string | null>(null);
+  const billingNotification = useBillingNotification();
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -864,6 +874,7 @@ export default function DocumentDetailPage() {
     fetchFullAnalysis();
   }, [fetchFullAnalysis]);
 
+  // Polling with billing notifications
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isLive && documentId) {
@@ -876,20 +887,61 @@ export default function DocumentDetailPage() {
           );
           if (res.ok) {
             const statusData = await res.json();
+            const newStatus = statusData.status;
+            const prevStatus = previousStatusRef.current;
+
+            // Show "Processing Started" notification when entering AI phases
+            const aiStates = ["analyzing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"];
+            if (aiStates.includes(newStatus) && !notifiedProcessingRef.current) {
+              notifiedProcessingRef.current = true;
+              const balance = await billingNotification.refreshBalance();
+              if (balance !== null) {
+                billingNotification.showProcessingStarted(balance);
+              }
+            }
+
             setDoc((prev) =>
               prev
                 ? {
                     ...prev,
-                    status: statusData.status,
+                    status: newStatus,
                     progress: statusData.progress,
                     error_message: statusData.error_message,
                   }
                 : null
             );
-            if (!ACTIVE_STATES.includes(statusData.status)) {
+
+            // Check if processing just completed
+            if (!ACTIVE_STATES.includes(newStatus)) {
               setIsLive(false);
+
+              // Show completion or error notification
+              if (newStatus === "completed") {
+                try {
+                  // Fetch both cost and full document data for tokens
+                  const [costData, docData, newBalance] = await Promise.all([
+                    api.get<{ ai_cost_inr: number }>(`/billing/documents/${documentId}/cost`),
+                    api.get<Document>(`/documents/${documentId}`),
+                    billingNotification.refreshBalance(),
+                  ]);
+                  const cost = costData?.ai_cost_inr || 0;
+                  const tokens = docData?.token_count_input && docData?.token_count_output
+                    ? { input: docData.token_count_input, output: docData.token_count_output }
+                    : undefined;
+                  billingNotification.showProcessingComplete(cost, newBalance || 0, tokens);
+                } catch (err) {
+                  console.error("Failed to fetch document cost:", err);
+                }
+              } else if (newStatus.includes("failed")) {
+                billingNotification.showError(statusData.error_message || "Document processing failed");
+              }
+
+              // Reset notification flag for next run
+              notifiedProcessingRef.current = false;
               fetchFullAnalysis();
             }
+
+            previousStatusRef.current = newStatus;
           }
         } catch (e) {
           console.error(e);
@@ -897,11 +949,15 @@ export default function DocumentDetailPage() {
       }, 3000);
     }
     return () => clearInterval(interval);
-  }, [isLive, documentId, fetchFullAnalysis]);
+  }, [isLive, documentId, fetchFullAnalysis, billingNotification]);
 
   const handleRunAnalysis = async () => {
     if (!documentId) return;
     const token = localStorage.getItem("accessToken");
+
+    // Reset notification flag when starting new analysis
+    notifiedProcessingRef.current = false;
+
     setIsLive(true);
     setDoc((prev) =>
       prev ? { ...prev, status: "processing", progress: 0 } : null
@@ -983,19 +1039,25 @@ export default function DocumentDetailPage() {
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
 
-      <Tabs defaultValue="executive" className="space-y-6">
+      <Tabs defaultValue="insights" className="space-y-6">
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
           <TabsTrigger
-            value="executive"
+            value="insights"
             className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6"
           >
-            <LayoutDashboard className="w-4 h-4 mr-2" /> Executive Summary
+            <Sparkles className="w-4 h-4 mr-2" /> Insights
+          </TabsTrigger>
+          <TabsTrigger
+            value="smart"
+            className="data-[state=active]:bg-gray-100 h-10 px-6"
+          >
+            <BrainCircuit className="w-4 h-4 mr-2" /> Detailed View
           </TabsTrigger>
           <TabsTrigger
             value="technical"
             className="data-[state=active]:bg-gray-100 h-10 px-6"
           >
-            <Database className="w-4 h-4 mr-2" /> Technical Details
+            <Database className="w-4 h-4 mr-2" /> Technical
           </TabsTrigger>
           <TabsTrigger
             value="raw"
@@ -1005,12 +1067,14 @@ export default function DocumentDetailPage() {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="executive">
-          <VitalSignsBar
-            segments={segments}
-            composition={doc.composition_analysis}
-          />
-          <ExecutiveReport segments={segments} />
+        {/* Dynamic Analysis View - Adapts to Document Type & User Role */}
+        <TabsContent value="insights">
+          <DynamicAnalysisView segments={segments} document={doc} />
+        </TabsContent>
+
+        {/* Smart Analysis View - Detailed Structured View */}
+        <TabsContent value="smart">
+          <SmartAnalysisView segments={segments} document={doc} />
         </TabsContent>
 
         <TabsContent value="technical">
