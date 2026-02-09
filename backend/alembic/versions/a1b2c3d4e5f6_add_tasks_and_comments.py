@@ -20,6 +20,13 @@ depends_on = None
 
 def upgrade():
     """Create tasks and task_comments tables."""
+    # Guard against tables already existing
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tasks')"
+    ))
+    if result.scalar():
+        return
 
     # Create TaskStatus enum
     task_status_enum = postgresql.ENUM(

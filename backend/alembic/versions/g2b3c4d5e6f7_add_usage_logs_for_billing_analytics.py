@@ -25,6 +25,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create usage_logs table for billing analytics."""
+    # Guard against table already existing (e.g. from a previous partial migration)
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'usage_logs')"
+    ))
+    if result.scalar():
+        return
 
     op.create_table(
         'usage_logs',

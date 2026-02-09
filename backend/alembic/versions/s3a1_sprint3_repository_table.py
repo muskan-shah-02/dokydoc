@@ -19,6 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Guard against table already existing
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'repositories')"
+    ))
+    if result.scalar():
+        return
+
     # Create repositories table
     op.create_table(
         'repositories',
