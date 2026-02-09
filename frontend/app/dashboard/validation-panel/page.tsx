@@ -221,11 +221,14 @@ export default function ValidationPanelPage() {
         throw new Error(errData.detail || "Failed to start validation scan.");
       }
 
-      // BUG-01 FIX: Poll for fresh mismatches instead of single 3s timeout.
-      // Scans may take 10-30s depending on document count and AI latency.
+      // BUG-01 FIX: Poll for fresh mismatches after scan completes.
+      // Capture the count BEFORE the scan to detect changes (avoids stale closure).
+      // Scans take 10-30s+ depending on document count and Gemini API latency.
       setActiveTab("results");
+      const initialCount = mismatches.length;
       const pollForResults = async () => {
-        const maxAttempts = 15;
+        const maxAttempts = 15;  // up to 45 seconds
+        const minAttempts = 3;   // wait at least 9 seconds before early exit
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
@@ -236,8 +239,8 @@ export default function ValidationPanelPage() {
             if (mismatchRes.ok) {
               const freshMismatches: Mismatch[] = await mismatchRes.json();
               setMismatches(freshMismatches);
-              // Stop once results change or we've waited long enough
-              if (freshMismatches.length !== mismatches.length || attempt >= 2) {
+              // Only stop early if results changed AND we've waited the minimum time
+              if (freshMismatches.length !== initialCount && attempt >= minAttempts) {
                 break;
               }
             }
@@ -245,6 +248,7 @@ export default function ValidationPanelPage() {
             // Silently retry on network errors
           }
         }
+        // Final full refresh to sync documents + mismatches
         await fetchData();
         setIsScanning(false);
       };

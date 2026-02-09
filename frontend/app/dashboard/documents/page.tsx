@@ -123,6 +123,8 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
       formData.append("version", version);
       formData.append("document_type", documentType);
 
+      // Show immediate visual feedback with a minimum progress value
+      setUploadProgress(5);
       const docData = await new Promise<any>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "http://localhost:8000/api/v1/documents/upload");
@@ -130,12 +132,14 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
 
         xhr.upload.onprogress = (event) => {
           if (event.lengthComputable) {
-            const pct = Math.round((event.loaded / event.total) * 100);
+            // Ensure progress never appears to go backwards and always starts visible
+            const pct = Math.max(5, Math.round((event.loaded / event.total) * 100));
             setUploadProgress(pct);
           }
         };
 
         xhr.onload = () => {
+          setUploadProgress(100);
           if (xhr.status >= 200 && xhr.status < 300) {
             try {
               resolve(JSON.parse(xhr.responseText));
