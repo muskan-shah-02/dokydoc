@@ -22,6 +22,9 @@ class PromptType(Enum):
     REPO_FILE_ANALYSIS = "repo_file_analysis"
     CODE_ENTITY_EXTRACTION = "code_entity_extraction"
     SOURCE_RECONCILIATION = "source_reconciliation"
+    # SPRINT 3 Day 5: Enhanced Semantic Analysis (AI-02)
+    ENHANCED_SEMANTIC_ANALYSIS = "enhanced_semantic_analysis"
+    DELTA_ANALYSIS = "delta_analysis"
 
 class PromptManager(LoggerMixin):
     """
@@ -736,8 +739,337 @@ CONCEPTS TO RECONCILE:
                     },
                     "required": ["bridges", "unimplemented", "undocumented", "contradictions"]
                 }
+            },
+
+            # ============================================================
+            # SPRINT 3 Day 5: Enhanced Semantic Code Analysis (AI-02)
+            # ============================================================
+
+            PromptType.ENHANCED_SEMANTIC_ANALYSIS.value: {
+                "version": "2.0",
+                "description": "Enhanced code analysis with business rules, API contracts, data models, and security pattern extraction",
+                "prompt": """
+You are an expert software architect performing deep semantic analysis of a source file.
+
+CONTEXT:
+- Repository: {repo_name}
+- File path: {file_path}
+- Language: {language}
+
+{language_specific_guidance}
+
+TASK:
+Perform a comprehensive analysis extracting ALL of the following:
+
+1. **BUSINESS RULES** — Logic constraints, validation rules, thresholds, conditional workflows
+   - Look for: if/else branches with business meaning, constants with domain significance,
+     validation functions, authorization checks, state machines, workflow transitions
+   - Example: "Orders over $500 require manager approval" → found in `if order.total > 500`
+
+2. **API CONTRACTS** — Endpoints, request/response schemas, authentication requirements
+   - Look for: route decorators, handler functions, request body schemas, response models,
+     status codes, middleware, rate limits, versioning
+   - Example: "POST /api/v1/orders requires auth, accepts OrderCreate, returns 201"
+
+3. **DATA MODEL RELATIONSHIPS** — How data entities relate to each other
+   - Look for: foreign keys, relationships, joins, nested schemas, cascade rules,
+     many-to-many through tables, inheritance hierarchies
+   - Example: "User has-many Orders, Order belongs-to User via user_id FK"
+
+4. **SECURITY PATTERNS** — Authentication, authorization, input validation, encryption
+   - Look for: auth decorators/middleware, role checks, RBAC, token validation,
+     input sanitization, SQL injection prevention, CORS config, secrets management
+   - Example: "JWT Bearer auth required on all /api endpoints, RBAC with 4 roles"
+
+5. **STANDARD ANALYSIS** — Components, dependencies, patterns (as before)
+
+STRICT RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "summary": "2-3 sentences describing the file's purpose and role",
+    "structured_analysis": {{
+        "language_info": {{
+            "primary_language": "Detected language",
+            "framework": "Framework if any",
+            "file_type": "Service|Controller|Model|Component|Utility|Config|Test|Migration|Middleware"
+        }},
+        "business_rules": [
+            {{
+                "rule_id": "BR-001",
+                "description": "Human-readable description of the business rule",
+                "code_location": "function name or line reference where this rule lives",
+                "rule_type": "validation|authorization|workflow|constraint|calculation|threshold",
+                "parameters": {{"key": "value"}},
+                "confidence": 0.9
+            }}
+        ],
+        "api_contracts": [
+            {{
+                "method": "GET|POST|PUT|DELETE|PATCH",
+                "path": "/api/endpoint/path",
+                "description": "What this endpoint does",
+                "request_schema": "Schema name or inline description of expected input",
+                "response_schema": "Schema name or inline description of output",
+                "auth_required": true,
+                "status_codes": [200, 400, 404],
+                "rate_limited": false
+            }}
+        ],
+        "data_model_relationships": [
+            {{
+                "source_entity": "Entity name (e.g., User)",
+                "target_entity": "Related entity (e.g., Order)",
+                "relationship_type": "has_many|belongs_to|has_one|many_to_many",
+                "foreign_key": "column name if applicable",
+                "cascade": "delete|set_null|restrict|none",
+                "description": "Brief description of the relationship"
+            }}
+        ],
+        "security_patterns": [
+            {{
+                "pattern_type": "authentication|authorization|input_validation|encryption|secrets|cors|csrf|rate_limiting",
+                "description": "What security measure is implemented",
+                "implementation": "How it's implemented (e.g., 'JWT Bearer via Depends(get_current_user)')",
+                "coverage": "Which endpoints/functions are protected",
+                "gaps": "Any noted security gaps or missing protections"
+            }}
+        ],
+        "components": [
+            {{
+                "name": "Element name",
+                "type": "Function|Class|Method|Component|Route|Hook|Middleware",
+                "purpose": "What it does",
+                "details": "Parameters, return type, key logic"
+            }}
+        ],
+        "dependencies": ["List of imports/dependencies"],
+        "exports": ["What this file exports"],
+        "patterns_and_architecture": {{
+            "design_patterns": ["Patterns observed"],
+            "architectural_style": "Overall style",
+            "key_concepts": ["Programming concepts used"]
+        }},
+        "quality_assessment": "Brief quality assessment"
+    }}
+}}
+
+CRITICAL:
+- For business_rules: Extract ACTUAL rules from code logic, not just comments
+- For api_contracts: Include ALL endpoints with their full contract
+- For data_model_relationships: Include FK constraints and cascade behavior
+- For security_patterns: Note GAPS as well as implemented patterns
+- If a section is not applicable to this file type, return an empty array []
+
+CODE TO ANALYZE:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "structured_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "language_info": {"type": "object"},
+                                "business_rules": {"type": "array"},
+                                "api_contracts": {"type": "array"},
+                                "data_model_relationships": {"type": "array"},
+                                "security_patterns": {"type": "array"},
+                                "components": {"type": "array"},
+                                "dependencies": {"type": "array"},
+                                "exports": {"type": "array"},
+                                "patterns_and_architecture": {"type": "object"},
+                                "quality_assessment": {"type": "string"}
+                            }
+                        }
+                    },
+                    "required": ["summary", "structured_analysis"]
+                }
+            },
+
+            # ============================================================
+            # SPRINT 3 Day 5: Delta Analysis (AI-02)
+            # ============================================================
+
+            PromptType.DELTA_ANALYSIS.value: {
+                "version": "1.0",
+                "description": "Compares new analysis with previous analysis to detect meaningful changes",
+                "prompt": """
+You are a software change analyst. Compare the PREVIOUS analysis of a code file with its CURRENT analysis to identify meaningful changes.
+
+CONTEXT:
+- File: {file_path}
+- This file was previously analyzed and has been re-analyzed after code changes.
+
+TASK:
+Compare the two analyses and identify:
+1. **Added** — New components, rules, endpoints, or patterns that didn't exist before
+2. **Removed** — Components, rules, endpoints, or patterns that no longer exist
+3. **Modified** — Elements that changed (different parameters, logic, contracts)
+4. **Impact** — What the changes mean for the broader system
+
+IMPORTANT:
+- Focus on MEANINGFUL changes, not cosmetic ones (renamed variables, reformatted code)
+- Flag breaking changes (removed endpoints, changed API contracts, weakened security)
+- Identify new business rules or modified business rules as HIGH priority
+
+RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "has_changes": true,
+    "change_summary": "1-2 sentence summary of what changed",
+    "changes": {{
+        "added": [
+            {{
+                "category": "business_rule|api_contract|component|security_pattern|data_model|dependency",
+                "name": "Name of what was added",
+                "description": "What was added",
+                "impact": "high|medium|low"
+            }}
+        ],
+        "removed": [
+            {{
+                "category": "business_rule|api_contract|component|security_pattern|data_model|dependency",
+                "name": "Name of what was removed",
+                "description": "What was removed",
+                "impact": "high|medium|low",
+                "breaking": true
+            }}
+        ],
+        "modified": [
+            {{
+                "category": "business_rule|api_contract|component|security_pattern|data_model|dependency",
+                "name": "Name of modified element",
+                "previous": "What it was before",
+                "current": "What it is now",
+                "impact": "high|medium|low",
+                "breaking": false
+            }}
+        ]
+    }},
+    "risk_assessment": {{
+        "overall_risk": "high|medium|low|none",
+        "breaking_changes_count": 0,
+        "requires_doc_update": false,
+        "requires_test_update": false,
+        "reasoning": "Why this risk level"
+    }}
+}}
+
+If no meaningful changes were detected, return:
+{{"has_changes": false, "change_summary": "No meaningful changes detected", "changes": {{"added": [], "removed": [], "modified": []}}, "risk_assessment": {{"overall_risk": "none", "breaking_changes_count": 0, "requires_doc_update": false, "requires_test_update": false, "reasoning": "No changes"}}}}
+
+PREVIOUS ANALYSIS:
+{previous_analysis}
+
+CURRENT ANALYSIS:
+{current_analysis}
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "has_changes": {"type": "boolean"},
+                        "change_summary": {"type": "string"},
+                        "changes": {
+                            "type": "object",
+                            "properties": {
+                                "added": {"type": "array"},
+                                "removed": {"type": "array"},
+                                "modified": {"type": "array"}
+                            }
+                        },
+                        "risk_assessment": {"type": "object"}
+                    },
+                    "required": ["has_changes", "change_summary", "changes", "risk_assessment"]
+                }
             }
         }
+
+    # ============================================================
+    # SPRINT 3 Day 5: Language-Specific Analysis Templates
+    # ============================================================
+
+    LANGUAGE_TEMPLATES = {
+        "python": """
+LANGUAGE-SPECIFIC GUIDANCE (Python / FastAPI / Django):
+- Look for FastAPI route decorators: @router.get(), @router.post(), @app.get(), etc.
+- Extract Pydantic models used as request/response schemas (BaseModel subclasses)
+- Identify SQLAlchemy models and their relationships (relationship(), ForeignKey, mapped_column)
+- Find Depends() injection patterns for auth, DB sessions, tenant isolation
+- Detect Celery task definitions (@celery_app.task) and their retry/rate-limit configs
+- Look for middleware (app.add_middleware) and exception handlers
+- Identify business rules in service methods (if/else logic with domain meaning)
+- Check for alembic migration patterns
+- Note: Python uses type hints — extract parameter types and return types
+""",
+        "javascript": """
+LANGUAGE-SPECIFIC GUIDANCE (JavaScript / TypeScript / React / Next.js):
+- Look for React component definitions (function components, class components, hooks)
+- Extract Next.js API routes (pages/api/ or app/api/ route handlers)
+- Identify useState, useEffect, useContext, useReducer and custom hooks
+- Find data fetching patterns: fetch(), axios, SWR, React Query, tRPC
+- Detect form validation (Zod, Yup, Formik, React Hook Form)
+- Look for Redux/Zustand/Jotai state management patterns
+- Extract TypeScript interfaces and type definitions as data models
+- Identify middleware in Express/Next.js (auth, CORS, rate limiting)
+- Note: Look for .tsx/.jsx for component files, .ts for services/utils
+""",
+        "java": """
+LANGUAGE-SPECIFIC GUIDANCE (Java / Spring Boot):
+- Look for @RestController, @GetMapping, @PostMapping, @RequestMapping annotations
+- Extract @Entity JPA models and their @OneToMany, @ManyToOne, @ManyToMany relationships
+- Identify @Service, @Repository, @Component Spring beans and their dependencies
+- Find @Autowired/@Inject dependency injection patterns
+- Detect Spring Security config: @PreAuthorize, @Secured, SecurityFilterChain
+- Look for @Transactional boundaries and their propagation/isolation settings
+- Extract DTO/VO classes used for request/response mapping
+- Identify @Valid/@Validated input validation with Bean Validation annotations
+- Note: Java uses annotations heavily — extract all relevant annotations
+""",
+        "go": """
+LANGUAGE-SPECIFIC GUIDANCE (Go / Golang):
+- Look for HTTP handlers: http.HandleFunc, gin.Context, echo.Context, chi.Router
+- Extract struct definitions as data models and their JSON/DB tags
+- Identify interface definitions and their implementations
+- Find middleware patterns (func(http.Handler) http.Handler)
+- Detect error handling patterns (error returns, custom error types)
+- Look for database/sql or GORM model definitions
+- Extract goroutine/channel patterns for concurrent processing
+""",
+        "typescript": """
+LANGUAGE-SPECIFIC GUIDANCE (TypeScript / Node.js):
+- Look for Express/Koa/Fastify route handlers and middleware
+- Extract TypeScript interfaces, types, and enums as data contracts
+- Identify Prisma/TypeORM/Sequelize model definitions and relations
+- Find NestJS decorators (@Controller, @Injectable, @Module) if present
+- Detect Zod/Joi/class-validator validation schemas
+- Look for generic types and utility types for API contract definitions
+- Extract tRPC router definitions if present
+"""
+    }
+
+    def get_language_guidance(self, language: str) -> str:
+        """Get language-specific analysis guidance for the enhanced prompt."""
+        if not language:
+            return ""
+        lang_lower = language.lower().strip()
+        # Match against known templates
+        for key, template in self.LANGUAGE_TEMPLATES.items():
+            if key in lang_lower:
+                return template
+        # Check common aliases
+        aliases = {
+            "py": "python", "python3": "python",
+            "js": "javascript", "jsx": "javascript", "tsx": "typescript",
+            "ts": "typescript", "node": "javascript", "react": "javascript",
+            "nextjs": "javascript", "next.js": "javascript",
+            "fastapi": "python", "django": "python", "flask": "python",
+            "spring": "java", "springboot": "java", "spring-boot": "java",
+            "golang": "go",
+        }
+        for alias, lang_key in aliases.items():
+            if alias in lang_lower:
+                return self.LANGUAGE_TEMPLATES.get(lang_key, "")
+        return ""
 
     def get_prompt(self, prompt_type: PromptType, **kwargs) -> str:
         """

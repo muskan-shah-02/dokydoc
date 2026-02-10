@@ -4,14 +4,22 @@ SPRINT 3: Code Analysis Engine — Celery Workers (TASK-01)
 Architecture:
   repo_analysis_task (orchestrator)
     └── for each file in repo:
-           ├── static_analysis_worker  (structure, dependencies, patterns)
-           └── semantic_analysis_worker (purpose, quality, domain concepts)
+           └── enhanced_analysis_worker (business rules, API contracts, data models, security + delta)
+
+SPRINT 3 Day 5 (AI-02): Enhanced with:
+  - Business rule extraction
+  - API contract extraction
+  - Data model relationship extraction
+  - Security pattern detection
+  - Language-specific analysis templates
+  - Delta analysis (compare current vs previous)
 
 The Repo Agent scans a repository's files and creates CodeComponent records
 for each, linking them back to the parent Repository via repository_id.
 """
 
 import asyncio
+import hashlib
 import json
 import httpx
 from typing import Optional
@@ -22,30 +30,48 @@ from app import crud
 from app.core.logging import logger
 
 
+def _hash_analysis(analysis: dict) -> str:
+    """Create a stable hash of structured_analysis for delta detection."""
+    if not analysis:
+        return ""
+    canonical = json.dumps(analysis, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 # ============================================================
-# STATIC ANALYSIS WORKER
+# ENHANCED ANALYSIS WORKER (SPRINT 3 Day 5 — AI-02)
 # ============================================================
 
 @celery_app.task(name="static_analysis_worker", bind=True, max_retries=2)
 def static_analysis_worker(
-    self, component_id: int, tenant_id: int, code_content: str
+    self, component_id: int, tenant_id: int, code_content: str,
+    repo_name: str = "", file_path: str = "", language: str = ""
 ):
     """
-    Worker: Runs structural / static analysis on a single file.
-    Uses the existing Gemini CODE_ANALYSIS prompt to extract components,
-    dependencies, patterns, etc.
+    Worker: Runs enhanced semantic analysis on a single file.
 
-    This is the same analysis that already existed for standalone code components,
-    but now callable as a Celery sub-task within the repository pipeline.
+    SPRINT 3 Day 5 enhancements:
+    - Uses ENHANCED_SEMANTIC_ANALYSIS prompt (business rules, API contracts,
+      data models, security patterns) when repo context is available
+    - Falls back to basic CODE_ANALYSIS for standalone components
+    - Performs delta analysis when previous analysis exists
+    - Language-specific guidance (Python/FastAPI, JS/React, Java/Spring, Go)
     """
-    logger.info(f"STATIC_WORKER started for component_id={component_id}")
+    logger.info(
+        f"ANALYSIS_WORKER started for component_id={component_id} "
+        f"file={file_path} lang={language}"
+    )
 
     db = SessionLocal()
     try:
         component = crud.code_component.get(db=db, id=component_id, tenant_id=tenant_id)
         if not component:
-            logger.error(f"Static worker: Component {component_id} not found")
+            logger.error(f"Analysis worker: Component {component_id} not found")
             return {"status": "error", "reason": "component_not_found"}
+
+        # Save previous analysis for delta comparison
+        previous_analysis = component.structured_analysis
+        previous_hash = _hash_analysis(previous_analysis)
 
         # Update status
         crud.code_component.update(
@@ -54,8 +80,9 @@ def static_analysis_worker(
 
         # Check cache first
         from app.services.cache_service import cache_service
+        cache_type = "enhanced_analysis" if repo_name else "code_analysis"
         cached = cache_service.get_cached_analysis(
-            content=code_content, analysis_type="code_analysis"
+            content=code_content, analysis_type=cache_type
         )
 
         if cached:
@@ -77,35 +104,78 @@ def static_analysis_worker(
             except Exception as billing_err:
                 logger.warning(f"Billing check failed (proceeding): {billing_err}")
 
-            # Call Gemini
+            # Call Gemini — use enhanced analysis when we have repo context
             from app.services.ai.gemini import gemini_service
             if not gemini_service:
                 raise RuntimeError("GeminiService not available")
 
-            analysis_result = asyncio.run(
-                gemini_service.call_gemini_for_code_analysis(code_content)
-            )
+            if repo_name:
+                # Enhanced analysis with business rules, API contracts, etc.
+                analysis_result = asyncio.run(
+                    gemini_service.call_gemini_for_enhanced_analysis(
+                        code_content,
+                        repo_name=repo_name,
+                        file_path=file_path,
+                        language=language
+                    )
+                )
+            else:
+                # Fallback to basic analysis for standalone components
+                analysis_result = asyncio.run(
+                    gemini_service.call_gemini_for_code_analysis(code_content)
+                )
 
             # Cache the result
             cache_service.set_cached_analysis(
                 content=code_content,
-                analysis_type="code_analysis",
+                analysis_type=cache_type,
                 result=analysis_result,
                 ttl_seconds=2592000  # 30 days
             )
 
-        # Persist results
-        crud.code_component.update(db, db_obj=component, obj_in={
-            "summary": analysis_result.get("summary"),
-            "structured_analysis": analysis_result.get("structured_analysis"),
-            "analysis_status": "completed",
-        })
+        # Delta analysis: compare with previous analysis if it exists
+        new_analysis = analysis_result.get("structured_analysis")
+        new_hash = _hash_analysis(new_analysis)
+        delta_result = None
 
-        logger.info(f"STATIC_WORKER completed for component {component_id}")
-        return {"status": "completed", "component_id": component_id}
+        if previous_analysis and previous_hash and new_hash != previous_hash:
+            logger.info(f"Analysis changed for component {component_id} — running delta analysis")
+            try:
+                delta_result = asyncio.run(
+                    gemini_service.call_gemini_for_delta_analysis(
+                        file_path=file_path or component.name,
+                        previous_analysis=previous_analysis,
+                        current_analysis=new_analysis
+                    )
+                )
+                logger.info(
+                    f"Delta analysis complete: has_changes={delta_result.get('has_changes')}, "
+                    f"risk={delta_result.get('risk_assessment', {}).get('overall_risk', 'unknown')}"
+                )
+            except Exception as delta_err:
+                logger.warning(f"Delta analysis failed (non-critical): {delta_err}")
+
+        # Persist results
+        update_data = {
+            "summary": analysis_result.get("summary"),
+            "structured_analysis": new_analysis,
+            "analysis_status": "completed",
+            "previous_analysis_hash": previous_hash if previous_analysis else None,
+        }
+        if delta_result:
+            update_data["analysis_delta"] = delta_result
+
+        crud.code_component.update(db, db_obj=component, obj_in=update_data)
+
+        logger.info(f"ANALYSIS_WORKER completed for component {component_id}")
+        return {
+            "status": "completed",
+            "component_id": component_id,
+            "has_delta": delta_result is not None and delta_result.get("has_changes", False),
+        }
 
     except Exception as e:
-        logger.error(f"STATIC_WORKER failed for component {component_id}: {e}")
+        logger.error(f"ANALYSIS_WORKER failed for component {component_id}: {e}")
         try:
             comp = crud.code_component.get(db=db, id=component_id, tenant_id=tenant_id)
             if comp:
@@ -119,7 +189,7 @@ def static_analysis_worker(
         try:
             self.retry(countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
-            logger.error(f"STATIC_WORKER permanently failed for component {component_id}")
+            logger.error(f"ANALYSIS_WORKER permanently failed for component {component_id}")
 
         return {"status": "failed", "component_id": component_id, "error": str(e)}
     finally:
@@ -138,7 +208,7 @@ def repo_analysis_task(
 ):
     """
     Orchestrator: Iterates through the file list for a repository,
-    creates CodeComponent records, and dispatches static_analysis_worker
+    creates CodeComponent records, and dispatches enhanced analysis
     for each file.
 
     Args:
@@ -181,30 +251,47 @@ def repo_analysis_task(
                     failed += 1
                     continue
 
-                # Create CodeComponent record linked to repository
-                from app.schemas.code_component import CodeComponentCreate
-                component_in = CodeComponentCreate(
-                    name=file_path.split("/")[-1],  # filename
-                    component_type="File",
-                    location=file_url,
-                    version=repo.last_analyzed_commit or "HEAD",
-                )
-                component = crud.code_component.create_with_owner(
-                    db=db, obj_in=component_in,
-                    owner_id=repo.owner_id, tenant_id=tenant_id
-                )
+                # Check if component already exists for this file (re-analysis scenario)
+                from app.models.code_component import CodeComponent
+                existing_component = db.query(CodeComponent).filter(
+                    CodeComponent.repository_id == repo_id,
+                    CodeComponent.name == file_path.split("/")[-1],
+                    CodeComponent.location == file_url,
+                    CodeComponent.tenant_id == tenant_id,
+                ).first()
 
-                # Link to repository
-                crud.code_component.update(
-                    db, db_obj=component,
-                    obj_in={"repository_id": repo_id}
-                )
+                if existing_component:
+                    # Re-analysis: reuse existing component (delta analysis will kick in)
+                    component = existing_component
+                    logger.info(f"Re-analyzing existing component {component.id} for {file_path}")
+                else:
+                    # New file: create CodeComponent record
+                    from app.schemas.code_component import CodeComponentCreate
+                    component_in = CodeComponentCreate(
+                        name=file_path.split("/")[-1],  # filename
+                        component_type="File",
+                        location=file_url,
+                        version=repo.last_analyzed_commit or "HEAD",
+                    )
+                    component = crud.code_component.create_with_owner(
+                        db=db, obj_in=component_in,
+                        owner_id=repo.owner_id, tenant_id=tenant_id
+                    )
 
-                # Dispatch static analysis (synchronous call for rate limiting)
-                # We call the worker function directly instead of .delay()
-                # to respect the 15 RPM Gemini rate limit with sequential processing
+                    # Link to repository
+                    crud.code_component.update(
+                        db, db_obj=component,
+                        obj_in={"repository_id": repo_id}
+                    )
+
+                # Run enhanced analysis with repo context + language
                 import time
-                result = static_analysis_worker(component.id, tenant_id, code_content)
+                result = static_analysis_worker(
+                    component.id, tenant_id, code_content,
+                    repo_name=repo.name,
+                    file_path=file_path,
+                    language=file_language
+                )
 
                 if result.get("status") == "completed":
                     completed += 1

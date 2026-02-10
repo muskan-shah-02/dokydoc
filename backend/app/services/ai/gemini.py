@@ -78,6 +78,120 @@ class GeminiService(LoggerMixin):
             self.logger.error(f"Error calling Gemini Vision API: {e}")
             raise
 
+    async def call_gemini_for_enhanced_analysis(
+        self, code_content: str, repo_name: str = "", file_path: str = "", language: str = ""
+    ) -> dict:
+        """
+        SPRINT 3 Day 5 (AI-02): Enhanced semantic analysis with business rules,
+        API contracts, data models, and security pattern extraction.
+        Uses language-specific guidance when available.
+        """
+        try:
+            self.logger.info(f"Enhanced analysis for {file_path} ({language})")
+
+            language_guidance = prompt_manager.get_language_guidance(language)
+
+            prompt = prompt_manager.get_prompt(
+                PromptType.ENHANCED_SEMANTIC_ANALYSIS,
+                repo_name=repo_name or "unknown",
+                file_path=file_path or "unknown",
+                language=language or "auto-detect",
+                language_specific_guidance=language_guidance
+            )
+
+            full_prompt = f"{prompt}\n{code_content}"
+
+            response = await self.generate_content(full_prompt)
+            response_text = response.text
+
+            try:
+                analysis_data = json.loads(response_text)
+                self.logger.info(f"Enhanced analysis completed for {file_path}")
+                return analysis_data
+            except json.JSONDecodeError:
+                # Try to repair JSON
+                cleaned = response_text.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.startswith("```"):
+                    cleaned = cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse enhanced analysis JSON for {file_path}: {e}")
+                    return {
+                        "summary": f"Enhanced analysis completed but response parsing failed for {file_path}",
+                        "structured_analysis": {
+                            "language_info": {"primary_language": language or "Unknown", "framework": "Unknown", "file_type": "Unknown"},
+                            "business_rules": [],
+                            "api_contracts": [],
+                            "data_model_relationships": [],
+                            "security_patterns": [],
+                            "components": [],
+                            "dependencies": [],
+                            "exports": [],
+                            "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                            "quality_assessment": "Analysis failed due to response parsing error"
+                        }
+                    }
+
+        except Exception as e:
+            self.logger.error(f"Error in enhanced analysis for {file_path}: {e}")
+            raise
+
+    async def call_gemini_for_delta_analysis(
+        self, file_path: str, previous_analysis: dict, current_analysis: dict
+    ) -> dict:
+        """
+        SPRINT 3 Day 5 (AI-02): Compares new analysis with previous analysis
+        to detect meaningful changes (added, removed, modified components).
+        """
+        try:
+            self.logger.info(f"Delta analysis for {file_path}")
+
+            prompt = prompt_manager.get_prompt(
+                PromptType.DELTA_ANALYSIS,
+                file_path=file_path,
+                previous_analysis=json.dumps(previous_analysis, indent=2),
+                current_analysis=json.dumps(current_analysis, indent=2)
+            )
+
+            response = await self.generate_content(prompt)
+            response_text = response.text
+
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError:
+                cleaned = response_text.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    self.logger.warning(f"Delta analysis JSON parse failed for {file_path}")
+                    return {
+                        "has_changes": False,
+                        "change_summary": "Delta analysis response parsing failed",
+                        "changes": {"added": [], "removed": [], "modified": []},
+                        "risk_assessment": {
+                            "overall_risk": "none",
+                            "breaking_changes_count": 0,
+                            "requires_doc_update": False,
+                            "requires_test_update": False,
+                            "reasoning": "Parse error"
+                        }
+                    }
+
+        except Exception as e:
+            self.logger.error(f"Error in delta analysis for {file_path}: {e}")
+            raise
+
     async def call_gemini_for_code_analysis(self, code_content: str) -> dict:
         """
         Analyzes ANY file's content using a universal, adaptive prompt.

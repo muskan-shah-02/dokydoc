@@ -41,6 +41,12 @@ class CodeComponent(Base):
     # Structured data from the analysis, e.g., list of functions, classes, dependencies.
     structured_analysis: Mapped[dict] = mapped_column(JSON, nullable=True)
 
+    # SPRINT 3 Day 5: Delta analysis fields
+    # Stores the diff between current and previous analysis (added/removed/modified)
+    analysis_delta: Mapped[dict] = mapped_column(JSON, nullable=True)
+    # Hash of previous structured_analysis — used to detect whether re-analysis is needed
+    previous_analysis_hash: Mapped[str] = mapped_column(String(64), nullable=True)
+
     # The status of the background analysis job.
     analysis_status: Mapped[str] = mapped_column(String, default="pending", index=True, nullable=False)
 
