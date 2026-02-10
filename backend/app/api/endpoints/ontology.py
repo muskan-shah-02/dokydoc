@@ -1,7 +1,9 @@
 """
 SPRINT 3: Business Ontology Engine API Endpoints
+SPRINT 4: Concept Mapping API (Two-Graph Architecture)
 
-Provides CRUD for concepts, relationships, and graph visualization.
+Provides CRUD for concepts, relationships, graph visualization,
+and cross-graph concept mapping between document & code layers.
 All endpoints are tenant-scoped via get_tenant_id dependency.
 """
 
@@ -17,6 +19,10 @@ from app.schemas.ontology import (
     OntologyConceptWithRelationships,
     OntologyRelationshipCreate, OntologyRelationshipUpdate, OntologyRelationshipResponse,
     OntologyGraphResponse, OntologyGraphNode, OntologyGraphEdge
+)
+from app.schemas.concept_mapping import (
+    ConceptMappingCreate, ConceptMappingUpdate, ConceptMappingResponse,
+    ConceptMappingWithConcepts,
 )
 from app.core.logging import get_logger
 
@@ -225,7 +231,7 @@ def get_graph(
     nodes = [
         OntologyGraphNode(
             id=c.id, name=c.name, concept_type=c.concept_type,
-            confidence_score=c.confidence_score
+            source_type=c.source_type, confidence_score=c.confidence_score
         ) for c in concepts
     ]
     edges = [
@@ -307,3 +313,226 @@ def trigger_synonym_detection(
 
     background_tasks.add_task(asyncio.run, _run_detection())
     return {"message": "Synonym detection started"}
+
+
+# ============================================================
+# FILTERED GRAPH ENDPOINTS (SPRINT 4 — Two-Graph UI)
+# ============================================================
+
+@router.get("/graph/document", response_model=OntologyGraphResponse)
+def get_document_graph(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get only the document-layer concepts and their relationships."""
+    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    doc_concepts = [c for c in concepts if c.source_type in ("document", "both")]
+    doc_ids = {c.id for c in doc_concepts}
+
+    relationships = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+    doc_relationships = [
+        r for r in relationships
+        if r.source_concept_id in doc_ids and r.target_concept_id in doc_ids
+    ]
+
+    nodes = [
+        OntologyGraphNode(
+            id=c.id, name=c.name, concept_type=c.concept_type,
+            source_type=c.source_type, confidence_score=c.confidence_score
+        ) for c in doc_concepts
+    ]
+    edges = [
+        OntologyGraphEdge(
+            id=r.id, source_concept_id=r.source_concept_id,
+            target_concept_id=r.target_concept_id,
+            relationship_type=r.relationship_type,
+            confidence_score=r.confidence_score
+        ) for r in doc_relationships
+    ]
+
+    return OntologyGraphResponse(nodes=nodes, edges=edges, total_nodes=len(nodes), total_edges=len(edges))
+
+
+@router.get("/graph/code", response_model=OntologyGraphResponse)
+def get_code_graph(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get only the code-layer concepts and their relationships."""
+    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    code_concepts = [c for c in concepts if c.source_type in ("code", "both")]
+    code_ids = {c.id for c in code_concepts}
+
+    relationships = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+    code_relationships = [
+        r for r in relationships
+        if r.source_concept_id in code_ids and r.target_concept_id in code_ids
+    ]
+
+    nodes = [
+        OntologyGraphNode(
+            id=c.id, name=c.name, concept_type=c.concept_type,
+            source_type=c.source_type, confidence_score=c.confidence_score
+        ) for c in code_concepts
+    ]
+    edges = [
+        OntologyGraphEdge(
+            id=r.id, source_concept_id=r.source_concept_id,
+            target_concept_id=r.target_concept_id,
+            relationship_type=r.relationship_type,
+            confidence_score=r.confidence_score
+        ) for r in code_relationships
+    ]
+
+    return OntologyGraphResponse(nodes=nodes, edges=edges, total_nodes=len(nodes), total_edges=len(edges))
+
+
+# ============================================================
+# CONCEPT MAPPING ENDPOINTS (SPRINT 4 — Cross-Graph)
+# ============================================================
+
+@router.get("/mappings")
+def list_mappings(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status: candidate, confirmed, rejected"),
+    skip: int = 0,
+    limit: int = 200,
+) -> Any:
+    """List concept mappings with optional status filter. Returns enriched mapping data."""
+    if status_filter:
+        mappings = crud.concept_mapping.get_by_status(
+            db=db, status=status_filter, tenant_id=tenant_id, skip=skip, limit=limit
+        )
+    else:
+        mappings = crud.concept_mapping.get_multi(db=db, tenant_id=tenant_id, skip=skip, limit=limit)
+
+    # Enrich with concept names
+    result = []
+    for m in mappings:
+        doc_concept = crud.ontology_concept.get(db=db, id=m.document_concept_id, tenant_id=tenant_id)
+        code_concept = crud.ontology_concept.get(db=db, id=m.code_concept_id, tenant_id=tenant_id)
+        result.append({
+            "id": m.id,
+            "tenant_id": m.tenant_id,
+            "document_concept_id": m.document_concept_id,
+            "code_concept_id": m.code_concept_id,
+            "mapping_method": m.mapping_method,
+            "confidence_score": m.confidence_score,
+            "status": m.status,
+            "relationship_type": m.relationship_type,
+            "ai_reasoning": m.ai_reasoning,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+            "document_concept_name": doc_concept.name if doc_concept else "Unknown",
+            "document_concept_type": doc_concept.concept_type if doc_concept else "Unknown",
+            "code_concept_name": code_concept.name if code_concept else "Unknown",
+            "code_concept_type": code_concept.concept_type if code_concept else "Unknown",
+        })
+    return result
+
+
+@router.post("/mappings/run", status_code=status.HTTP_202_ACCEPTED)
+def trigger_mapping_run(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    background_tasks: BackgroundTasks = None,
+) -> Any:
+    """
+    Trigger the 3-tier algorithmic mapping pipeline.
+    Runs in background: Exact match → Fuzzy match → AI validation.
+    """
+    from app.services.mapping_service import mapping_service
+
+    def _run_mapping():
+        return mapping_service.run_full_mapping(db=db, tenant_id=tenant_id)
+
+    background_tasks.add_task(_run_mapping)
+    return {"message": "Cross-graph mapping started", "tiers": ["exact", "fuzzy", "ai_validation"]}
+
+
+@router.get("/mappings/mismatches")
+def get_mismatches(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get gap analysis: document concepts with no code match,
+    code concepts with no document match, and contradictions.
+    """
+    from app.services.mapping_service import mapping_service
+    return mapping_service.get_mismatches(db=db, tenant_id=tenant_id)
+
+
+@router.get("/mappings/stats")
+def get_mapping_stats(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get mapping statistics."""
+    all_concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    doc_count = sum(1 for c in all_concepts if c.source_type in ("document", "both"))
+    code_count = sum(1 for c in all_concepts if c.source_type in ("code", "both"))
+    total_mappings = crud.concept_mapping.count_by_tenant(db=db, tenant_id=tenant_id)
+    confirmed = len(crud.concept_mapping.get_confirmed(db=db, tenant_id=tenant_id))
+    contradictions = len(crud.concept_mapping.get_contradictions(db=db, tenant_id=tenant_id))
+
+    # Count candidates
+    candidates = len(crud.concept_mapping.get_by_status(db=db, status="candidate", tenant_id=tenant_id))
+
+    return {
+        "document_concepts": doc_count,
+        "code_concepts": code_count,
+        "total_mappings": total_mappings,
+        "confirmed_mappings": confirmed,
+        "candidate_mappings": candidates,
+        "contradictions": contradictions,
+    }
+
+
+@router.put("/mappings/{mapping_id}/confirm")
+def confirm_mapping(
+    mapping_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Confirm a candidate mapping."""
+    result = crud.concept_mapping.confirm_mapping(db=db, mapping_id=mapping_id, tenant_id=tenant_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return {"status": "confirmed", "mapping_id": mapping_id}
+
+
+@router.put("/mappings/{mapping_id}/reject")
+def reject_mapping(
+    mapping_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Reject a candidate mapping."""
+    result = crud.concept_mapping.reject_mapping(db=db, mapping_id=mapping_id, tenant_id=tenant_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return {"status": "rejected", "mapping_id": mapping_id}
+
+
+@router.delete("/mappings/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_mapping(
+    mapping_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> None:
+    """Delete a specific mapping."""
+    mapping = crud.concept_mapping.get(db=db, id=mapping_id, tenant_id=tenant_id)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    crud.concept_mapping.remove(db=db, id=mapping_id, tenant_id=tenant_id)

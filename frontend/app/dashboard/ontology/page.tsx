@@ -104,6 +104,8 @@ function StatCard({
 
 // --- Main Page ---
 
+type GraphLayer = "all" | "document" | "code";
+
 export default function OntologyDashboard() {
   // Data state
   const [concepts, setConcepts] = useState<Concept[]>([]);
@@ -120,14 +122,19 @@ export default function OntologyDashboard() {
   const [showRelDialog, setShowRelDialog] = useState(false);
   const [synonymDetecting, setSynonymDetecting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [graphLayer, setGraphLayer] = useState<GraphLayer>("all");
 
   // --- Data Fetching ---
+
+  const graphEndpoint = graphLayer === "all" ? "/ontology/graph"
+    : graphLayer === "document" ? "/ontology/graph/document"
+    : "/ontology/graph/code";
 
   const fetchAll = useCallback(async () => {
     try {
       const [conceptsRes, graphRes, statsRes] = await Promise.all([
         api.get<Concept[]>("/ontology/concepts", { limit: 500 }),
-        api.get<GraphData>("/ontology/graph"),
+        api.get<GraphData>(graphEndpoint),
         api.get<OntologyStats>("/ontology/stats"),
       ]);
       setConcepts(conceptsRes);
@@ -138,7 +145,7 @@ export default function OntologyDashboard() {
       console.error("Failed to fetch ontology data:", err);
       setError(err.detail || "Failed to load ontology data");
     }
-  }, []);
+  }, [graphEndpoint]);
 
   const fetchConceptDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
@@ -361,6 +368,32 @@ export default function OntologyDashboard() {
           icon={Activity}
           color="bg-purple-50 text-purple-600"
         />
+      </div>
+
+      {/* Graph Layer Tabs */}
+      <div className="flex items-center gap-1 rounded-lg border bg-gray-50 p-1">
+        {[
+          { key: "all" as GraphLayer, label: "All Concepts" },
+          { key: "document" as GraphLayer, label: "Document Layer" },
+          { key: "code" as GraphLayer, label: "Code Layer" },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setGraphLayer(tab.key)}
+            className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              graphLayer === tab.key
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {tab.label}
+            {tab.key !== "all" && (
+              <span className="ml-1.5 text-[10px] text-gray-400">
+                ({tab.key === "document" ? "BRD" : "Code"})
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
       {/* Main 3-Column Layout */}

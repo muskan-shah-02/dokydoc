@@ -9,6 +9,7 @@ interface GraphNode {
   id: number;
   name: string;
   concept_type: string;
+  source_type?: string;
   confidence_score: number;
 }
 
@@ -453,6 +454,22 @@ export function OntologyGraph({
                   stroke={isSelected ? "#3b82f6" : color.border}
                   strokeWidth={isSelected ? 2 : 1.5}
                 />
+                {/* Source type indicator (top-left) */}
+                {n.source_type && n.source_type !== "document" && (
+                  <g transform={`translate(${-nodeWidth / 2 + 8}, ${-nodeHeight / 2 + 10})`}>
+                    <rect x={-6} y={-6} width={12} height={12} rx={2}
+                      fill={n.source_type === "code" ? "#dcfce7" : n.source_type === "both" ? "#e0e7ff" : "transparent"}
+                      stroke={n.source_type === "code" ? "#22c55e" : "#6366f1"}
+                      strokeWidth={1}
+                    />
+                    <text textAnchor="middle" dy="3" fontSize={7} fontWeight={700}
+                      fill={n.source_type === "code" ? "#166534" : "#3730a3"}
+                      className="pointer-events-none select-none"
+                    >
+                      {n.source_type === "code" ? "C" : "B"}
+                    </text>
+                  </g>
+                )}
                 {/* Confidence dot */}
                 <circle
                   cx={nodeWidth / 2 - 10}
