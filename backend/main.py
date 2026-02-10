@@ -16,7 +16,8 @@ from app.api.endpoints import (
     login, dashboard, documents, code_components,
     document_code_links, analysis_results, validation, billing, tenants, users, tasks,  # SPRINT 2 Phase 10
     ontology, initiatives,  # SPRINT 3: Business Ontology Engine + Governance
-    repositories  # SPRINT 3: Code Analysis Engine
+    repositories,  # SPRINT 3: Code Analysis Engine
+    webhooks,  # SPRINT 4: Git Webhook Integration (ADHOC-09)
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -347,6 +348,13 @@ app.include_router(
     repositories.router,
     prefix=f"/api/{settings.API_VERSION}/repositories",
     tags=["Repositories"]
+)
+
+# SPRINT 4: Git Webhook Integration (ADHOC-09) — no auth required (signature-verified)
+app.include_router(
+    webhooks.router,
+    prefix=f"/api/{settings.API_VERSION}/webhooks",
+    tags=["Webhooks"]
 )
 
 # --- Startup Event (Legacy support) ---

@@ -104,15 +104,13 @@ def static_analysis_worker(
             except Exception as billing_err:
                 logger.warning(f"Billing check failed (proceeding): {billing_err}")
 
-            # Call Gemini — use enhanced analysis when we have repo context
-            from app.services.ai.gemini import gemini_service
-            if not gemini_service:
-                raise RuntimeError("GeminiService not available")
+            # Route to AI provider (ADHOC-08: Claude for code in dual mode, Gemini otherwise)
+            from app.services.ai.provider_router import provider_router
 
             if repo_name:
                 # Enhanced analysis with business rules, API contracts, etc.
                 analysis_result = asyncio.run(
-                    gemini_service.call_gemini_for_enhanced_analysis(
+                    provider_router.analyze_code_enhanced(
                         code_content,
                         repo_name=repo_name,
                         file_path=file_path,
@@ -122,7 +120,7 @@ def static_analysis_worker(
             else:
                 # Fallback to basic analysis for standalone components
                 analysis_result = asyncio.run(
-                    gemini_service.call_gemini_for_code_analysis(code_content)
+                    provider_router.analyze_code(code_content)
                 )
 
             # Cache the result
@@ -142,7 +140,7 @@ def static_analysis_worker(
             logger.info(f"Analysis changed for component {component_id} — running delta analysis")
             try:
                 delta_result = asyncio.run(
-                    gemini_service.call_gemini_for_delta_analysis(
+                    provider_router.analyze_delta(
                         file_path=file_path or component.name,
                         previous_analysis=previous_analysis,
                         current_analysis=new_analysis
@@ -358,6 +356,99 @@ def repo_analysis_task(
         except Exception:
             pass
         return {"status": "failed", "repo_id": repo_id, "error": str(e)}
+    finally:
+        if db.is_active:
+            db.commit()
+        db.close()
+
+
+# ============================================================
+# WEBHOOK-TRIGGERED INCREMENTAL ANALYSIS (ADHOC-09)
+# ============================================================
+
+@celery_app.task(name="webhook_triggered_analysis", bind=True, max_retries=1)
+def webhook_triggered_analysis(
+    self, repo_id: int, tenant_id: int, changed_files: list,
+    branch: str = "", commit_hash: str = ""
+):
+    """
+    Incremental analysis triggered by a git webhook push event.
+    Only re-analyzes files that changed, not the entire repo.
+    """
+    logger.info(
+        f"WEBHOOK_ANALYSIS started for repo {repo_id}: "
+        f"{len(changed_files)} files changed (branch={branch}, commit={commit_hash})"
+    )
+
+    db = SessionLocal()
+    try:
+        repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+        if not repo:
+            logger.error(f"Webhook analysis: repo {repo_id} not found")
+            return {"status": "error", "reason": "repo_not_found"}
+
+        from app.models.code_component import CodeComponent
+
+        completed = 0
+        for file_path in changed_files:
+            filename = file_path.split("/")[-1]
+
+            # Find existing component for this file
+            component = db.query(CodeComponent).filter(
+                CodeComponent.repository_id == repo_id,
+                CodeComponent.tenant_id == tenant_id,
+                CodeComponent.name == filename,
+            ).first()
+
+            if not component:
+                logger.info(f"Webhook: {file_path} not tracked, skipping")
+                continue
+
+            # Fetch updated content
+            raw_url = component.location
+            if not raw_url:
+                continue
+
+            code_content = _fetch_file_content(raw_url)
+            if not code_content:
+                continue
+
+            # Detect language from file extension
+            ext = file_path.rsplit(".", 1)[-1] if "." in file_path else ""
+            lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "java": "java", "go": "go"}
+            language = lang_map.get(ext, "")
+
+            import time
+            result = static_analysis_worker(
+                component.id, tenant_id, code_content,
+                repo_name=repo.name, file_path=file_path, language=language,
+            )
+
+            if result.get("status") == "completed":
+                completed += 1
+
+            time.sleep(4)  # Rate limiting
+
+        # Update repo last_analyzed_commit
+        if commit_hash:
+            crud.repository.update(
+                db, db_obj=repo, obj_in={"last_analyzed_commit": commit_hash}
+            )
+
+        # Trigger incremental cross-graph mapping for changed concepts
+        if completed > 0:
+            try:
+                from app.tasks.ontology_tasks import extract_code_ontology_entities
+                extract_code_ontology_entities.delay(repo_id, tenant_id)
+            except Exception as e:
+                logger.warning(f"Webhook: ontology task dispatch failed: {e}")
+
+        logger.info(f"WEBHOOK_ANALYSIS completed: {completed}/{len(changed_files)} files re-analyzed")
+        return {"status": "completed", "re_analyzed": completed, "total_changed": len(changed_files)}
+
+    except Exception as e:
+        logger.error(f"WEBHOOK_ANALYSIS failed for repo {repo_id}: {e}")
+        return {"status": "failed", "error": str(e)}
     finally:
         if db.is_active:
             db.commit()

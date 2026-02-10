@@ -43,12 +43,25 @@ class Settings(BaseSettings):
     # --- NEW: ALLOWED_HOSTS (Fix for CONFIG-01) ---
     ALLOWED_HOSTS: List[str] = Field(default=["localhost", "127.0.0.1"], env="ALLOWED_HOSTS")
 
-    # --- AI Service Settings ---
+    # --- AI Service Settings: Gemini ---
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
     GEMINI_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL")
     GEMINI_VISION_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_VISION_MODEL")
     GEMINI_MAX_RETRIES: int = Field(default=3, env="GEMINI_MAX_RETRIES")
     GEMINI_TIMEOUT: int = Field(default=60, env="GEMINI_TIMEOUT")
+
+    # --- AI Service Settings: Claude/Anthropic (ADHOC-07) ---
+    ANTHROPIC_API_KEY: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+    ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-5-20250929", env="ANTHROPIC_MODEL")
+    ANTHROPIC_MAX_TOKENS: int = Field(default=4096, env="ANTHROPIC_MAX_TOKENS")
+    ANTHROPIC_TIMEOUT: int = Field(default=120, env="ANTHROPIC_TIMEOUT")
+
+    # --- AI Provider Routing (ADHOC-08) ---
+    # "gemini" = Gemini only (default), "dual" = Claude for code + Gemini for docs
+    AI_PROVIDER_MODE: str = Field(default="gemini", env="AI_PROVIDER_MODE")
+
+    # --- Git Webhook Settings (ADHOC-09) ---
+    WEBHOOK_SECRET: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
