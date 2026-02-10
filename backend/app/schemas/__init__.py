@@ -24,3 +24,9 @@ from .initiative import (
 
 # SPRINT 3: Code Analysis Engine
 from .repository import RepositoryCreate, RepositoryUpdate, RepositoryResponse, RepositoryWithProgress
+
+# SPRINT 3 ADHOC: Cross-Graph Mapping
+from .concept_mapping import (
+    ConceptMappingCreate, ConceptMappingUpdate, ConceptMappingResponse,
+    ConceptMappingWithConcepts, MappingRunResult, MismatchSummary
+)

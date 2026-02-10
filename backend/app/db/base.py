@@ -24,6 +24,7 @@ from app.models.initiative import Initiative  # noqa
 from app.models.initiative_asset import InitiativeAsset  # noqa
 from app.models.ontology_concept import OntologyConcept  # noqa
 from app.models.ontology_relationship import OntologyRelationship  # noqa
+from app.models.concept_mapping import ConceptMapping  # noqa
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}

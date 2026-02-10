@@ -18,3 +18,6 @@ from .crud_initiative_asset import initiative_asset
 
 # SPRINT 3: Code Analysis Engine
 from .crud_repository import repository
+
+# SPRINT 3 ADHOC: Cross-Graph Mapping
+from .crud_concept_mapping import concept_mapping

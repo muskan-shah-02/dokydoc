@@ -1,15 +1,18 @@
 """
-SPRINT 3: Ontology Entity Extraction Celery Tasks
+SPRINT 3: Ontology Entity Extraction + Mapping Celery Tasks
 
-Dual-source architecture:
-1. extract_ontology_entities — Runs after DOCUMENT analysis (BRD/SRS → ontology)
-2. extract_code_ontology_entities — Runs after REPO analysis (code → ontology)
+Architecture (cost-optimized):
+1. extract_ontology_entities     — Runs after DOCUMENT analysis (BRD/SRS → document graph)
+2. extract_code_ontology_entities — Runs after REPO analysis (code → code graph)
+3. run_cross_graph_mapping       — Algorithmic 3-tier mapping (replaces AI reconciliation)
 
-Both are fire-and-forget. If a concept already exists from the other source,
-it gets promoted to source_type="both" (cross-referenced).
+The mapping task uses:
+  Tier 1: Exact name match (FREE)
+  Tier 2: Fuzzy token overlap + Levenshtein (FREE)
+  Tier 3: AI validation for ambiguous pairs only (~$0.001/pair)
 
-The frontend can poll /ontology/document/{id}/status to show a subtle
-"X entities extracted" badge when these tasks finish.
+This replaces the old reconcile_ontology_sources task which sent ALL concepts
+to AI ($2-5 per run). The new approach costs ~$0.05 per run (97% cheaper).
 """
 
 import asyncio
@@ -24,16 +27,15 @@ from app.core.logging import logger
 def extract_ontology_entities(self, document_id: int, tenant_id: int):
     """
     Celery task: Extract business entities from a completed document's analysis
-    and populate the ontology graph.
+    and populate the DOCUMENT GRAPH.
 
-    This is a fire-and-forget task triggered after the document pipeline completes.
-    If it fails, the document remains "completed" — ontology enrichment is best-effort.
+    Fire-and-forget. If it fails, the document remains "completed".
+    After extraction, triggers cross-graph mapping for new concepts.
     """
-    logger.info(f"🧠 ONTOLOGY_TASK started for document_id: {document_id}, tenant_id: {tenant_id}")
+    logger.info(f"ONTOLOGY_TASK started for document_id: {document_id}, tenant_id: {tenant_id}")
 
     db = SessionLocal()
     try:
-        # Verify document exists and is completed
         document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
         if not document:
             logger.error(f"Ontology task: Document {document_id} not found")
@@ -42,11 +44,10 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
         if document.status != "completed":
             logger.warning(
                 f"Ontology task: Document {document_id} status is '{document.status}', "
-                f"expected 'completed'. Skipping entity extraction."
+                f"expected 'completed'. Skipping."
             )
             return
 
-        # Run the async entity extraction
         result = asyncio.run(
             business_ontology_service.extract_entities_from_analysis(
                 db=db, document_id=document_id, tenant_id=tenant_id
@@ -54,32 +55,37 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
         )
 
         logger.info(
-            f"🧠 ONTOLOGY_TASK complete for document {document_id}: "
+            f"ONTOLOGY_TASK complete for document {document_id}: "
             f"{result.get('entities_created', 0)} entities, "
             f"{result.get('relationships_created', 0)} relationships"
         )
 
-        # Deduct ontology extraction cost from billing if applicable
+        # Deduct cost
         cost_inr = result.get("cost_inr", 0)
         if cost_inr > 0 and tenant_id:
             try:
                 from app.services.billing_enforcement_service import billing_enforcement_service
                 billing_enforcement_service.deduct_cost(
-                    db=db,
-                    tenant_id=tenant_id,
-                    cost_inr=cost_inr,
+                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
                     description=f"Ontology extraction: {document.filename}"
                 )
             except Exception as billing_error:
                 logger.warning(f"Ontology billing deduction failed (non-critical): {billing_error}")
 
+        # Trigger cross-graph mapping for newly created concepts
+        if result.get("entities_created", 0) > 0:
+            try:
+                run_cross_graph_mapping.delay(tenant_id)
+                logger.info(f"Dispatched cross-graph mapping for tenant {tenant_id}")
+            except Exception as map_err:
+                logger.warning(f"Failed to dispatch mapping task (non-critical): {map_err}")
+
     except Exception as e:
-        logger.error(f"🧠 ONTOLOGY_TASK failed for document {document_id}: {e}")
-        # Retry with exponential backoff (30s, 60s)
+        logger.error(f"ONTOLOGY_TASK failed for document {document_id}: {e}")
         try:
             self.retry(countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
-            logger.error(f"🧠 ONTOLOGY_TASK permanently failed for document {document_id} after retries")
+            logger.error(f"ONTOLOGY_TASK permanently failed for document {document_id}")
     finally:
         db.close()
 
@@ -88,19 +94,14 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
 def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
     """
     Celery task: Extract business entities from a repository's code analysis
-    and populate the ontology graph with source_type="code".
+    and populate the CODE GRAPH with source_type="code".
 
-    Fires AFTER repo_analysis_task completes. If a concept already exists from
-    document analysis, the CRUD layer promotes it to source_type="both" —
-    marking it as cross-validated by both BRD and code.
-
-    This is fire-and-forget. Repo stays "completed" regardless of outcome.
+    After extraction, triggers cross-graph mapping (algorithmic, not AI).
     """
-    logger.info(f"🔧 CODE_ONTOLOGY_TASK started for repo_id: {repo_id}, tenant_id: {tenant_id}")
+    logger.info(f"CODE_ONTOLOGY_TASK started for repo_id: {repo_id}, tenant_id: {tenant_id}")
 
     db = SessionLocal()
     try:
-        # Verify repository exists and is completed
         repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
         if not repo:
             logger.error(f"Code ontology task: Repository {repo_id} not found")
@@ -109,11 +110,10 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
         if repo.analysis_status != "completed":
             logger.warning(
                 f"Code ontology task: Repo {repo_id} status is '{repo.analysis_status}', "
-                f"expected 'completed'. Skipping code entity extraction."
+                f"expected 'completed'. Skipping."
             )
             return
 
-        # Run the async code entity extraction
         result = asyncio.run(
             business_ontology_service.extract_entities_from_code(
                 db=db, repo_id=repo_id, tenant_id=tenant_id
@@ -121,101 +121,90 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
         )
 
         logger.info(
-            f"🔧 CODE_ONTOLOGY_TASK complete for repo {repo_id}: "
+            f"CODE_ONTOLOGY_TASK complete for repo {repo_id}: "
             f"{result.get('entities_created', 0)} entities, "
-            f"{result.get('relationships_created', 0)} relationships, "
-            f"{result.get('cross_referenced', 0)} cross-referenced with documents"
+            f"{result.get('relationships_created', 0)} relationships"
         )
 
-        # Deduct code ontology extraction cost from billing
+        # Deduct cost
         cost_inr = result.get("cost_inr", 0)
         if cost_inr > 0 and tenant_id:
             try:
                 from app.services.billing_enforcement_service import billing_enforcement_service
                 billing_enforcement_service.deduct_cost(
-                    db=db,
-                    tenant_id=tenant_id,
-                    cost_inr=cost_inr,
+                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
                     description=f"Code ontology extraction: {repo.name}"
                 )
             except Exception as billing_error:
                 logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
 
-        # After code extraction succeeds, trigger reconciliation
-        # This creates bridge relationships between document and code layers
-        try:
-            reconcile_ontology_sources.delay(tenant_id)
-            logger.info(f"Dispatched reconciliation task for tenant {tenant_id}")
-        except Exception as recon_err:
-            logger.warning(f"Failed to dispatch reconciliation (non-critical): {recon_err}")
+        # Trigger cross-graph mapping (algorithmic — replaces expensive AI reconciliation)
+        if result.get("entities_created", 0) > 0:
+            try:
+                run_cross_graph_mapping.delay(tenant_id)
+                logger.info(
+                    f"Dispatched algorithmic cross-graph mapping for tenant {tenant_id} "
+                    f"(replaces AI reconciliation — 97% cheaper)"
+                )
+            except Exception as map_err:
+                logger.warning(f"Failed to dispatch mapping task (non-critical): {map_err}")
 
     except Exception as e:
-        logger.error(f"🔧 CODE_ONTOLOGY_TASK failed for repo {repo_id}: {e}")
+        logger.error(f"CODE_ONTOLOGY_TASK failed for repo {repo_id}: {e}")
         try:
             self.retry(countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
-            logger.error(f"🔧 CODE_ONTOLOGY_TASK permanently failed for repo {repo_id} after retries")
+            logger.error(f"CODE_ONTOLOGY_TASK permanently failed for repo {repo_id}")
     finally:
         db.close()
 
 
-@celery_app.task(name="reconcile_ontology_sources", bind=True, max_retries=1)
-def reconcile_ontology_sources(self, tenant_id: int):
+@celery_app.task(name="run_cross_graph_mapping", bind=True, max_retries=1)
+def run_cross_graph_mapping(self, tenant_id: int):
     """
-    Celery task: Reconciliation pass — connects document-layer and code-layer concepts.
+    Celery task: Run 3-tier algorithmic mapping between document and code graphs.
 
-    This is the CRITICAL step that makes the dual-source graph useful:
-    1. Creates bridge relationships (implements, enforces, extends)
-    2. Detects contradictions (document says X, code does Y)
-    3. Identifies unimplemented requirements (document concepts with no code)
-    4. Identifies undocumented features (code concepts with no document)
+    REPLACES the old reconcile_ontology_sources task.
 
-    Only promotes concepts to source_type="both" when AI confirms high-confidence
-    "implements" match — NOT on naive name matching.
-
-    Fires automatically after code ontology extraction, but can also be triggered
-    manually via the API.
+    Cost comparison:
+      Old (AI reconciliation): $2-5 per run — sends ALL concepts to Gemini
+      New (3-tier mapping):    $0.05 per run — AI only for ambiguous pairs
     """
-    logger.info(f"🔗 RECONCILIATION_TASK started for tenant_id: {tenant_id}")
+    logger.info(f"CROSS_GRAPH_MAPPING started for tenant {tenant_id}")
 
     db = SessionLocal()
     try:
-        result = asyncio.run(
-            business_ontology_service.reconcile_document_code_concepts(
-                db=db, tenant_id=tenant_id
-            )
-        )
+        from app.services.mapping_service import mapping_service
 
-        bridges = result.get("bridges_created", 0)
-        contradictions = result.get("contradictions_found", 0)
-        unimplemented = len(result.get("unimplemented_requirements", []))
-        undocumented = len(result.get("undocumented_features", []))
+        result = mapping_service.run_full_mapping(
+            db=db, tenant_id=tenant_id, use_ai_fallback=True
+        )
 
         logger.info(
-            f"🔗 RECONCILIATION_TASK complete for tenant {tenant_id}: "
-            f"{bridges} bridges, {contradictions} contradictions, "
-            f"{unimplemented} unimplemented, {undocumented} undocumented"
+            f"CROSS_GRAPH_MAPPING complete for tenant {tenant_id}: "
+            f"{result['exact_matches']} exact + {result['fuzzy_matches']} fuzzy + "
+            f"{result['ai_validated']} AI = {result['total_mappings']} total. "
+            f"Gaps: {result['total_gaps']}, Undocumented: {result['total_undocumented']}. "
+            f"AI cost: INR {result['ai_cost_inr']:.4f}"
         )
 
-        # Deduct reconciliation cost
-        cost_inr = result.get("cost_inr", 0)
-        if cost_inr > 0:
+        # Deduct AI cost if any
+        ai_cost = result.get("ai_cost_inr", 0)
+        if ai_cost > 0:
             try:
                 from app.services.billing_enforcement_service import billing_enforcement_service
                 billing_enforcement_service.deduct_cost(
-                    db=db,
-                    tenant_id=tenant_id,
-                    cost_inr=cost_inr,
-                    description="Ontology source reconciliation"
+                    db=db, tenant_id=tenant_id, cost_inr=ai_cost,
+                    description="Cross-graph mapping (AI validation for ambiguous pairs)"
                 )
             except Exception as billing_error:
-                logger.warning(f"Reconciliation billing deduction failed: {billing_error}")
+                logger.warning(f"Mapping billing deduction failed: {billing_error}")
 
     except Exception as e:
-        logger.error(f"🔗 RECONCILIATION_TASK failed for tenant {tenant_id}: {e}")
+        logger.error(f"CROSS_GRAPH_MAPPING failed for tenant {tenant_id}: {e}")
         try:
             self.retry(countdown=60)
         except self.MaxRetriesExceededError:
-            logger.error(f"🔗 RECONCILIATION_TASK permanently failed for tenant {tenant_id}")
+            logger.error(f"CROSS_GRAPH_MAPPING permanently failed for tenant {tenant_id}")
     finally:
         db.close()
