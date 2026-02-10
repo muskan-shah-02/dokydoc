@@ -100,9 +100,73 @@ class MultiModalDocumentParser(LoggerMixin):
             self.logger.error(f"❌ PyMuPDF failed: {e}")
             raise
 
+    def _detect_columns(self, page) -> int:
+        """
+        CAE-03 FIX: Detect number of text columns on a pdfplumber page
+        using word x-coordinate clustering.
+
+        Returns:
+            int: Number of detected columns (1 if single-column or uncertain)
+        """
+        try:
+            words = page.extract_words(x_tolerance=3, y_tolerance=3)
+            if len(words) < 10:
+                return 1
+
+            page_width = page.width
+            midpoint = page_width / 2
+            gap_threshold = page_width * 0.08  # 8% gap around midpoint
+
+            left_words = [w for w in words if float(w["x1"]) < midpoint - gap_threshold]
+            right_words = [w for w in words if float(w["x0"]) > midpoint + gap_threshold]
+
+            # Multi-column if both sides have substantial content
+            if len(left_words) > 5 and len(right_words) > 5:
+                left_ratio = len(left_words) / len(words)
+                right_ratio = len(right_words) / len(words)
+                if left_ratio > 0.2 and right_ratio > 0.2:
+                    self.logger.info(
+                        f"CAE-03: Detected 2-column layout "
+                        f"(left={len(left_words)}, right={len(right_words)}, total={len(words)})"
+                    )
+                    return 2
+
+            return 1
+        except Exception:
+            return 1
+
+    def _extract_columns_merged(self, page) -> str:
+        """
+        CAE-03 FIX: Extract text from a multi-column page by reading
+        left column first, then right column (top-to-bottom for each).
+        """
+        try:
+            page_width = page.width
+            midpoint = page_width / 2
+
+            # Crop left and right halves with small overlap tolerance
+            left_bbox = (0, 0, midpoint + 2, page.height)
+            right_bbox = (midpoint - 2, 0, page_width, page.height)
+
+            left_text = page.within_bbox(left_bbox).extract_text() or ""
+            right_text = page.within_bbox(right_bbox).extract_text() or ""
+
+            # Combine: left column first, then right column
+            combined = left_text.strip()
+            if right_text.strip():
+                combined += "\n\n" + right_text.strip()
+
+            return combined
+        except Exception as e:
+            self.logger.warning(f"CAE-03: Column extraction failed, falling back: {e}")
+            return page.extract_text() or ""
+
     def _extract_text_pdfplumber(self, file_path: str) -> Tuple[str, bool]:
         """
         Strategy 2: pdfplumber - Better text extraction for complex layouts.
+
+        CAE-03 FIX: Now detects multi-column layouts and extracts columns
+        in reading order (left-to-right, top-to-bottom per column).
 
         Returns:
             Tuple[str, bool]: (extracted_text, is_scanned)
@@ -112,10 +176,20 @@ class MultiModalDocumentParser(LoggerMixin):
 
             text_parts = []
             is_scanned = True
+            multi_column_pages = 0
 
             with pdfplumber.open(file_path) as pdf:
+                total_pages = len(pdf.pages)
                 for page in pdf.pages:
-                    text = page.extract_text()
+                    # CAE-03: Detect column layout per page
+                    num_columns = self._detect_columns(page)
+
+                    if num_columns >= 2:
+                        text = self._extract_columns_merged(page)
+                        multi_column_pages += 1
+                    else:
+                        text = page.extract_text()
+
                     if text:
                         text_parts.append(text)
                         is_scanned = False
@@ -125,6 +199,11 @@ class MultiModalDocumentParser(LoggerMixin):
             if not combined_text.strip():
                 self.logger.warning("pdfplumber extracted no text - possibly scanned PDF")
                 return "", True
+
+            if multi_column_pages > 0:
+                self.logger.info(
+                    f"CAE-03: {multi_column_pages}/{total_pages} pages had multi-column layout"
+                )
 
             self.logger.info(f"✅ pdfplumber extracted {len(combined_text)} characters")
             return combined_text, is_scanned

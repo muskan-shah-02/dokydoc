@@ -2,10 +2,11 @@
 # backend/app/crud/crud_document.py
 
 from typing import List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.crud.base import CRUDBase
 from app.models.document import Document
+from app.models.document_segment import DocumentSegment
 from app.schemas.document import DocumentCreate, DocumentUpdate
 
 class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
@@ -81,8 +82,11 @@ class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for get_multi_by_owner()")
 
+        # FLAW-11-B FIX: Eager load segments to prevent N+1 queries
+        # when dashboard/document list accesses segment counts or statuses
         return (
             db.query(self.model)
+            .options(selectinload(Document.segments))
             .filter(
                 Document.owner_id == owner_id,
                 Document.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
