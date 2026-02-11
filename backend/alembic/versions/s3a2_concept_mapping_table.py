@@ -20,28 +20,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        'concept_mappings',
-        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column('tenant_id', sa.Integer(), nullable=False, index=True),
-        sa.Column('document_concept_id', sa.Integer(),
-                   sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
-        sa.Column('code_concept_id', sa.Integer(),
-                   sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
-        sa.Column('mapping_method', sa.String(20), nullable=False),
-        sa.Column('confidence_score', sa.Float(), nullable=False, server_default='0'),
-        sa.Column('status', sa.String(20), nullable=False, server_default='candidate', index=True),
-        sa.Column('relationship_type', sa.String(50), nullable=False, server_default='implements'),
-        sa.Column('ai_reasoning', sa.Text(), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-    )
-    # Unique constraint: one mapping per doc+code pair per tenant
-    op.create_unique_constraint(
-        'uq_concept_mapping_pair',
-        'concept_mappings',
-        ['tenant_id', 'document_concept_id', 'code_concept_id']
-    )
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'concept_mappings')"
+    ))
+    table_exists = result.scalar()
+
+    if not table_exists:
+        op.create_table(
+            'concept_mappings',
+            sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
+            sa.Column('tenant_id', sa.Integer(), nullable=False, index=True),
+            sa.Column('document_concept_id', sa.Integer(),
+                       sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
+            sa.Column('code_concept_id', sa.Integer(),
+                       sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
+            sa.Column('mapping_method', sa.String(20), nullable=False),
+            sa.Column('confidence_score', sa.Float(), nullable=False, server_default='0'),
+            sa.Column('status', sa.String(20), nullable=False, server_default='candidate', index=True),
+            sa.Column('relationship_type', sa.String(50), nullable=False, server_default='implements'),
+            sa.Column('ai_reasoning', sa.Text(), nullable=True),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
+        )
+        # Unique constraint: one mapping per doc+code pair per tenant
+        op.create_unique_constraint(
+            'uq_concept_mapping_pair',
+            'concept_mappings',
+            ['tenant_id', 'document_concept_id', 'code_concept_id']
+        )
 
 
 def downgrade() -> None:
