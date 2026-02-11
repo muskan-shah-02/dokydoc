@@ -41,10 +41,16 @@ class CodeComponentInDBBase(CodeComponentBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     
-    # The new analysis fields are included here
+    # Analysis fields
     summary: Optional[str] = None
     structured_analysis: Optional[Dict[str, Any]] = None
     analysis_status: str
+
+    # Cost tracking fields
+    ai_cost_inr: Optional[float] = None
+    token_count_input: Optional[int] = None
+    token_count_output: Optional[int] = None
+    cost_breakdown: Optional[Dict[str, Any]] = None
 
     class Config:
         # This vital setting allows Pydantic to read data directly from

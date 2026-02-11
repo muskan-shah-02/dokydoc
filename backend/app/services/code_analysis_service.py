@@ -6,10 +6,10 @@ import asyncio
 
 from app import crud
 from app.db.session import SessionLocal
-# We will create this function in our next step (Task 1.C)
 from app.services.ai.gemini import call_gemini_for_code_analysis
 from app.services.cache_service import cache_service
-from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException  # ✅ SPRINT 2 BILLING FIX
+from app.services.cost_service import cost_service
+from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException
 from app.core.logging import LoggerMixin
 from app.core.exceptions import DocumentProcessingException, AIAnalysisException
 
@@ -123,11 +123,67 @@ class CodeAnalysisService(LoggerMixin):
                 )
                 self.logger.info(f"💾 Cached analysis result for component {component_id}")
 
-            # 4. Prepare the data and update the component in the database
+            # 4. Calculate cost from token usage
+            token_usage = analysis_result.pop("_token_usage", {})
+            input_tokens = token_usage.get("input_tokens", 0)
+            output_tokens = token_usage.get("output_tokens", 0)
+
+            cost_data = {}
+            total_cost_inr = 0.0
+            if input_tokens or output_tokens:
+                cost_data = cost_service.calculate_cost_from_actual_tokens(input_tokens, output_tokens)
+                total_cost_inr = float(cost_data.get("cost_inr", 0))
+                self.logger.info(
+                    f"💰 Code analysis cost: ₹{total_cost_inr:.4f} "
+                    f"({input_tokens} in + {output_tokens} out tokens)"
+                )
+
+                # Deduct cost from tenant billing
+                try:
+                    billing_enforcement_service.deduct_cost(
+                        db=db,
+                        tenant_id=tenant_id,
+                        cost_inr=total_cost_inr,
+                        description=f"Code analysis: {component.name}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to deduct cost: {e}")
+
+                # Log usage for analytics
+                try:
+                    crud.usage_log.log_usage(
+                        db=db,
+                        tenant_id=tenant_id,
+                        user_id=component.owner_id,
+                        feature_type="code_analysis",
+                        operation="code_analysis",
+                        model_used="gemini-2.5-flash",
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=float(cost_data.get("cost_usd", 0)),
+                        cost_inr=total_cost_inr,
+                        extra_data={"component_id": component_id, "component_name": component.name}
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to log usage: {e}")
+
+            # 5. Prepare the data and update the component in the database
+            cost_breakdown = {
+                "code_analysis": {
+                    "cost_inr": total_cost_inr,
+                    "cost_usd": float(cost_data.get("cost_usd", 0)) if cost_data else 0,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
+            }
             update_data = {
                 "summary": analysis_result.get("summary"),
                 "structured_analysis": analysis_result.get("structured_analysis"),
                 "analysis_status": "completed",
+                "ai_cost_inr": total_cost_inr,
+                "token_count_input": input_tokens,
+                "token_count_output": output_tokens,
+                "cost_breakdown": cost_breakdown,
             }
             crud.code_component.update(db, db_obj=component, obj_in=update_data)
             self.logger.info(f"Successfully completed and stored analysis for component_id: {component.id}")

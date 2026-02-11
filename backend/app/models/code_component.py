@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, List
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, JSON, Numeric
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -59,6 +60,12 @@ class CodeComponent(Base):
     # Relationships
     owner: Mapped["User"] = relationship("User")
     repository: Mapped["Repository"] = relationship("Repository", foreign_keys=[repository_id])
+
+    # Cost tracking (matches Document model pattern)
+    ai_cost_inr: Mapped[float] = mapped_column(Numeric(10, 4), default=0.0, nullable=False)
+    token_count_input: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    token_count_output: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cost_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=True)
 
     # Timestamp fields
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)

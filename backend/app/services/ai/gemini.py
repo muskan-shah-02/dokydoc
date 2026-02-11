@@ -196,29 +196,32 @@ class GeminiService(LoggerMixin):
         """
         Analyzes ANY file's content using a universal, adaptive prompt.
         Works with any programming language, framework, or architectural pattern.
+        Returns analysis data with token usage for cost tracking.
         """
         try:
             self.logger.info("Making a real call to the Gemini API for universal code analysis...")
-            
+
             # Use the prompt manager for code analysis
             prompt = prompt_manager.get_prompt(PromptType.CODE_ANALYSIS)
-            
+
             # Prepare the full prompt with the code content
             full_prompt = f"{prompt}\n\nCODE TO ANALYZE:\n{code_content}"
-            
+
             # Call Gemini API
             response = await self.generate_content(full_prompt)
             response_text = response.text
-            
+
+            # Extract token usage from response
+            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+
             # Parse the JSON response
             try:
                 analysis_data = json.loads(response_text)
                 self.logger.info("Code analysis completed successfully")
-                return analysis_data
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
-                # Return a fallback structure
-                return {
+                analysis_data = {
                     "summary": "Code analysis completed but response parsing failed",
                     "structured_analysis": {
                         "language_info": {"primary_language": "Unknown", "framework": "Unknown", "file_type": "Unknown"},
@@ -229,7 +232,16 @@ class GeminiService(LoggerMixin):
                         "quality_assessment": "Analysis failed due to response parsing error"
                     }
                 }
-                
+
+            # Always include token usage for cost tracking
+            analysis_data["_token_usage"] = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "prompt_length": len(full_prompt),
+                "response_length": len(response_text) if response_text else 0,
+            }
+            return analysis_data
+
         except Exception as e:
             self.logger.error(f"Error in code analysis: {e}")
             raise
