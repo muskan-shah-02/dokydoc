@@ -32,7 +32,10 @@ import {
   Loader2,
   AlertCircle,
   Trash2,
+  IndianRupee,
+  Cpu,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 // --- NEW: Import our specialized analysis view components ---
 import { RepositoryAnalysisView } from "@/components/analysis/RepositoryAnalysisView";
@@ -47,6 +50,10 @@ interface CodeComponentDetail {
   summary: string | null;
   structured_analysis: Record<string, any> | null;
   analysis_status: "pending" | "processing" | "completed" | "failed";
+  ai_cost_inr: number | null;
+  token_count_input: number | null;
+  token_count_output: number | null;
+  cost_breakdown: Record<string, any> | null;
 }
 
 export default function CodeComponentDetailPage() {
@@ -277,6 +284,40 @@ export default function CodeComponentDetailPage() {
           </p>
         </CardContent>
       </Card>
+
+      {/* Cost Summary */}
+      {component.ai_cost_inr != null && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <IndianRupee className="w-5 h-5 mr-2 text-green-600" />
+              Analysis Cost
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-center">
+                <p className="text-sm text-muted-foreground">Total Cost</p>
+                <p className="text-2xl font-bold text-green-700 dark:text-green-400">
+                  ₹{component.ai_cost_inr.toFixed(2)}
+                </p>
+              </div>
+              <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-center">
+                <p className="text-sm text-muted-foreground">Input Tokens</p>
+                <p className="text-2xl font-bold text-blue-700 dark:text-blue-400">
+                  {component.token_count_input?.toLocaleString() || "—"}
+                </p>
+              </div>
+              <div className="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-center">
+                <p className="text-sm text-muted-foreground">Output Tokens</p>
+                <p className="text-2xl font-bold text-purple-700 dark:text-purple-400">
+                  {component.token_count_output?.toLocaleString() || "—"}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* --- RENDER THE INTELLIGENT ANALYSIS COMPONENT --- */}
       <AnalysisResult />

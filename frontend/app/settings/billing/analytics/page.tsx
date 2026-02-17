@@ -121,6 +121,17 @@ interface WeeklyUsage {
   change_from_previous_week: number | null;
 }
 
+interface CodeComponentUsage {
+  component_id: number;
+  name: string;
+  component_type: string;
+  total_cost_inr: number;
+  token_count_input: number;
+  token_count_output: number;
+  total_tokens: number;
+  analysis_status: string;
+}
+
 interface AnalyticsData {
   time_range: string;
   start_date: string;
@@ -133,6 +144,7 @@ interface AnalyticsData {
   by_operation: OperationUsage[];
   daily_usage: DailyUsage[];
   top_documents: DocumentUsage[];
+  top_code_components: CodeComponentUsage[];
 }
 
 export default function BillingAnalyticsPage() {
@@ -587,6 +599,62 @@ export default function BillingAnalyticsPage() {
                           </tr>
                         );
                       })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Top Code Components */}
+            {analyticsData.top_code_components && analyticsData.top_code_components.length > 0 && (
+              <div className="rounded-lg border bg-white p-6 shadow-sm">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Code className="h-5 w-5 text-gray-500" />
+                  Top Code Components by Cost
+                </h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Component</th>
+                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Type</th>
+                        <th className="px-4 py-3 text-right font-semibold text-gray-700">Input Tokens</th>
+                        <th className="px-4 py-3 text-right font-semibold text-gray-700">Output Tokens</th>
+                        <th className="px-4 py-3 text-right font-semibold text-gray-700">Cost (INR)</th>
+                        <th className="px-4 py-3 text-left font-semibold text-gray-700">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {analyticsData.top_code_components.map((comp) => (
+                        <tr key={comp.component_id} className="hover:bg-gray-50">
+                          <td className="px-4 py-3">
+                            <Link
+                              href={`/dashboard/code/${comp.component_id}`}
+                              className="font-medium text-purple-600 hover:underline"
+                            >
+                              {comp.name}
+                            </Link>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-600">
+                              {comp.component_type}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right text-gray-700">{comp.token_count_input.toLocaleString()}</td>
+                          <td className="px-4 py-3 text-right text-gray-700">{comp.token_count_output.toLocaleString()}</td>
+                          <td className="px-4 py-3 text-right font-semibold text-gray-900">₹{comp.total_cost_inr.toFixed(2)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                              comp.analysis_status === "completed" ? "bg-green-100 text-green-600" :
+                              comp.analysis_status === "processing" ? "bg-blue-100 text-blue-600" :
+                              comp.analysis_status === "failed" ? "bg-red-100 text-red-600" :
+                              "bg-gray-100 text-gray-600"
+                            }`}>
+                              {comp.analysis_status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo, Fragment } from "react";
 import {
   Network,
   GitFork,
@@ -739,8 +739,8 @@ export default function OntologyDashboard() {
                   const isExpanded = expandedId === concept.id;
                   const style = getTypeStyle(concept.concept_type);
                   return (
-                    <>
-                      <tr key={concept.id}
+                    <Fragment key={concept.id}>
+                      <tr
                         className={`cursor-pointer transition-colors ${
                           isExpanded ? "bg-blue-50/50" : "hover:bg-gray-50"
                         }`}
@@ -783,13 +783,13 @@ export default function OntologyDashboard() {
                         />
                       )}
                       {isExpanded && detailLoading && (
-                        <tr key={`loading-${concept.id}`}>
+                        <tr>
                           <td colSpan={6} className="bg-gray-50 px-4 py-6 text-center">
                             <Loader2 className="mx-auto h-5 w-5 animate-spin text-gray-400" />
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })
               )}

@@ -434,6 +434,11 @@ def get_billing_analytics(
         db, tenant_id=tenant_id, start=start, end=end, limit=10
     )
 
+    # Get top code components by cost
+    top_code_components = crud.usage_log.get_top_code_components(
+        db, tenant_id=tenant_id, limit=10
+    )
+
     response = BillingAnalyticsResponse(
         time_range=time_range.value,
         start_date=start,
@@ -446,6 +451,7 @@ def get_billing_analytics(
         by_operation=by_operation,
         daily_usage=daily_usage,
         top_documents=top_documents,
+        top_code_components=top_code_components,
     )
 
     logger.info(

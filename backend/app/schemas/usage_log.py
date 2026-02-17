@@ -137,6 +137,18 @@ class DocumentUsageSummary(BaseModel):
     last_used: datetime
 
 
+class CodeComponentUsageSummary(BaseModel):
+    """Usage summary for a specific code component."""
+    component_id: int
+    name: str
+    component_type: str
+    total_cost_inr: float
+    token_count_input: int
+    token_count_output: int
+    total_tokens: int
+    analysis_status: str
+
+
 class TokenSummary(BaseModel):
     """Aggregate token summary."""
     total_input_tokens: int
@@ -175,6 +187,9 @@ class BillingAnalyticsResponse(BaseModel):
 
     # Top documents by cost
     top_documents: List[DocumentUsageSummary]
+
+    # Top code components by cost
+    top_code_components: List[CodeComponentUsageSummary] = []
 
 
 class BillingAnalyticsFilters(BaseModel):

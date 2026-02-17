@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from app.models.usage_log import UsageLog, FeatureType, OperationType
 from app.models.document import Document
+from app.models.code_component import CodeComponent
 from app.models.user import User
 from app.schemas.usage_log import (
     UsageLogCreate,
@@ -17,6 +18,7 @@ from app.schemas.usage_log import (
     OperationUsageSummary,
     TimeSeriesDataPoint,
     DocumentUsageSummary,
+    CodeComponentUsageSummary,
     TokenSummary,
     TimeRangeEnum,
     WeeklyUsageSummary,
@@ -383,6 +385,34 @@ class CRUDUsageLog:
                 total_tokens=int(r.total_input_tokens or 0) + int(r.total_output_tokens or 0),
                 total_cost_inr=float(r.total_cost_inr or 0),
                 last_used=r.last_used,
+            )
+            for r in results
+        ]
+
+    def get_top_code_components(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        limit: int = 10,
+    ) -> List[CodeComponentUsageSummary]:
+        """Get top code components by cost (from code_components table directly)."""
+        results = db.query(CodeComponent).filter(
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.ai_cost_inr.isnot(None),
+            CodeComponent.ai_cost_inr > 0,
+        ).order_by(desc(CodeComponent.ai_cost_inr)).limit(limit).all()
+
+        return [
+            CodeComponentUsageSummary(
+                component_id=r.id,
+                name=r.name,
+                component_type=r.component_type,
+                total_cost_inr=float(r.ai_cost_inr or 0),
+                token_count_input=int(r.token_count_input or 0),
+                token_count_output=int(r.token_count_output or 0),
+                total_tokens=int(r.token_count_input or 0) + int(r.token_count_output or 0),
+                analysis_status=r.analysis_status or "unknown",
             )
             for r in results
         ]

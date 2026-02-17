@@ -366,6 +366,17 @@ class CodeAnalysisService(LoggerMixin):
             crud.code_component.update(db, db_obj=component, obj_in=update_data)
             self.logger.info(f"Successfully completed and stored analysis for component_id: {component.id}")
 
+            # 6. Extract ontology concepts from analysis (no additional AI calls)
+            try:
+                self._extract_ontology_from_analysis(
+                    db=db,
+                    structured_analysis=analysis_result.get("structured_analysis", {}),
+                    component_name=component.name,
+                    tenant_id=tenant_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Ontology extraction failed (non-fatal): {e}")
+
         except httpx.RequestError as e:
             self.logger.error(f"HTTP Error fetching code for component {component_id}: {e}")
             if component:
@@ -379,6 +390,92 @@ class CodeAnalysisService(LoggerMixin):
             if db.is_active:
                 db.commit()
             db.close()
+
+    # Map code component types to ontology concept types
+    _TYPE_MAPPING = {
+        "Class": "Entity",
+        "Interface": "Entity",
+        "Service": "Service",
+        "Model": "Entity",
+        "Function": "Process",
+        "AsyncFunction": "Process",
+        "Method": "Process",
+        "Component": "Entity",
+        "Route": "Process",
+        "Hook": "Process",
+        "Enum": "Attribute",
+        "Type": "Attribute",
+        "Constant": "Attribute",
+        "Variable": "Attribute",
+        "Module": "Entity",
+    }
+
+    def _extract_ontology_from_analysis(
+        self, db, structured_analysis: dict, component_name: str, tenant_id: int
+    ) -> None:
+        """
+        Extract ontology concepts from code analysis results.
+        Creates concepts with source_type="code" — no additional AI calls.
+        Only extracts significant elements (Classes, Services, Models, Components).
+        """
+        if not structured_analysis or not tenant_id:
+            return
+
+        components = structured_analysis.get("components", [])
+        key_concepts = (
+            structured_analysis
+            .get("patterns_and_architecture", {})
+            .get("key_concepts", [])
+        )
+        created_count = 0
+
+        # Extract significant code components as concepts
+        # Only extract Classes, Services, Models, Interfaces, Components (skip functions/variables)
+        significant_types = {"Class", "Interface", "Service", "Model", "Component", "Module"}
+        for comp in components:
+            comp_type = comp.get("type", "")
+            if comp_type not in significant_types:
+                continue
+
+            name = comp.get("name", "").strip()
+            if not name or len(name) < 2:
+                continue
+
+            concept_type = self._TYPE_MAPPING.get(comp_type, "Entity")
+            description = comp.get("purpose", "") or comp.get("details", "")
+
+            crud.ontology_concept.get_or_create(
+                db,
+                name=name,
+                concept_type=concept_type,
+                tenant_id=tenant_id,
+                description=description[:500] if description else None,
+                confidence_score=0.75,
+                source_type="code",
+            )
+            created_count += 1
+
+        # Extract key architectural concepts
+        for concept_name in key_concepts:
+            if not concept_name or len(concept_name.strip()) < 2:
+                continue
+            crud.ontology_concept.get_or_create(
+                db,
+                name=concept_name.strip(),
+                concept_type="Process",
+                tenant_id=tenant_id,
+                description=f"Architectural concept from code: {component_name}",
+                confidence_score=0.65,
+                source_type="code",
+            )
+            created_count += 1
+
+        if created_count > 0:
+            self.logger.info(
+                f"📊 Extracted {created_count} ontology concepts from code analysis "
+                f"of {component_name}"
+            )
+
 
 # Create a singleton instance for easy importing elsewhere in the app
 code_analysis_service = CodeAnalysisService()

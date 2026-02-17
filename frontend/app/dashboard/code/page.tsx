@@ -67,6 +67,9 @@ interface CodeComponent {
   location: string;
   version: string;
   analysis_status: "pending" | "processing" | "completed" | "failed";
+  ai_cost_inr: number | null;
+  token_count_input: number | null;
+  token_count_output: number | null;
 }
 
 export default function CodePage() {
@@ -539,6 +542,7 @@ export default function CodePage() {
                   <TableHead>Location</TableHead>
                   <TableHead>Version</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Cost</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -608,8 +612,15 @@ export default function CodePage() {
                         </div>
                       )}
                     </TableCell>
+                    <TableCell className="text-right font-mono text-sm">
+                      {component.ai_cost_inr != null ? (
+                        <span className="text-green-700">₹{component.ai_cost_inr.toFixed(2)}</span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
-                      {/* --- NEW: Delete Button with Confirmation --- */}
+                      {/* --- Delete Button with Confirmation --- */}
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
                           <Button
