@@ -215,23 +215,36 @@ class GeminiService(LoggerMixin):
             input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
 
-            # Parse the JSON response
+            # Parse the JSON response (strip markdown code fences if present)
             try:
                 analysis_data = json.loads(response_text)
                 self.logger.info("Code analysis completed successfully")
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
-                analysis_data = {
-                    "summary": "Code analysis completed but response parsing failed",
-                    "structured_analysis": {
-                        "language_info": {"primary_language": "Unknown", "framework": "Unknown", "file_type": "Unknown"},
-                        "components": [],
-                        "dependencies": [],
-                        "exports": [],
-                        "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
-                        "quality_assessment": "Analysis failed due to response parsing error"
+            except json.JSONDecodeError:
+                # Gemini often wraps JSON in ```json...``` markdown fences — strip them
+                cleaned = response_text.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.startswith("```"):
+                    cleaned = cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                try:
+                    analysis_data = json.loads(cleaned)
+                    self.logger.info("Code analysis completed (stripped markdown fences)")
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse Gemini response as JSON: {e}")
+                    analysis_data = {
+                        "summary": "Code analysis completed but response parsing failed",
+                        "structured_analysis": {
+                            "language_info": {"primary_language": "Unknown", "framework": "Unknown", "file_type": "Unknown"},
+                            "components": [],
+                            "dependencies": [],
+                            "exports": [],
+                            "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                            "quality_assessment": "Analysis failed due to response parsing error"
+                        }
                     }
-                }
 
             # Always include token usage for cost tracking
             analysis_data["_token_usage"] = {

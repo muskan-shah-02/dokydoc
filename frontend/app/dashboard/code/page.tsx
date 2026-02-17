@@ -87,6 +87,7 @@ export default function CodePage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const router = useRouter();
 
@@ -164,7 +165,7 @@ export default function CodePage() {
         body: JSON.stringify(newComponent),
       });
       if (res.ok) {
-        await fetchComponents(true);
+        // Close dialog immediately — analysis runs in the background
         setIsDialogOpen(false);
         setNewComponent({
           name: "",
@@ -172,6 +173,12 @@ export default function CodePage() {
           location: "",
           version: "",
         });
+        setSuccessMessage(
+          "Component registered! Analysis is running in the background."
+        );
+        setTimeout(() => setSuccessMessage(null), 6000);
+        // Refresh list in background (non-blocking)
+        fetchComponents(true);
       } else {
         const errorData = await res.json();
         const errorMessage =
@@ -409,6 +416,14 @@ export default function CodePage() {
           </Dialog>
         </div>
       </div>
+      {successMessage && (
+        <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
+          <CheckCircle className="h-4 w-4 text-green-600" />
+          <AlertDescription className="text-green-800 dark:text-green-200">
+            {successMessage}
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Card>
           <CardHeader className="pb-2">
@@ -562,16 +577,36 @@ export default function CodePage() {
                       onClick={() => handleRowClick(component.id)}
                       className="cursor-pointer"
                     >
-                      <div className="flex items-center space-x-2">
-                        {getStatusIcon(component.analysis_status)}
-                        <Badge
-                          variant={getStatusBadgeVariant(
-                            component.analysis_status
-                          )}
-                        >
-                          {component.analysis_status}
-                        </Badge>
-                      </div>
+                      {component.analysis_status === "processing" ? (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center space-x-2">
+                            <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                            <span className="text-sm font-medium text-blue-600">
+                              Analyzing...
+                            </span>
+                          </div>
+                          <div className="w-28 bg-blue-100 dark:bg-blue-900 rounded-full h-1.5 overflow-hidden">
+                            <div
+                              className="bg-blue-500 h-1.5 rounded-full animate-pulse"
+                              style={{ width: "65%" }}
+                            />
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            This may take a few minutes
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="flex items-center space-x-2">
+                          {getStatusIcon(component.analysis_status)}
+                          <Badge
+                            variant={getStatusBadgeVariant(
+                              component.analysis_status
+                            )}
+                          >
+                            {component.analysis_status}
+                          </Badge>
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       {/* --- NEW: Delete Button with Confirmation --- */}
