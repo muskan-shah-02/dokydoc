@@ -536,3 +536,50 @@ def delete_mapping(
     if not mapping:
         raise HTTPException(status_code=404, detail="Mapping not found")
     crud.concept_mapping.remove(db=db, id=mapping_id, tenant_id=tenant_id)
+
+
+@router.post("/extract-code-concepts", status_code=status.HTTP_202_ACCEPTED)
+def extract_code_concepts(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    background_tasks: BackgroundTasks = None,
+) -> Any:
+    """
+    Extract ontology concepts from ALL completed code components.
+    This is a backfill endpoint — extracts concepts from existing structured_analysis
+    without making additional AI calls. Creates code-layer concepts for the BOE.
+    """
+    from app.services.code_analysis_service import code_analysis_service
+    from app.models.code_component import CodeComponent
+
+    # Get all completed components with structured_analysis
+    components = db.query(CodeComponent).filter(
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.analysis_status == "completed",
+        CodeComponent.structured_analysis.isnot(None),
+    ).all()
+
+    if not components:
+        return {"message": "No completed code components found", "concepts_extracted": 0}
+
+    total_concepts = 0
+    for comp in components:
+        try:
+            code_analysis_service._extract_ontology_from_analysis(
+                db=db,
+                structured_analysis=comp.structured_analysis,
+                component_name=comp.name,
+                tenant_id=tenant_id,
+            )
+            total_concepts += 1
+        except Exception as e:
+            pass  # Non-fatal, continue with other components
+
+    db.commit()
+
+    return {
+        "message": f"Code concepts extracted from {total_concepts} components",
+        "components_processed": total_concepts,
+        "total_components": len(components),
+    }

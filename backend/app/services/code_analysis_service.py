@@ -228,8 +228,13 @@ class CodeAnalysisService(LoggerMixin):
                 )
                 return
 
-            # 1. Update status to 'processing' to give feedback to the UI
-            crud.code_component.update(db, db_obj=component, obj_in={"analysis_status": "processing"})
+            # 1. Update status to 'processing' and record start time
+            from datetime import datetime as dt
+            analysis_start = dt.now()
+            crud.code_component.update(db, db_obj=component, obj_in={
+                "analysis_status": "processing",
+                "analysis_started_at": analysis_start,
+            })
             db.commit()
 
             # 2. Fetch the raw code content
@@ -362,6 +367,7 @@ class CodeAnalysisService(LoggerMixin):
                 "token_count_input": input_tokens,
                 "token_count_output": output_tokens,
                 "cost_breakdown": cost_breakdown,
+                "analysis_completed_at": dt.now(),
             }
             crud.code_component.update(db, db_obj=component, obj_in=update_data)
             self.logger.info(f"Successfully completed and stored analysis for component_id: {component.id}")

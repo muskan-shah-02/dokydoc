@@ -174,8 +174,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await api.login(email, password);
 
-      // Store token
+      // Store tokens
       localStorage.setItem('accessToken', response.access_token);
+      if (response.refresh_token) {
+        localStorage.setItem('refreshToken', response.refresh_token);
+      }
 
       // Store user and tenant
       localStorage.setItem('user', JSON.stringify(response.user));

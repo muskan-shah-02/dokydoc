@@ -605,6 +605,15 @@ export default function OntologyDashboard() {
             {synonymDetecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
             Detect Synonyms
           </button>
+          <button onClick={async () => {
+              try {
+                await api.post("/ontology/extract-code-concepts");
+                await fetchAll();
+              } catch (e) { console.error("Code concept extraction failed:", e); }
+            }}
+            className="flex items-center gap-1.5 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100">
+            <Code2 className="h-4 w-4" /> Extract Code Concepts
+          </button>
           <button onClick={() => setShowConceptDialog(true)}
             className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">
             <PlusCircle className="h-4 w-4" /> Add Concept

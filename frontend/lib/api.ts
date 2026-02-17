@@ -55,11 +55,53 @@ export class ApiClient {
   }
 
   /**
+   * Attempt to refresh the access token using the stored refresh token.
+   * Returns true if refresh succeeded, false otherwise.
+   */
+  private async tryRefreshToken(): Promise<boolean> {
+    const refreshToken = localStorage.getItem('refreshToken');
+    if (!refreshToken) return false;
+
+    try {
+      const res = await fetch(`${this.baseUrl}/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return false;
+
+      const data = await res.json();
+      localStorage.setItem('accessToken', data.access_token);
+      if (data.refresh_token) {
+        localStorage.setItem('refreshToken', data.refresh_token);
+      }
+      console.log('[API] Token refreshed successfully');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Handle API response
    */
-  private async handleResponse<T>(response: Response): Promise<T> {
+  private async handleResponse<T>(response: Response, retryFn?: () => Promise<Response>): Promise<T> {
     if (!response.ok) {
-      // Handle 401 Unauthorized - token expired or invalid
+      // Handle 401 Unauthorized - try refresh before redirecting
+      if (response.status === 401 && retryFn) {
+        const refreshed = await this.tryRefreshToken();
+        if (refreshed) {
+          const retryResponse = await retryFn();
+          return this.handleResponse<T>(retryResponse);
+        }
+        console.error('[API] 401 Unauthorized - token refresh failed, redirecting to login');
+        localStorage.clear();
+        if (typeof window !== 'undefined') {
+          window.location.href = '/login?session=expired';
+        }
+        throw new Error('Session expired. Please login again.');
+      }
+
       if (response.status === 401) {
         console.error('[API] 401 Unauthorized - clearing session and redirecting to login');
         localStorage.clear();
@@ -117,7 +159,8 @@ export class ApiClient {
       headers,
     });
 
-    return this.handleResponse<T>(response);
+    const retryFn = () => fetch(url.toString(), { method: 'GET', headers: this.getAuthHeaders() });
+    return this.handleResponse<T>(response, retryFn);
   }
 
   /**
@@ -139,7 +182,10 @@ export class ApiClient {
       body: JSON.stringify(data),
     });
 
-    return this.handleResponse<T>(response);
+    const retryFn = () => fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'POST', headers: this.getAuthHeaders(), body: JSON.stringify(data),
+    });
+    return this.handleResponse<T>(response, retryFn);
   }
 
   /**
@@ -152,7 +198,10 @@ export class ApiClient {
       body: JSON.stringify(data),
     });
 
-    return this.handleResponse<T>(response);
+    const retryFn = () => fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'PUT', headers: this.getAuthHeaders(), body: JSON.stringify(data),
+    });
+    return this.handleResponse<T>(response, retryFn);
   }
 
   /**
@@ -164,7 +213,10 @@ export class ApiClient {
       headers: this.getAuthHeaders(),
     });
 
-    return this.handleResponse<T>(response);
+    const retryFn = () => fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'DELETE', headers: this.getAuthHeaders(),
+    });
+    return this.handleResponse<T>(response, retryFn);
   }
 
   /**

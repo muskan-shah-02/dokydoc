@@ -645,9 +645,29 @@ function RequirementsSection({ data, role }: { data: ParsedData; role: UserRole 
     });
   }, [data.requirements, filter, search]);
 
+  const handleExportCSV = () => {
+    const headers = ["ID", "Type", "Priority", "Title", "Description", "Source"];
+    const rows = filtered.map(r => [
+      r.id, r.type, r.priority, r.title,
+      r.description.replace(/"/g, '""'), r.source,
+    ]);
+    const csvContent = [
+      headers.join(","),
+      ...rows.map(row => row.map(cell => `"${cell}"`).join(","))
+    ].join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `requirements-${new Date().toISOString().split("T")[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-4">
-      {/* Filters */}
+      {/* Filters + Export */}
       <div className="flex items-center gap-4">
         <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -671,6 +691,15 @@ function RequirementsSection({ data, role }: { data: ParsedData; role: UserRole 
             </Button>
           ))}
         </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleExportCSV}
+          className="ml-auto"
+        >
+          <Download className="w-4 h-4 mr-2" />
+          Export CSV
+        </Button>
       </div>
 
       {/* Requirements List */}

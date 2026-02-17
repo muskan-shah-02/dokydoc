@@ -70,6 +70,8 @@ interface CodeComponent {
   ai_cost_inr: number | null;
   token_count_input: number | null;
   token_count_output: number | null;
+  analysis_started_at: string | null;
+  analysis_completed_at: string | null;
 }
 
 export default function CodePage() {
@@ -542,6 +544,7 @@ export default function CodePage() {
                   <TableHead>Location</TableHead>
                   <TableHead>Version</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Duration</TableHead>
                   <TableHead className="text-right">Cost</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -612,8 +615,23 @@ export default function CodePage() {
                         </div>
                       )}
                     </TableCell>
+                    <TableCell className="text-right text-sm text-muted-foreground">
+                      {component.analysis_started_at && component.analysis_completed_at ? (
+                        (() => {
+                          const sec = Math.round(
+                            (new Date(component.analysis_completed_at).getTime() -
+                              new Date(component.analysis_started_at).getTime()) / 1000
+                          );
+                          return sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
+                        })()
+                      ) : component.analysis_status === "processing" ? (
+                        <span className="text-blue-600 animate-pulse">Running...</span>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
                     <TableCell className="text-right font-mono text-sm">
-                      {component.ai_cost_inr != null ? (
+                      {component.ai_cost_inr != null && component.ai_cost_inr > 0 ? (
                         <span className="text-green-700">₹{component.ai_cost_inr.toFixed(2)}</span>
                       ) : (
                         <span className="text-muted-foreground">—</span>

@@ -52,6 +52,10 @@ class CodeComponentInDBBase(CodeComponentBase):
     token_count_output: Optional[int] = None
     cost_breakdown: Optional[Dict[str, Any]] = None
 
+    # Analysis timing
+    analysis_started_at: Optional[datetime] = None
+    analysis_completed_at: Optional[datetime] = None
+
     class Config:
         # This vital setting allows Pydantic to read data directly from
         # a SQLAlchemy ORM model instance.

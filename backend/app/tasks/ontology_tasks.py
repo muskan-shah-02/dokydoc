@@ -60,7 +60,7 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
             f"{result.get('relationships_created', 0)} relationships"
         )
 
-        # Deduct cost
+        # Deduct cost and log to usage_log for billing analytics
         cost_inr = result.get("cost_inr", 0)
         if cost_inr > 0 and tenant_id:
             try:
@@ -71,6 +71,25 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
                 )
             except Exception as billing_error:
                 logger.warning(f"Ontology billing deduction failed (non-critical): {billing_error}")
+
+            # Log to usage_log so it appears in billing analytics
+            try:
+                from app.services.cost_service import cost_service
+                crud.usage_log.log_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    document_id=document_id,
+                    feature_type="document_analysis",
+                    operation="ontology_extraction",
+                    model_used="gemini-2.5-flash",
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=cost_inr / 84.0,
+                    cost_inr=cost_inr,
+                )
+            except Exception as log_error:
+                logger.warning(f"Usage logging failed (non-critical): {log_error}")
 
         # Trigger cross-graph mapping for newly created concepts
         if result.get("entities_created", 0) > 0:
@@ -126,7 +145,7 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             f"{result.get('relationships_created', 0)} relationships"
         )
 
-        # Deduct cost
+        # Deduct cost and log to usage_log for billing analytics
         cost_inr = result.get("cost_inr", 0)
         if cost_inr > 0 and tenant_id:
             try:
@@ -137,6 +156,23 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
                 )
             except Exception as billing_error:
                 logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
+
+            # Log to usage_log so it appears in billing analytics
+            try:
+                crud.usage_log.log_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    feature_type="code_analysis",
+                    operation="code_ontology_extraction",
+                    model_used="gemini-2.5-flash",
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=cost_inr / 84.0,
+                    cost_inr=cost_inr,
+                )
+            except Exception as log_error:
+                logger.warning(f"Usage logging failed (non-critical): {log_error}")
 
         # Trigger cross-graph mapping (algorithmic — replaces expensive AI reconciliation)
         if result.get("entities_created", 0) > 0:
