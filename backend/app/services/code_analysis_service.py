@@ -306,19 +306,22 @@ class CodeAnalysisService(LoggerMixin):
                 )
                 self.logger.info(f"💾 Cached analysis result for component {component_id}")
 
-            # 4. Calculate cost from token usage
+            # 4. Calculate cost from token usage (including thinking tokens!)
             token_usage = analysis_result.pop("_token_usage", {})
             input_tokens = token_usage.get("input_tokens", 0)
             output_tokens = token_usage.get("output_tokens", 0)
+            thinking_tokens = token_usage.get("thinking_tokens", 0)
 
             cost_data = {}
             total_cost_inr = 0.0
-            if input_tokens or output_tokens:
-                cost_data = cost_service.calculate_cost_from_actual_tokens(input_tokens, output_tokens)
+            if input_tokens or output_tokens or thinking_tokens:
+                cost_data = cost_service.calculate_cost_from_actual_tokens(
+                    input_tokens, output_tokens, thinking_tokens=thinking_tokens
+                )
                 total_cost_inr = float(cost_data.get("cost_inr", 0))
                 self.logger.info(
                     f"💰 Code analysis cost: ₹{total_cost_inr:.4f} "
-                    f"({input_tokens} in + {output_tokens} out tokens)"
+                    f"({input_tokens} in + {output_tokens} out + {thinking_tokens} thinking tokens)"
                 )
 
                 # Deduct cost from tenant billing
@@ -332,7 +335,7 @@ class CodeAnalysisService(LoggerMixin):
                 except Exception as e:
                     self.logger.warning(f"Failed to deduct cost: {e}")
 
-                # Log usage for analytics
+                # Log usage for analytics (combine output + thinking for total output)
                 try:
                     crud.usage_log.log_usage(
                         db=db,
@@ -342,10 +345,10 @@ class CodeAnalysisService(LoggerMixin):
                         operation="code_analysis",
                         model_used="gemini-2.5-flash",
                         input_tokens=input_tokens,
-                        output_tokens=output_tokens,
+                        output_tokens=output_tokens + thinking_tokens,
                         cost_usd=float(cost_data.get("cost_usd", 0)),
                         cost_inr=total_cost_inr,
-                        extra_data={"component_id": component_id, "component_name": component.name}
+                        extra_data={"component_id": component_id, "component_name": component.name, "thinking_tokens": thinking_tokens}
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to log usage: {e}")
@@ -357,6 +360,7 @@ class CodeAnalysisService(LoggerMixin):
                     "cost_usd": float(cost_data.get("cost_usd", 0)) if cost_data else 0,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "thinking_tokens": thinking_tokens,
                 }
             }
             update_data = {

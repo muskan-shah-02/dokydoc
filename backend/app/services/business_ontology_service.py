@@ -117,10 +117,15 @@ class BusinessOntologyService(LoggerMixin):
             extraction_result = json.loads(cleaned)
         except Exception as e:
             self.logger.error(f"Entity extraction AI call failed for document {document_id}: {e}")
-            return {"entities_created": 0, "relationships_created": 0, "cost_inr": 0, "error": str(e)}
+            return {"entities_created": 0, "relationships_created": 0, "cost_inr": 0, "input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "error": str(e)}
 
-        # Calculate cost
-        cost_data = cost_service.calculate_cost(full_prompt, response.text)
+        # Calculate cost using actual API token counts (including thinking tokens)
+        tokens = gemini_service.extract_token_usage(response)
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens['input_tokens'],
+            output_tokens=tokens['output_tokens'],
+            thinking_tokens=tokens['thinking_tokens'],
+        )
         total_cost_inr = cost_data.get("cost_inr", 0)
 
         # Ingest the extracted entities and relationships
@@ -141,7 +146,10 @@ class BusinessOntologyService(LoggerMixin):
         return {
             "entities_created": entities_created,
             "relationships_created": relationships_created,
-            "cost_inr": total_cost_inr
+            "cost_inr": total_cost_inr,
+            "input_tokens": tokens['input_tokens'],
+            "output_tokens": tokens['output_tokens'],
+            "thinking_tokens": tokens['thinking_tokens'],
         }
 
     def _ingest_extraction_result(
@@ -256,6 +264,9 @@ class BusinessOntologyService(LoggerMixin):
         total_entities = 0
         total_relationships = 0
         total_cost = 0.0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
 
         for i in range(0, len(combined_data), batch_size):
             batch = combined_data[i:i + batch_size]
@@ -274,9 +285,17 @@ class BusinessOntologyService(LoggerMixin):
                 self.logger.error(f"Code entity extraction failed for repo {repo_id} batch {i}: {e}")
                 continue
 
-            # Calculate cost
-            cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            # Calculate cost using actual API token counts (including thinking tokens)
+            tokens = gemini_service.extract_token_usage(response)
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens['input_tokens'],
+                output_tokens=tokens['output_tokens'],
+                thinking_tokens=tokens['thinking_tokens'],
+            )
             total_cost += cost_data.get("cost_inr", 0)
+            total_input_tokens += tokens['input_tokens']
+            total_output_tokens += tokens['output_tokens']
+            total_thinking_tokens += tokens['thinking_tokens']
 
             # Ingest with source_type="code" — triggers cross-reference if concept exists from documents
             entities = extraction_result.get("entities", [])
@@ -298,7 +317,10 @@ class BusinessOntologyService(LoggerMixin):
         return {
             "entities_created": total_entities,
             "relationships_created": total_relationships,
-            "cost_inr": total_cost
+            "cost_inr": total_cost,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "thinking_tokens": total_thinking_tokens,
         }
 
     async def reconcile_document_code_concepts(
@@ -362,7 +384,13 @@ class BusinessOntologyService(LoggerMixin):
             self.logger.error(f"Reconciliation AI call failed for tenant {tenant_id}: {e}")
             return {"bridges_created": 0, "contradictions_found": 0, "error": str(e)}
 
-        cost_data = cost_service.calculate_cost(full_prompt, response.text)
+        # Calculate cost using actual API token counts (including thinking tokens)
+        tokens = gemini_service.extract_token_usage(response)
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens['input_tokens'],
+            output_tokens=tokens['output_tokens'],
+            thinking_tokens=tokens['thinking_tokens'],
+        )
         total_cost = cost_data.get("cost_inr", 0)
 
         # Build name->concept lookups for each layer
@@ -487,7 +515,15 @@ class BusinessOntologyService(LoggerMixin):
             result = json.loads(cleaned)
         except Exception as e:
             self.logger.error(f"Synonym detection failed for tenant {tenant_id}: {e}")
-            return {"synonym_pairs_found": 0, "error": str(e)}
+            return {"synonym_pairs_found": 0, "cost_inr": 0, "error": str(e)}
+
+        # Calculate cost using actual API token counts (including thinking tokens)
+        tokens = gemini_service.extract_token_usage(response)
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens['input_tokens'],
+            output_tokens=tokens['output_tokens'],
+            thinking_tokens=tokens['thinking_tokens'],
+        )
 
         synonym_pairs = result.get("synonym_pairs", [])
         pairs_created = 0
@@ -526,8 +562,17 @@ class BusinessOntologyService(LoggerMixin):
             except Exception as e:
                 self.logger.warning(f"Failed to create synonym pair: {e}")
 
-        self.logger.info(f"🔍 Synonym detection complete: {pairs_created} pairs found")
-        return {"synonym_pairs_found": pairs_created}
+        self.logger.info(
+            f"🔍 Synonym detection complete: {pairs_created} pairs found, "
+            f"₹{cost_data.get('cost_inr', 0):.4f}"
+        )
+        return {
+            "synonym_pairs_found": pairs_created,
+            "cost_inr": cost_data.get("cost_inr", 0),
+            "input_tokens": tokens['input_tokens'],
+            "output_tokens": tokens['output_tokens'],
+            "thinking_tokens": tokens['thinking_tokens'],
+        }
 
     def get_domain_vocabulary(
         self, db: Session, *, tenant_id: int

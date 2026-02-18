@@ -283,7 +283,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document.composition_analysis = composition_analysis
                 db.commit()
 
-                # SPRINT 2: Log Pass 1 usage for analytics
+                # Log Pass 1 usage for analytics (output_tokens includes thinking tokens)
                 pass_1_data = self._cost_tracker.get(document_id, {}).get('pass_1_composition', {})
                 if pass_1_data:
                     self._log_usage(
@@ -292,7 +292,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                         document_id=document_id,
                         operation=OperationType.PASS_1_COMPOSITION.value,
                         input_tokens=pass_1_data.get('input_tokens', 0),
-                        output_tokens=pass_1_data.get('output_tokens', 0),
+                        output_tokens=pass_1_data.get('output_tokens', 0) + pass_1_data.get('thinking_tokens', 0),
                         cost_usd=pass_1_data.get('cost_inr', 0) / 84,
                         cost_inr=pass_1_data.get('cost_inr', 0),
                         processing_time=pass_1_duration,
@@ -311,7 +311,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 )
                 pass_2_duration = time.time() - start_time
 
-                # SPRINT 2: Log Pass 2 usage for analytics
+                # Log Pass 2 usage for analytics (output_tokens includes thinking tokens)
                 pass_2_data = self._cost_tracker.get(document_id, {}).get('pass_2_segmentation', {})
                 if pass_2_data:
                     self._log_usage(
@@ -320,7 +320,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                         document_id=document_id,
                         operation=OperationType.PASS_2_SEGMENTING.value,
                         input_tokens=pass_2_data.get('input_tokens', 0),
-                        output_tokens=pass_2_data.get('output_tokens', 0),
+                        output_tokens=pass_2_data.get('output_tokens', 0) + pass_2_data.get('thinking_tokens', 0),
                         cost_usd=pass_2_data.get('cost_inr', 0) / 84,
                         cost_inr=pass_2_data.get('cost_inr', 0),
                         processing_time=pass_2_duration,
@@ -337,7 +337,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
                 pass_3_duration = time.time() - start_time
 
-                # SPRINT 2: Log Pass 3 usage for analytics
+                # Log Pass 3 usage for analytics (output_tokens includes thinking tokens)
                 pass_3_data = self._cost_tracker.get(document_id, {}).get('pass_3_extraction', {})
                 if pass_3_data:
                     self._log_usage(
@@ -346,7 +346,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                         document_id=document_id,
                         operation=OperationType.PASS_3_EXTRACTION.value,
                         input_tokens=pass_3_data.get('input_tokens', 0),
-                        output_tokens=pass_3_data.get('output_tokens', 0),
+                        output_tokens=pass_3_data.get('output_tokens', 0) + pass_3_data.get('thinking_tokens', 0),
                         cost_usd=pass_3_data.get('cost_inr', 0) / 84,
                         cost_inr=pass_3_data.get('cost_inr', 0),
                         processing_time=pass_3_duration,
@@ -421,18 +421,19 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             response = await gemini_service.generate_content(full_prompt)
 
-            # ✅ SPRINT 1 PHASE 2: Extract token counts and calculate real cost
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-
-            cost_data = cost_service.calculate_cost(full_prompt, response.text)
-            actual_input = input_tokens or cost_data['input_tokens']
-            actual_output = output_tokens or cost_data['output_tokens']
+            # Extract ALL token counts including thinking tokens
+            tokens = gemini_service.extract_token_usage(response)
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens['input_tokens'],
+                output_tokens=tokens['output_tokens'],
+                thinking_tokens=tokens['thinking_tokens'],
+            )
 
             self._cost_tracker[document_id]['pass_1_composition'] = {
                 'cost_inr': cost_data['cost_inr'],
-                'input_tokens': actual_input,
-                'output_tokens': actual_output
+                'input_tokens': tokens['input_tokens'],
+                'output_tokens': tokens['output_tokens'],
+                'thinking_tokens': tokens['thinking_tokens'],
             }
 
             cleaned_response = repair_json_response(response.text)
@@ -467,15 +468,18 @@ class DocumentAnalysisEngine(LoggerMixin):
 
             response = await gemini_service.generate_content(full_prompt)
 
-            # ✅ SPRINT 1 PHASE 2: Extract token counts and calculate real cost
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-
-            cost_data = cost_service.calculate_cost(full_prompt, response.text)
+            # Extract ALL token counts including thinking tokens
+            tokens = gemini_service.extract_token_usage(response)
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens['input_tokens'],
+                output_tokens=tokens['output_tokens'],
+                thinking_tokens=tokens['thinking_tokens'],
+            )
             self._cost_tracker[document_id]['pass_2_segmentation'] = {
                 'cost_inr': cost_data['cost_inr'],
-                'input_tokens': input_tokens or cost_data['input_tokens'],
-                'output_tokens': output_tokens or cost_data['output_tokens']
+                'input_tokens': tokens['input_tokens'],
+                'output_tokens': tokens['output_tokens'],
+                'thinking_tokens': tokens['thinking_tokens'],
             }
 
             cleaned_response = repair_json_response(response.text)
@@ -536,10 +540,11 @@ class DocumentAnalysisEngine(LoggerMixin):
             else:
                 document = db.query(models.Document).filter(models.Document.id == document_id).first()
 
-            # ✅ SPRINT 1 PHASE 2: Initialize Pass 3 cost tracking
+            # Initialize Pass 3 cost tracking (includes thinking tokens)
             pass_3_cost_inr = 0
             pass_3_input_tokens = 0
             pass_3_output_tokens = 0
+            pass_3_thinking_tokens = 0
 
             for i, segment in enumerate(segments):
                 # --- CRITICAL: Check stop signal inside the loop ---
@@ -587,14 +592,17 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
 
                     response = await gemini_service.generate_content(full_prompt)
 
-                    # ✅ SPRINT 1 PHASE 2: Track cost for this segment
-                    input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-                    output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-
-                    cost_data = cost_service.calculate_cost(full_prompt, response.text)
+                    # Extract ALL token counts including thinking tokens
+                    tokens = gemini_service.extract_token_usage(response)
+                    cost_data = cost_service.calculate_cost_from_actual_tokens(
+                        input_tokens=tokens['input_tokens'],
+                        output_tokens=tokens['output_tokens'],
+                        thinking_tokens=tokens['thinking_tokens'],
+                    )
                     pass_3_cost_inr += cost_data['cost_inr']
-                    pass_3_input_tokens += input_tokens or cost_data['input_tokens']
-                    pass_3_output_tokens += output_tokens or cost_data['output_tokens']
+                    pass_3_input_tokens += tokens['input_tokens']
+                    pass_3_output_tokens += tokens['output_tokens']
+                    pass_3_thinking_tokens += tokens['thinking_tokens']
 
                     try:
                         structured_data = json.loads(repair_json_response(response.text))
@@ -635,11 +643,12 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                     db.commit()
                     continue
 
-            # ✅ SPRINT 1 PHASE 2: Save accumulated Pass 3 costs
+            # Save accumulated Pass 3 costs (includes thinking tokens)
             self._cost_tracker[document_id]['pass_3_extraction'] = {
                 'cost_inr': pass_3_cost_inr,
                 'input_tokens': pass_3_input_tokens,
                 'output_tokens': pass_3_output_tokens,
+                'thinking_tokens': pass_3_thinking_tokens,
                 'segments_analyzed': len(segments)
             }
 

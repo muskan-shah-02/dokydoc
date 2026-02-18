@@ -55,14 +55,16 @@ class TestCostCalculation:
         assert result["output_tokens"] >= result["input_tokens"]
 
     def test_gemini_pricing_accuracy(self):
-        """Test that Gemini 2.5 Flash pricing is accurate (Jan 2025)."""
+        """Test that Gemini 2.5 Flash pricing is accurate (Feb 2026, thinking mode ON)."""
         service = CostService()
 
-        # Gemini 2.5 Flash pricing (as of Jan 2025)
-        # Input: $0.00001875 per 1K tokens
-        # Output: $0.000075 per 1K tokens
-        assert service.cost_per_1k_input_usd == Decimal("0.00001875")
-        assert service.cost_per_1k_output_usd == Decimal("0.000075")
+        # Gemini 2.5 Flash pricing with thinking mode ON (default)
+        # Input: $0.15 per 1M = $0.00015 per 1K
+        # Output: $3.50 per 1M = $0.0035 per 1K (thinking mode rate)
+        # Thinking: $3.50 per 1M = $0.0035 per 1K
+        assert service.cost_per_1k_input_usd == Decimal("0.00015")
+        assert service.cost_per_1k_output_usd == Decimal("0.0035")
+        assert service.cost_per_1k_thinking_usd == Decimal("0.0035")
 
     def test_exchange_rate_is_reasonable(self):
         """Test that USD to INR exchange rate is reasonable."""

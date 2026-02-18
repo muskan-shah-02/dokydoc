@@ -72,9 +72,11 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
             except Exception as billing_error:
                 logger.warning(f"Ontology billing deduction failed (non-critical): {billing_error}")
 
-            # Log to usage_log so it appears in billing analytics
+            # Log to usage_log with ACTUAL token counts (including thinking tokens)
             try:
                 from app.services.cost_service import cost_service
+                actual_input = result.get("input_tokens", 0)
+                actual_output = result.get("output_tokens", 0) + result.get("thinking_tokens", 0)
                 crud.usage_log.log_usage(
                     db=db,
                     tenant_id=tenant_id,
@@ -83,8 +85,8 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
                     feature_type="document_analysis",
                     operation="ontology_extraction",
                     model_used="gemini-2.5-flash",
-                    input_tokens=0,
-                    output_tokens=0,
+                    input_tokens=actual_input,
+                    output_tokens=actual_output,
                     cost_usd=cost_inr / 84.0,
                     cost_inr=cost_inr,
                 )
@@ -157,8 +159,10 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             except Exception as billing_error:
                 logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
 
-            # Log to usage_log so it appears in billing analytics
+            # Log to usage_log with ACTUAL token counts (including thinking tokens)
             try:
+                actual_input = result.get("input_tokens", 0)
+                actual_output = result.get("output_tokens", 0) + result.get("thinking_tokens", 0)
                 crud.usage_log.log_usage(
                     db=db,
                     tenant_id=tenant_id,
@@ -166,8 +170,8 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
                     feature_type="code_analysis",
                     operation="code_ontology_extraction",
                     model_used="gemini-2.5-flash",
-                    input_tokens=0,
-                    output_tokens=0,
+                    input_tokens=actual_input,
+                    output_tokens=actual_output,
                     cost_usd=cost_inr / 84.0,
                     cost_inr=cost_inr,
                 )
@@ -224,7 +228,7 @@ def run_cross_graph_mapping(self, tenant_id: int):
             f"AI cost: INR {result['ai_cost_inr']:.4f}"
         )
 
-        # Deduct AI cost if any
+        # Deduct AI cost if any and log to usage_log
         ai_cost = result.get("ai_cost_inr", 0)
         if ai_cost > 0:
             try:
@@ -235,6 +239,23 @@ def run_cross_graph_mapping(self, tenant_id: int):
                 )
             except Exception as billing_error:
                 logger.warning(f"Mapping billing deduction failed: {billing_error}")
+
+            # Log to usage_log so it appears in billing analytics
+            try:
+                crud.usage_log.log_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    feature_type="document_analysis",
+                    operation="cross_graph_mapping",
+                    model_used="gemini-2.5-flash",
+                    input_tokens=result.get("ai_input_tokens", 0),
+                    output_tokens=result.get("ai_output_tokens", 0),
+                    cost_usd=ai_cost / 84.0,
+                    cost_inr=ai_cost,
+                )
+            except Exception as log_error:
+                logger.warning(f"Mapping usage logging failed: {log_error}")
 
     except Exception as e:
         logger.error(f"CROSS_GRAPH_MAPPING failed for tenant {tenant_id}: {e}")

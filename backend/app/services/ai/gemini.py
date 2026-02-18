@@ -17,17 +17,47 @@ class GeminiService(LoggerMixin):
     Service class for interacting with Google's Gemini AI API.
     Provides both text and vision capabilities with retry logic and error handling.
     """
-    
+
     def __init__(self):
         super().__init__()
-        
+
         if not settings.GEMINI_API_KEY or "YOUR_GEMINI_API_KEY_HERE" in settings.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not configured correctly")
-        
+
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self.model = genai.GenerativeModel(settings.GEMINI_MODEL)
         self.vision_model = genai.GenerativeModel(settings.GEMINI_VISION_MODEL)
         self.logger.info("GeminiService initialized successfully")
+
+    @staticmethod
+    def extract_token_usage(response) -> Dict[str, int]:
+        """
+        Extract ALL token counts from a Gemini API response, including thinking tokens.
+
+        Gemini 2.5 Flash has thinking mode ON by default. The usage_metadata contains:
+        - prompt_token_count: Input tokens
+        - candidates_token_count: Visible output tokens
+        - thoughts_token_count: Hidden reasoning/thinking tokens (CRITICAL for billing!)
+        - total_token_count: Sum of all tokens
+
+        Thinking tokens are billed at $3.50/1M (same as output) but are NOT included
+        in candidates_token_count. They must be tracked separately.
+        """
+        usage = getattr(response, 'usage_metadata', None)
+        if not usage:
+            return {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0}
+
+        input_tokens = getattr(usage, 'prompt_token_count', 0) or 0
+        output_tokens = getattr(usage, 'candidates_token_count', 0) or 0
+        thinking_tokens = getattr(usage, 'thoughts_token_count', 0) or 0
+        total_tokens = getattr(usage, 'total_token_count', 0) or (input_tokens + output_tokens + thinking_tokens)
+
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
+            "total_tokens": total_tokens,
+        }
 
     @retry(
         stop=stop_after_attempt(3),
@@ -46,14 +76,14 @@ class GeminiService(LoggerMixin):
 
             response = await self.model.generate_content_async(prompt, **kwargs)
 
-            # Enhanced logging for response tracking with token counts
+            # Extract ALL token counts including thinking tokens
+            tokens = self.extract_token_usage(response)
             response_length = len(response.text) if response.text else 0
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
 
             self.logger.info(
                 f"✅ GEMINI API SUCCESS - Response: {response_length} chars | "
-                f"Tokens: {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} total"
+                f"Tokens: {tokens['input_tokens']} input + {tokens['output_tokens']} output + "
+                f"{tokens['thinking_tokens']} thinking = {tokens['total_tokens']} total"
             )
 
             return response
@@ -104,10 +134,12 @@ class GeminiService(LoggerMixin):
             response = await self.generate_content(full_prompt)
             response_text = response.text
 
+            # Extract ALL token counts including thinking tokens
+            tokens = self.extract_token_usage(response)
+
             try:
                 analysis_data = json.loads(response_text)
                 self.logger.info(f"Enhanced analysis completed for {file_path}")
-                return analysis_data
             except json.JSONDecodeError:
                 # Try to repair JSON
                 cleaned = response_text.strip()
@@ -119,10 +151,10 @@ class GeminiService(LoggerMixin):
                     cleaned = cleaned[:-3]
                 cleaned = cleaned.strip()
                 try:
-                    return json.loads(cleaned)
+                    analysis_data = json.loads(cleaned)
                 except json.JSONDecodeError as e:
                     self.logger.error(f"Failed to parse enhanced analysis JSON for {file_path}: {e}")
-                    return {
+                    analysis_data = {
                         "summary": f"Enhanced analysis completed but response parsing failed for {file_path}",
                         "structured_analysis": {
                             "language_info": {"primary_language": language or "Unknown", "framework": "Unknown", "file_type": "Unknown"},
@@ -137,6 +169,17 @@ class GeminiService(LoggerMixin):
                             "quality_assessment": "Analysis failed due to response parsing error"
                         }
                     }
+
+            # Always include token usage for cost tracking (including thinking tokens!)
+            analysis_data["_token_usage"] = {
+                "input_tokens": tokens["input_tokens"],
+                "output_tokens": tokens["output_tokens"],
+                "thinking_tokens": tokens["thinking_tokens"],
+                "total_tokens": tokens["total_tokens"],
+                "prompt_length": len(full_prompt),
+                "response_length": len(response_text) if response_text else 0,
+            }
+            return analysis_data
 
         except Exception as e:
             self.logger.error(f"Error in enhanced analysis for {file_path}: {e}")
@@ -162,8 +205,11 @@ class GeminiService(LoggerMixin):
             response = await self.generate_content(prompt)
             response_text = response.text
 
+            # Extract ALL token counts including thinking tokens
+            tokens = self.extract_token_usage(response)
+
             try:
-                return json.loads(response_text)
+                delta_data = json.loads(response_text)
             except json.JSONDecodeError:
                 cleaned = response_text.strip()
                 if cleaned.startswith("```json"):
@@ -172,10 +218,10 @@ class GeminiService(LoggerMixin):
                     cleaned = cleaned[:-3]
                 cleaned = cleaned.strip()
                 try:
-                    return json.loads(cleaned)
+                    delta_data = json.loads(cleaned)
                 except json.JSONDecodeError:
                     self.logger.warning(f"Delta analysis JSON parse failed for {file_path}")
-                    return {
+                    delta_data = {
                         "has_changes": False,
                         "change_summary": "Delta analysis response parsing failed",
                         "changes": {"added": [], "removed": [], "modified": []},
@@ -187,6 +233,15 @@ class GeminiService(LoggerMixin):
                             "reasoning": "Parse error"
                         }
                     }
+
+            # Always include token usage for cost tracking (including thinking tokens!)
+            delta_data["_token_usage"] = {
+                "input_tokens": tokens["input_tokens"],
+                "output_tokens": tokens["output_tokens"],
+                "thinking_tokens": tokens["thinking_tokens"],
+                "total_tokens": tokens["total_tokens"],
+            }
+            return delta_data
 
         except Exception as e:
             self.logger.error(f"Error in delta analysis for {file_path}: {e}")
@@ -211,9 +266,8 @@ class GeminiService(LoggerMixin):
             response = await self.generate_content(full_prompt)
             response_text = response.text
 
-            # Extract token usage from response
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) if hasattr(response, 'usage_metadata') else 0
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) if hasattr(response, 'usage_metadata') else 0
+            # Extract ALL token counts including thinking tokens
+            tokens = self.extract_token_usage(response)
 
             # Parse the JSON response (strip markdown code fences if present)
             try:
@@ -246,10 +300,12 @@ class GeminiService(LoggerMixin):
                         }
                     }
 
-            # Always include token usage for cost tracking
+            # Always include token usage for cost tracking (including thinking tokens!)
             analysis_data["_token_usage"] = {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+                "input_tokens": tokens["input_tokens"],
+                "output_tokens": tokens["output_tokens"],
+                "thinking_tokens": tokens["thinking_tokens"],
+                "total_tokens": tokens["total_tokens"],
                 "prompt_length": len(full_prompt),
                 "response_length": len(response_text) if response_text else 0,
             }
@@ -368,11 +424,26 @@ async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
     """
     try:
         response = await model.generate_content_async(prompt)
+
+        # Track validation cost (was previously untracked!)
+        tokens = GeminiService.extract_token_usage(response)
+        from app.services.cost_service import cost_service
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens["input_tokens"],
+            output_tokens=tokens["output_tokens"],
+            thinking_tokens=tokens["thinking_tokens"],
+        )
+        logger.info(
+            f"Validation API cost: ₹{cost_data['cost_inr']:.4f} "
+            f"({tokens['input_tokens']} in + {tokens['output_tokens']} out + {tokens['thinking_tokens']} thinking)"
+        )
+
         cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
         result = json.loads(cleaned_text)
         logger.info(f"Validation for {context.focus_area.value} complete: {len(result)} mismatches found.")
-        return result if isinstance(result, list) else []
+        # Attach cost data for callers to log
+        return {"mismatches": result if isinstance(result, list) else [], "_cost": cost_data, "_tokens": tokens}
     except Exception as e:
         logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)
-        return []
+        return {"mismatches": [], "_cost": None, "_tokens": None}
     

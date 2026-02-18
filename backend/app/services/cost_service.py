@@ -20,27 +20,38 @@ class PricingTier:
     """Pricing information for a specific model/tier."""
     model: str
     input_per_1m_usd: Decimal
-    output_per_1m_usd: Decimal
-    cached_per_1m_usd: Decimal  # Context caching discount
-    search_per_1k_usd: Decimal  # Grounding with Google Search
+    output_per_1m_usd: Decimal       # Regular output tokens (thinking mode ON)
+    thinking_per_1m_usd: Decimal     # Thinking/reasoning tokens (same rate when thinking ON)
+    cached_per_1m_usd: Decimal       # Context caching discount
+    search_per_1k_usd: Decimal       # Grounding with Google Search
     description: str
 
 
 # ============================================================================
 # GEMINI 2.5 FLASH PRICING (2026)
-# Source: Google AI Pricing Page
+# Source: Google AI Pricing Page (ai.google.dev/pricing)
 # Last Updated: February 2026
 #
 # CRITICAL: These values MUST match Google's official pricing!
+#
+# Gemini 2.5 Flash has THINKING MODE ON by default.
+# When thinking is enabled:
+#   - Input tokens:    $0.15 per 1M
+#   - Output tokens:   $3.50 per 1M (higher rate when thinking is ON)
+#   - Thinking tokens: $3.50 per 1M (reasoning tokens, billed as output)
+#
+# Thinking tokens are reported separately in usage_metadata.thoughts_token_count
+# but are NOT included in candidates_token_count. Both must be tracked.
 # ============================================================================
 
 GEMINI_25_FLASH_PRICING = PricingTier(
     model="gemini-2.5-flash",
-    input_per_1m_usd=Decimal("0.30"),      # $0.30 per 1M input tokens
-    output_per_1m_usd=Decimal("2.50"),     # $2.50 per 1M output tokens (⚠️ HIGH!)
-    cached_per_1m_usd=Decimal("0.03"),     # $0.03 per 1M cached tokens (90% discount)
+    input_per_1m_usd=Decimal("0.15"),      # $0.15 per 1M input tokens
+    output_per_1m_usd=Decimal("3.50"),     # $3.50 per 1M output tokens (thinking mode ON)
+    thinking_per_1m_usd=Decimal("3.50"),   # $3.50 per 1M thinking tokens
+    cached_per_1m_usd=Decimal("0.0375"),   # $0.0375 per 1M cached tokens (75% discount)
     search_per_1k_usd=Decimal("14.00"),    # $14.00 per 1K search queries
-    description="Gemini 2.5 Flash - Fast, cost-effective for document analysis"
+    description="Gemini 2.5 Flash - Thinking mode ON (default)"
 )
 
 # For reference: older model pricing
@@ -48,6 +59,7 @@ GEMINI_15_FLASH_PRICING = PricingTier(
     model="gemini-1.5-flash",
     input_per_1m_usd=Decimal("0.075"),
     output_per_1m_usd=Decimal("0.30"),
+    thinking_per_1m_usd=Decimal("0.00"),   # No thinking support
     cached_per_1m_usd=Decimal("0.01875"),
     search_per_1k_usd=Decimal("14.00"),
     description="Gemini 1.5 Flash - Legacy model"
@@ -59,21 +71,29 @@ class CostService:
     Service for calculating AI API costs based on token usage.
 
     ═══════════════════════════════════════════════════════════════════════════
-    GEMINI 2.5 FLASH PRICING (February 2026)
+    GEMINI 2.5 FLASH PRICING (February 2026) — THINKING MODE ON (default)
     ═══════════════════════════════════════════════════════════════════════════
 
     ┌─────────────────────┬────────────────────┬─────────────────────────────┐
     │ Factor              │ Price (USD)        │ Notes                       │
     ├─────────────────────┼────────────────────┼─────────────────────────────┤
-    │ Input Tokens        │ $0.30 / 1M tokens  │ Prompts, documents, context │
-    │ Output Tokens       │ $2.50 / 1M tokens  │ ⚠️ THE EXPENSIVE ONE!       │
-    │ Cached Tokens       │ $0.03 / 1M tokens  │ 90% discount if cached      │
+    │ Input Tokens        │ $0.15 / 1M tokens  │ Prompts, documents, context │
+    │ Output Tokens       │ $3.50 / 1M tokens  │ Regular output (thinking ON)│
+    │ Thinking Tokens     │ $3.50 / 1M tokens  │ Reasoning tokens (HIDDEN!)  │
+    │ Cached Tokens       │ $0.0375 / 1M tokens│ 75% discount if cached      │
     │ Search Queries      │ $14.00 / 1K queries│ Grounding with Google Search│
     └─────────────────────┴────────────────────┴─────────────────────────────┘
 
+    IMPORTANT: Gemini 2.5 Flash has thinking mode ON by default. The model
+    generates "thinking tokens" (chain-of-thought reasoning) that are:
+    - NOT included in candidates_token_count
+    - Reported separately in usage_metadata.thoughts_token_count
+    - Billed at $3.50/1M (same as output tokens)
+    - Can be 1-5x the visible output token count
+
     FORMULA:
     ────────
-    cost_usd = (input_tokens / 1,000,000 × $0.30) + (output_tokens / 1,000,000 × $2.50)
+    cost_usd = (input / 1M × $0.15) + (output / 1M × $3.50) + (thinking / 1M × $3.50)
     cost_inr = cost_usd × exchange_rate
 
     ═══════════════════════════════════════════════════════════════════════════
@@ -93,9 +113,10 @@ class CostService:
         self.pricing = GEMINI_25_FLASH_PRICING
 
         # Convert to per-1K for calculation convenience
-        self.cost_per_1k_input_usd = self.pricing.input_per_1m_usd / 1000   # $0.0003 per 1K
-        self.cost_per_1k_output_usd = self.pricing.output_per_1m_usd / 1000  # $0.0025 per 1K
-        self.cost_per_1k_cached_usd = self.pricing.cached_per_1m_usd / 1000  # $0.00003 per 1K
+        self.cost_per_1k_input_usd = self.pricing.input_per_1m_usd / 1000       # $0.00015 per 1K
+        self.cost_per_1k_output_usd = self.pricing.output_per_1m_usd / 1000     # $0.0035 per 1K
+        self.cost_per_1k_thinking_usd = self.pricing.thinking_per_1m_usd / 1000  # $0.0035 per 1K
+        self.cost_per_1k_cached_usd = self.pricing.cached_per_1m_usd / 1000     # $0.0000375 per 1K
 
         # Exchange rate (USD to INR) with automatic updates
         self.usd_to_inr = Decimal("84.0")  # Fallback if API fetch fails
@@ -111,6 +132,7 @@ class CostService:
             f"💰 Cost Service Active | Model: {self.pricing.model} | "
             f"Input: ${self.pricing.input_per_1m_usd}/1M | "
             f"Output: ${self.pricing.output_per_1m_usd}/1M | "
+            f"Thinking: ${self.pricing.thinking_per_1m_usd}/1M | "
             f"Exchange: ₹{self.usd_to_inr}/USD"
         )
 
@@ -131,6 +153,7 @@ class CostService:
             "rates_usd": {
                 "input_per_1m_tokens": float(self.pricing.input_per_1m_usd),
                 "output_per_1m_tokens": float(self.pricing.output_per_1m_usd),
+                "thinking_per_1m_tokens": float(self.pricing.thinking_per_1m_usd),
                 "cached_per_1m_tokens": float(self.pricing.cached_per_1m_usd),
                 "search_per_1k_queries": float(self.pricing.search_per_1k_usd),
             },
@@ -139,6 +162,7 @@ class CostService:
             "rates_inr": {
                 "input_per_1m_tokens": float(self.pricing.input_per_1m_usd * self.usd_to_inr),
                 "output_per_1m_tokens": float(self.pricing.output_per_1m_usd * self.usd_to_inr),
+                "thinking_per_1m_tokens": float(self.pricing.thinking_per_1m_usd * self.usd_to_inr),
                 "cached_per_1m_tokens": float(self.pricing.cached_per_1m_usd * self.usd_to_inr),
                 "search_per_1k_queries": float(self.pricing.search_per_1k_usd * self.usd_to_inr),
             },
@@ -151,20 +175,25 @@ class CostService:
 
             # The formula (for transparency)
             "formula": {
-                "cost_usd": "(input_tokens / 1,000,000 × input_rate) + (output_tokens / 1,000,000 × output_rate)",
+                "cost_usd": "(input / 1M × $0.15) + (output / 1M × $3.50) + (thinking / 1M × $3.50)",
                 "cost_inr": "cost_usd × exchange_rate",
+                "note": "Gemini 2.5 Flash has thinking mode ON by default. Thinking tokens are hidden reasoning tokens billed separately.",
                 "example": {
                     "input_tokens": 10000,
                     "output_tokens": 5000,
+                    "thinking_tokens": 8000,
                     "input_cost_usd": float(Decimal("10000") / 1000000 * self.pricing.input_per_1m_usd),
                     "output_cost_usd": float(Decimal("5000") / 1000000 * self.pricing.output_per_1m_usd),
+                    "thinking_cost_usd": float(Decimal("8000") / 1000000 * self.pricing.thinking_per_1m_usd),
                     "total_usd": float(
                         (Decimal("10000") / 1000000 * self.pricing.input_per_1m_usd) +
-                        (Decimal("5000") / 1000000 * self.pricing.output_per_1m_usd)
+                        (Decimal("5000") / 1000000 * self.pricing.output_per_1m_usd) +
+                        (Decimal("8000") / 1000000 * self.pricing.thinking_per_1m_usd)
                     ),
                     "total_inr": float(
                         ((Decimal("10000") / 1000000 * self.pricing.input_per_1m_usd) +
-                         (Decimal("5000") / 1000000 * self.pricing.output_per_1m_usd)) * self.usd_to_inr
+                         (Decimal("5000") / 1000000 * self.pricing.output_per_1m_usd) +
+                         (Decimal("8000") / 1000000 * self.pricing.thinking_per_1m_usd)) * self.usd_to_inr
                     ),
                 }
             },
@@ -182,15 +211,22 @@ class CostService:
                     "factor": "Output Tokens",
                     "rate_usd": f"${self.pricing.output_per_1m_usd} per 1M tokens",
                     "rate_inr": f"₹{float(self.pricing.output_per_1m_usd * self.usd_to_inr):.2f} per 1M tokens",
-                    "description": "Tokens received FROM the AI (⚠️ Most expensive!)",
-                    "typical_usage": "JSON analysis results, extracted data, summaries",
-                    "warning": "Output tokens cost 8.3x more than input tokens!"
+                    "description": "Visible response tokens from the AI",
+                    "typical_usage": "JSON analysis results, extracted data, summaries"
+                },
+                {
+                    "factor": "Thinking Tokens",
+                    "rate_usd": f"${self.pricing.thinking_per_1m_usd} per 1M tokens",
+                    "rate_inr": f"₹{float(self.pricing.thinking_per_1m_usd * self.usd_to_inr):.2f} per 1M tokens",
+                    "description": "Hidden reasoning tokens (thinking mode ON by default)",
+                    "typical_usage": "Chain-of-thought reasoning before generating output",
+                    "warning": "Thinking tokens can be 1-5x the visible output. They are the biggest cost driver!"
                 },
                 {
                     "factor": "Cached Tokens",
                     "rate_usd": f"${self.pricing.cached_per_1m_usd} per 1M tokens",
                     "rate_inr": f"₹{float(self.pricing.cached_per_1m_usd * self.usd_to_inr):.2f} per 1M tokens",
-                    "description": "90% discount when using context caching",
+                    "description": "75% discount when using context caching",
                     "typical_usage": "Repeated analysis of similar documents"
                 },
                 {
@@ -249,6 +285,7 @@ class CostService:
         self,
         input_tokens: int,
         output_tokens: int,
+        thinking_tokens: int = 0,
         cached_tokens: int = 0,
         search_queries: int = 0
     ) -> Dict[str, Any]:
@@ -260,6 +297,7 @@ class CostService:
         Args:
             input_tokens: Actual prompt_token_count from Gemini
             output_tokens: Actual candidates_token_count from Gemini
+            thinking_tokens: Actual thoughts_token_count from Gemini (CRITICAL!)
             cached_tokens: Tokens served from cache (optional)
             search_queries: Number of search queries (optional)
 
@@ -269,36 +307,41 @@ class CostService:
         # Calculate individual costs in USD
         input_cost_usd = (Decimal(input_tokens) / 1000) * self.cost_per_1k_input_usd
         output_cost_usd = (Decimal(output_tokens) / 1000) * self.cost_per_1k_output_usd
+        thinking_cost_usd = (Decimal(thinking_tokens) / 1000) * self.cost_per_1k_thinking_usd
         cached_cost_usd = (Decimal(cached_tokens) / 1000) * self.cost_per_1k_cached_usd
         search_cost_usd = (Decimal(search_queries) / 1000) * self.pricing.search_per_1k_usd
 
-        total_cost_usd = input_cost_usd + output_cost_usd + cached_cost_usd + search_cost_usd
+        total_cost_usd = input_cost_usd + output_cost_usd + thinking_cost_usd + cached_cost_usd + search_cost_usd
 
         # Convert to INR
         input_cost_inr = float(input_cost_usd * self.usd_to_inr)
         output_cost_inr = float(output_cost_usd * self.usd_to_inr)
+        thinking_cost_inr = float(thinking_cost_usd * self.usd_to_inr)
         cached_cost_inr = float(cached_cost_usd * self.usd_to_inr)
         search_cost_inr = float(search_cost_usd * self.usd_to_inr)
         total_cost_inr = float(total_cost_usd * self.usd_to_inr)
 
         logger.info(
             f"💰 COST CALCULATION | Model: {self.pricing.model}\n"
-            f"   📥 Input:  {input_tokens:,} tokens × ${self.pricing.input_per_1m_usd}/1M = ${float(input_cost_usd):.6f} (₹{input_cost_inr:.4f})\n"
-            f"   📤 Output: {output_tokens:,} tokens × ${self.pricing.output_per_1m_usd}/1M = ${float(output_cost_usd):.6f} (₹{output_cost_inr:.4f})\n"
-            f"   💵 TOTAL:  ${float(total_cost_usd):.6f} USD = ₹{total_cost_inr:.4f} INR"
+            f"   📥 Input:    {input_tokens:,} tokens × ${self.pricing.input_per_1m_usd}/1M = ${float(input_cost_usd):.6f} (₹{input_cost_inr:.4f})\n"
+            f"   📤 Output:   {output_tokens:,} tokens × ${self.pricing.output_per_1m_usd}/1M = ${float(output_cost_usd):.6f} (₹{output_cost_inr:.4f})\n"
+            f"   🧠 Thinking: {thinking_tokens:,} tokens × ${self.pricing.thinking_per_1m_usd}/1M = ${float(thinking_cost_usd):.6f} (₹{thinking_cost_inr:.4f})\n"
+            f"   💵 TOTAL:    ${float(total_cost_usd):.6f} USD = ₹{total_cost_inr:.4f} INR"
         )
 
         return {
             # Token counts
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "thinking_tokens": thinking_tokens,
             "cached_tokens": cached_tokens,
             "search_queries": search_queries,
-            "total_tokens": input_tokens + output_tokens,
+            "total_tokens": input_tokens + output_tokens + thinking_tokens,
 
             # Cost breakdown in USD
             "input_cost_usd": float(input_cost_usd),
             "output_cost_usd": float(output_cost_usd),
+            "thinking_cost_usd": float(thinking_cost_usd),
             "cached_cost_usd": float(cached_cost_usd),
             "search_cost_usd": float(search_cost_usd),
             "cost_usd": float(total_cost_usd),
@@ -306,6 +349,7 @@ class CostService:
             # Cost breakdown in INR
             "input_cost_inr": input_cost_inr,
             "output_cost_inr": output_cost_inr,
+            "thinking_cost_inr": thinking_cost_inr,
             "cached_cost_inr": cached_cost_inr,
             "search_cost_inr": search_cost_inr,
             "cost_inr": total_cost_inr,
@@ -315,6 +359,7 @@ class CostService:
                 "model": self.pricing.model,
                 "input_per_1m_usd": float(self.pricing.input_per_1m_usd),
                 "output_per_1m_usd": float(self.pricing.output_per_1m_usd),
+                "thinking_per_1m_usd": float(self.pricing.thinking_per_1m_usd),
                 "usd_to_inr": float(self.usd_to_inr),
             },
 
@@ -322,6 +367,7 @@ class CostService:
             "breakdown_human": {
                 "input": f"{input_tokens:,} tokens @ ${self.pricing.input_per_1m_usd}/1M = ₹{input_cost_inr:.4f}",
                 "output": f"{output_tokens:,} tokens @ ${self.pricing.output_per_1m_usd}/1M = ₹{output_cost_inr:.4f}",
+                "thinking": f"{thinking_tokens:,} tokens @ ${self.pricing.thinking_per_1m_usd}/1M = ₹{thinking_cost_inr:.4f}",
                 "total": f"₹{total_cost_inr:.4f} INR (${float(total_cost_usd):.6f} USD)"
             }
         }

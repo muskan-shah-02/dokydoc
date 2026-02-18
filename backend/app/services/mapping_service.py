@@ -247,8 +247,10 @@ class MappingService(LoggerMixin):
         # ============================
         # TIER 3: AI VALIDATION (PAID — only for ambiguous pairs)
         # ============================
+        ai_input_tokens = 0
+        ai_output_tokens = 0
         if use_ai_fallback and ambiguous_pairs:
-            ai_count, ai_cost = self._validate_ambiguous_pairs(
+            ai_count, ai_cost, ai_input_tokens, ai_output_tokens = self._validate_ambiguous_pairs(
                 db=db, pairs=ambiguous_pairs, tenant_id=tenant_id,
                 mapped_doc_ids=mapped_doc_ids, mapped_code_ids=mapped_code_ids
             )
@@ -277,6 +279,8 @@ class MappingService(LoggerMixin):
             "total_gaps": total_gaps,
             "total_undocumented": total_undocumented,
             "ai_cost_inr": ai_cost,
+            "ai_input_tokens": ai_input_tokens,
+            "ai_output_tokens": ai_output_tokens,
         }
 
     def run_incremental_mapping(
@@ -413,13 +417,16 @@ class MappingService(LoggerMixin):
     def _validate_ambiguous_pairs(
         self, db: Session, pairs: List[Tuple], tenant_id: int,
         mapped_doc_ids: set, mapped_code_ids: set,
-    ) -> Tuple[int, float]:
+    ) -> Tuple[int, float, int, int]:
         """
         Tier 3: Send ambiguous pairs to AI for validation.
         Each pair is a tiny prompt (~200 tokens) — NOT the full graph.
+        Returns: (ai_count, total_cost_inr, ai_input_tokens, ai_output_tokens)
         """
         ai_count = 0
         total_cost = 0.0
+        ai_input_tokens = 0
+        ai_output_tokens = 0
 
         try:
             from app.services.ai.gemini import gemini_service
@@ -427,10 +434,10 @@ class MappingService(LoggerMixin):
             from app.services.analysis_service import repair_json_response
         except Exception as e:
             self.logger.warning(f"AI service unavailable for Tier 3: {e}")
-            return 0, 0.0
+            return 0, 0.0, 0, 0
 
         if not gemini_service:
-            return 0, 0.0
+            return 0, 0.0, 0, 0
 
         # Batch ambiguous pairs into a single AI call for efficiency
         pair_data = []
@@ -471,8 +478,16 @@ PAIRS TO VALIDATE:
             cleaned = repair_json_response(response.text)
             results = json.loads(cleaned)
 
-            cost_data = cost_service.calculate_cost(prompt, response.text)
+            # Calculate cost using actual API token counts (including thinking tokens)
+            tokens = gemini_service.extract_token_usage(response)
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens['input_tokens'],
+                output_tokens=tokens['output_tokens'],
+                thinking_tokens=tokens['thinking_tokens'],
+            )
             total_cost = cost_data.get("cost_inr", 0)
+            ai_input_tokens = tokens['input_tokens']
+            ai_output_tokens = tokens['output_tokens'] + tokens['thinking_tokens']
 
             for r in results:
                 idx = r.get("pair_index", -1)
@@ -514,7 +529,7 @@ PAIRS TO VALIDATE:
             self.logger.error(f"Tier 3 AI validation failed: {e}")
 
         self.logger.info(f"Tier 3 (AI): {ai_count} validated, cost: INR {total_cost:.4f}")
-        return ai_count, total_cost
+        return ai_count, total_cost, ai_input_tokens, ai_output_tokens
 
 
 # Global instance

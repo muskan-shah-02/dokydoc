@@ -185,7 +185,9 @@ class ValidationService(LoggerMixin):
 
                     validation_results = await asyncio.gather(*ai_tasks)
 
-                    for mismatches in validation_results:
+                    for result in validation_results:
+                        # call_gemini_for_validation returns dict with "mismatches" and "_cost"
+                        mismatches = result.get("mismatches", []) if isinstance(result, dict) else (result or [])
                         if mismatches:
                             for mismatch_data in mismatches:
                                 crud.mismatch.create_with_link(
