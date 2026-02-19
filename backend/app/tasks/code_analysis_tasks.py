@@ -200,6 +200,25 @@ def static_analysis_worker(
 # REPOSITORY ANALYSIS ORCHESTRATOR
 # ============================================================
 
+def _file_analysis_priority(file_info: dict) -> tuple:
+    """
+    Sort files so foundational files are analyzed first (models, schemas, config)
+    and dependent files later (controllers, views, tests).
+    This makes cross-file context more useful — controllers benefit from
+    knowing about models that were analyzed earlier.
+    """
+    path = file_info.get("path", "").lower()
+    if any(k in path for k in ["model", "schema", "entity", "base", "config", "settings", "types"]):
+        return (0, path)
+    if any(k in path for k in ["service", "util", "helper", "middleware", "lib", "core"]):
+        return (1, path)
+    if any(k in path for k in ["controller", "route", "endpoint", "api", "view", "handler", "page"]):
+        return (2, path)
+    if any(k in path for k in ["test", "spec", "fixture", "__test__"]):
+        return (3, path)
+    return (1, path)  # Default: same priority as services
+
+
 @celery_app.task(name="repo_analysis_task", bind=True, max_retries=1)
 def repo_analysis_task(
     self, repo_id: int, tenant_id: int, file_list: list
@@ -232,6 +251,16 @@ def repo_analysis_task(
             analyzed_files=0, total_files=len(file_list),
             status="analyzing"
         )
+
+        # Sort files: foundational first (models/schemas), then services, then controllers, tests last
+        file_list.sort(key=_file_analysis_priority)
+        logger.info(
+            f"Repo {repo_id}: files sorted by dependency priority "
+            f"(models→services→controllers→tests)"
+        )
+
+        # Running context: accumulates summaries from previously-analyzed files
+        repo_context = []  # list of {"path": ..., "summary": ..., "file_type": ...}
 
         completed = 0
         failed = 0
@@ -282,10 +311,26 @@ def repo_analysis_task(
                         obj_in={"repository_id": repo_id}
                     )
 
+                # Build cross-file context from previously-analyzed files
+                # Provides lightweight awareness of sibling files (last 10)
+                context_prefix = ""
+                if repo_context:
+                    recent = repo_context[-10:]
+                    context_lines = [
+                        f"  - {rc['path']} ({rc['file_type']}): {rc['summary']}"
+                        for rc in recent
+                    ]
+                    context_prefix = (
+                        "REPOSITORY CONTEXT (previously analyzed files in this repo):\n"
+                        + "\n".join(context_lines)
+                        + "\n\nNOW ANALYZING:\n"
+                    )
+
                 # Run enhanced analysis with repo context + language
                 import time
+                analysis_content = context_prefix + code_content if context_prefix else code_content
                 result = static_analysis_worker(
-                    component.id, tenant_id, code_content,
+                    component.id, tenant_id, analysis_content,
                     repo_name=repo.name,
                     file_path=file_path,
                     language=file_language
@@ -293,6 +338,20 @@ def repo_analysis_task(
 
                 if result.get("status") == "completed":
                     completed += 1
+                    # Accumulate context for subsequent files
+                    try:
+                        comp_refreshed = crud.code_component.get(
+                            db=db, id=component.id, tenant_id=tenant_id
+                        )
+                        if comp_refreshed and comp_refreshed.summary:
+                            sa = comp_refreshed.structured_analysis or {}
+                            repo_context.append({
+                                "path": file_path,
+                                "summary": (comp_refreshed.summary or "")[:200],
+                                "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
+                            })
+                    except Exception:
+                        pass
                 else:
                     failed += 1
 
@@ -337,6 +396,13 @@ def repo_analysis_task(
             except Exception as ontology_err:
                 logger.warning(f"Failed to dispatch code ontology task (non-critical): {ontology_err}")
 
+            # Dispatch Reduce Phase: synthesize per-file analyses into System Architecture
+            try:
+                repo_synthesis_task.delay(repo_id, tenant_id)
+                logger.info(f"Repo {repo_id}: dispatched synthesis task (Reduce Phase)")
+            except Exception as synth_err:
+                logger.warning(f"Failed to dispatch synthesis task (non-critical): {synth_err}")
+
         return {
             "status": final_status,
             "repo_id": repo_id,
@@ -355,6 +421,220 @@ def repo_analysis_task(
             )
         except Exception:
             pass
+        return {"status": "failed", "repo_id": repo_id, "error": str(e)}
+    finally:
+        if db.is_active:
+            db.commit()
+        db.close()
+
+
+# ============================================================
+# REPOSITORY SYNTHESIS — "REDUCE PHASE" (SPRINT 4)
+# Combines per-file analyses into a System Architecture document
+# ============================================================
+
+@celery_app.task(name="repo_synthesis_task", bind=True, max_retries=1)
+def repo_synthesis_task(self, repo_id: int, tenant_id: int):
+    """
+    Reduce Phase: After all files in a repository have been individually analyzed,
+    synthesize their analyses into a single System Architecture document.
+
+    Groups files by architectural layer (Controller, Service, Model, etc.),
+    builds per-layer compact summaries, then feeds them into a REPOSITORY_SYNTHESIS
+    prompt for a holistic architecture view.
+    """
+    logger.info(f"REPO_SYNTHESIS started for repo_id={repo_id}, tenant_id={tenant_id}")
+
+    db = SessionLocal()
+    try:
+        repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+        if not repo:
+            logger.error(f"Repo synthesis: Repository {repo_id} not found")
+            return {"status": "error", "reason": "repo_not_found"}
+
+        # Mark synthesis as running
+        crud.repository.update(db, db_obj=repo, obj_in={"synthesis_status": "running"})
+
+        # Gather all completed components for this repo
+        from app.models.code_component import CodeComponent
+        components = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "completed",
+            CodeComponent.structured_analysis.isnot(None),
+        ).all()
+
+        if not components:
+            logger.warning(f"Repo synthesis: No completed components for repo {repo_id}")
+            crud.repository.update(db, db_obj=repo, obj_in={
+                "synthesis_status": "failed",
+                "synthesis_data": {"error": "No completed file analyses to synthesize"}
+            })
+            return {"status": "skipped", "reason": "no_completed_components"}
+
+        # Group files by architectural layer using file_type from structured_analysis
+        layers = {}
+        for comp in components:
+            sa_data = comp.structured_analysis or {}
+            lang_info = sa_data.get("language_info", {})
+            file_type = lang_info.get("file_type", "Other")
+            if file_type not in layers:
+                layers[file_type] = []
+            layers[file_type].append({
+                "name": comp.name,
+                "summary": (comp.summary or "")[:300],
+                "language": lang_info.get("primary_language", "Unknown"),
+                "framework": lang_info.get("framework", ""),
+                "business_rules_count": len(sa_data.get("business_rules", [])),
+                "api_contracts_count": len(sa_data.get("api_contracts", [])),
+                "components_count": len(sa_data.get("components", [])),
+                "key_components": [
+                    c.get("name", "") for c in sa_data.get("components", [])[:5]
+                ],
+                "dependencies": sa_data.get("dependencies", [])[:10],
+                "patterns": sa_data.get("patterns_and_architecture", {}).get("design_patterns", []),
+                "security_patterns_count": len(sa_data.get("security_patterns", [])),
+            })
+
+        # Build layer summaries text
+        layer_summaries_parts = []
+        for layer_name, files in sorted(layers.items()):
+            part = f"\n### Layer: {layer_name} ({len(files)} files)\n"
+            for f in files:
+                part += f"- **{f['name']}** ({f['language']}"
+                if f['framework']:
+                    part += f"/{f['framework']}"
+                part += f"): {f['summary']}\n"
+                if f['key_components']:
+                    part += f"  Components: {', '.join(f['key_components'])}\n"
+                if f['business_rules_count'] > 0:
+                    part += f"  Business rules: {f['business_rules_count']}\n"
+                if f['api_contracts_count'] > 0:
+                    part += f"  API endpoints: {f['api_contracts_count']}\n"
+                if f['patterns']:
+                    part += f"  Patterns: {', '.join(f['patterns'][:5])}\n"
+            layer_summaries_parts.append(part)
+
+        layer_summaries_text = "\n".join(layer_summaries_parts)
+
+        # Call AI for synthesis
+        from app.services.ai.prompt_manager import prompt_manager, PromptType
+        from app.services.ai.provider_router import provider_router
+
+        prompt = prompt_manager.get_prompt(
+            PromptType.REPOSITORY_SYNTHESIS,
+            repo_name=repo.name,
+            total_files=len(components),
+            layer_count=len(layers),
+            layer_summaries=layer_summaries_text,
+        )
+
+        response = asyncio.run(provider_router.generate_content(prompt))
+        response_text = response.text if hasattr(response, 'text') else str(response)
+
+        # Extract token usage for cost tracking
+        from app.services.ai.gemini import gemini_service
+        tokens = gemini_service.extract_token_usage(response)
+
+        # Parse JSON response
+        try:
+            synthesis_data = json.loads(response_text)
+        except json.JSONDecodeError:
+            cleaned = response_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            try:
+                synthesis_data = json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse synthesis JSON for repo {repo_id}: {e}")
+                synthesis_data = {
+                    "system_overview": f"Synthesis completed but JSON parsing failed for {repo.name}",
+                    "architecture": {"style": "Unknown", "layers": [], "patterns": []},
+                    "technology_stack": {"languages": [], "frameworks": [], "databases": []},
+                    "_parse_error": str(e),
+                }
+
+        # Add metadata
+        synthesis_data["_metadata"] = {
+            "total_files_synthesized": len(components),
+            "layers_detected": list(layers.keys()),
+            "input_tokens": tokens.get("input_tokens", 0),
+            "output_tokens": tokens.get("output_tokens", 0),
+            "thinking_tokens": tokens.get("thinking_tokens", 0),
+        }
+
+        # Persist synthesis
+        crud.repository.update(db, db_obj=repo, obj_in={
+            "synthesis_data": synthesis_data,
+            "synthesis_status": "completed",
+        })
+
+        # Cost tracking
+        from app.services.cost_service import cost_service
+        cost_inr = cost_service.calculate_cost(
+            tokens.get("input_tokens", 0),
+            tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0)
+        )
+
+        if cost_inr > 0:
+            try:
+                from app.services.billing_enforcement_service import billing_enforcement_service
+                billing_enforcement_service.deduct_cost(
+                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
+                    description=f"Repository synthesis: {repo.name}"
+                )
+            except Exception as billing_err:
+                logger.warning(f"Synthesis billing deduction failed (non-critical): {billing_err}")
+
+            try:
+                crud.usage_log.log_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    feature_type="code_analysis",
+                    operation="repository_synthesis",
+                    model_used="gemini-2.5-flash",
+                    input_tokens=tokens.get("input_tokens", 0),
+                    output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
+                    cost_usd=cost_inr / 84.0,
+                    cost_inr=cost_inr,
+                )
+            except Exception as log_err:
+                logger.warning(f"Synthesis usage logging failed (non-critical): {log_err}")
+
+        logger.info(
+            f"REPO_SYNTHESIS completed for repo {repo_id}: "
+            f"{len(components)} files across {len(layers)} layers synthesized. "
+            f"Cost: INR {cost_inr:.2f}"
+        )
+
+        return {
+            "status": "completed",
+            "repo_id": repo_id,
+            "files_synthesized": len(components),
+            "layers": list(layers.keys()),
+        }
+
+    except Exception as e:
+        logger.error(f"REPO_SYNTHESIS failed for repo {repo_id}: {e}")
+        try:
+            repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+            if repo:
+                crud.repository.update(db, db_obj=repo, obj_in={
+                    "synthesis_status": "failed",
+                    "synthesis_data": {"error": str(e)},
+                })
+        except Exception:
+            pass
+        try:
+            self.retry(countdown=60)
+        except self.MaxRetriesExceededError:
+            logger.error(f"REPO_SYNTHESIS permanently failed for repo {repo_id}")
         return {"status": "failed", "repo_id": repo_id, "error": str(e)}
     finally:
         if db.is_active:

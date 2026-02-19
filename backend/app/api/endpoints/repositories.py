@@ -217,6 +217,76 @@ def list_repo_components(
 
 
 # ============================================================
+# SYNTHESIS (Reduce Phase — System Architecture)
+# ============================================================
+
+@router.get("/{repo_id}/synthesis")
+def get_repo_synthesis(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get the synthesized System Architecture document for a repository."""
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if not repo.synthesis_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Synthesis not yet available (status: {repo.synthesis_status or 'not started'})"
+        )
+    return {
+        "repo_id": repo_id,
+        "repo_name": repo.name,
+        "synthesis_status": repo.synthesis_status,
+        "synthesis": repo.synthesis_data,
+    }
+
+
+@router.post("/{repo_id}/synthesize", status_code=status.HTTP_202_ACCEPTED)
+def trigger_synthesis(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Manually trigger (or re-trigger) synthesis for a repository.
+    Requires the repository to have completed analysis.
+    """
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    if repo.analysis_status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Repository analysis must be completed first (current: {repo.analysis_status})"
+        )
+
+    if repo.synthesis_status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Synthesis is already running"
+        )
+
+    from app.tasks.code_analysis_tasks import repo_synthesis_task
+    task = repo_synthesis_task.delay(repo_id, tenant_id)
+
+    logger.info(
+        f"Synthesis manually triggered for repo {repo_id} by user {current_user.id}, "
+        f"celery_task_id={task.id}"
+    )
+
+    return {
+        "message": "Synthesis started",
+        "repo_id": repo_id,
+        "task_id": task.id,
+    }
+
+
+# ============================================================
 # STATS
 # ============================================================
 

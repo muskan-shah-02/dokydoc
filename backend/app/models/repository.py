@@ -12,6 +12,7 @@ Relationship:
 from typing import List, TYPE_CHECKING
 from datetime import datetime
 from sqlalchemy import Integer, String, DateTime, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base_class import Base
 
@@ -38,6 +39,11 @@ class Repository(Base):
     total_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     analyzed_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
+
+    # Synthesis (Reduce Phase — combines per-file analyses into System Architecture)
+    synthesis_data: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    synthesis_status: Mapped[str] = mapped_column(String(50), nullable=True)
+    # synthesis_status: null → "running" → "completed" | "failed"
 
     # Owner
     owner_id: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -257,11 +257,96 @@ def run_cross_graph_mapping(self, tenant_id: int):
             except Exception as log_error:
                 logger.warning(f"Mapping usage logging failed: {log_error}")
 
+        # Auto-trigger synonym detection to keep the ontology clean
+        if result.get("total_mappings", 0) > 0:
+            try:
+                detect_synonyms_task.delay(tenant_id)
+                logger.info(f"Dispatched auto synonym detection for tenant {tenant_id}")
+            except Exception as syn_err:
+                logger.warning(f"Failed to dispatch synonym detection (non-critical): {syn_err}")
+
     except Exception as e:
         logger.error(f"CROSS_GRAPH_MAPPING failed for tenant {tenant_id}: {e}")
         try:
             self.retry(countdown=60)
         except self.MaxRetriesExceededError:
             logger.error(f"CROSS_GRAPH_MAPPING permanently failed for tenant {tenant_id}")
+    finally:
+        db.close()
+
+
+@celery_app.task(name="detect_synonyms_task", bind=True, max_retries=1)
+def detect_synonyms_task(self, tenant_id: int):
+    """
+    Celery task: Run synonym detection to clean up the ontology graph.
+
+    Auto-triggered after cross-graph mapping completes, or manually via API.
+    Uses a 1-hour cooldown per tenant to avoid redundant runs.
+    """
+    logger.info(f"SYNONYM_DETECTION started for tenant {tenant_id}")
+
+    db = SessionLocal()
+    try:
+        # Time-guard: skip if ran for this tenant within the last hour
+        try:
+            from app.services.cache_service import cache_service
+            cooldown_key = f"synonym_detection_cooldown:{tenant_id}"
+            if cache_service.get_cached_analysis(content=cooldown_key, analysis_type="cooldown"):
+                logger.info(f"SYNONYM_DETECTION skipped for tenant {tenant_id} (ran within last hour)")
+                return {"status": "skipped", "reason": "cooldown"}
+            # Set cooldown for 1 hour
+            cache_service.set_cached_analysis(
+                content=cooldown_key, analysis_type="cooldown",
+                result={"ran": True}, ttl_seconds=3600
+            )
+        except Exception as cache_err:
+            logger.warning(f"Synonym cooldown check failed (proceeding): {cache_err}")
+
+        result = asyncio.run(
+            business_ontology_service.detect_synonyms(db=db, tenant_id=tenant_id)
+        )
+
+        logger.info(
+            f"SYNONYM_DETECTION complete for tenant {tenant_id}: "
+            f"{result.get('synonyms_found', 0)} synonyms found"
+        )
+
+        # Deduct cost if any
+        cost_inr = result.get("cost_inr", 0)
+        if cost_inr > 0:
+            try:
+                from app.services.billing_enforcement_service import billing_enforcement_service
+                billing_enforcement_service.deduct_cost(
+                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
+                    description="Automatic synonym detection"
+                )
+            except Exception as billing_err:
+                logger.warning(f"Synonym billing deduction failed (non-critical): {billing_err}")
+
+            try:
+                crud.usage_log.log_usage(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    feature_type="document_analysis",
+                    operation="synonym_detection",
+                    model_used="gemini-2.5-flash",
+                    input_tokens=result.get("input_tokens", 0),
+                    output_tokens=result.get("output_tokens", 0),
+                    cost_usd=cost_inr / 84.0,
+                    cost_inr=cost_inr,
+                )
+            except Exception as log_error:
+                logger.warning(f"Synonym usage logging failed (non-critical): {log_error}")
+
+        return {"status": "completed", "synonyms_found": result.get("synonyms_found", 0)}
+
+    except Exception as e:
+        logger.error(f"SYNONYM_DETECTION failed for tenant {tenant_id}: {e}")
+        try:
+            self.retry(countdown=60)
+        except self.MaxRetriesExceededError:
+            logger.error(f"SYNONYM_DETECTION permanently failed for tenant {tenant_id}")
+        return {"status": "failed", "error": str(e)}
     finally:
         db.close()

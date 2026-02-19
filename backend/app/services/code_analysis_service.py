@@ -19,69 +19,80 @@ class CodeAnalysisService(LoggerMixin):
     def __init__(self):
         super().__init__()
 
-    async def _resolve_github_url(self, url: str) -> str | None:
+    # ================================================================
+    # GitHub URL Detection & Resolution
+    # ================================================================
+
+    # File extensions to include for code analysis
+    CODE_EXTENSIONS = {
+        '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs',
+        '.rb', '.php', '.cs', '.cpp', '.c', '.h', '.swift', '.kt',
+        '.vue', '.svelte',
+    }
+    # Directories to skip
+    SKIP_DIRS = {
+        'node_modules', '.git', '__pycache__', '.next', 'dist', 'build',
+        '.venv', 'venv', 'env', '.env', 'vendor', '.idea', '.vscode',
+        'coverage', '.pytest_cache', '.mypy_cache', '.tox',
+    }
+    # Language detection by extension
+    EXT_TO_LANG = {
+        '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+        '.tsx': 'typescript', '.jsx': 'javascript', '.java': 'java',
+        '.go': 'go', '.rs': 'rust', '.rb': 'ruby', '.php': 'php',
+        '.cs': 'csharp', '.cpp': 'cpp', '.c': 'c', '.swift': 'swift',
+        '.kt': 'kotlin', '.vue': 'javascript', '.svelte': 'javascript',
+    }
+
+    def _detect_github_url_type(self, url: str) -> tuple:
         """
-        Resolve GitHub URLs to actual code content.
-        - Blob URLs → fetch raw file content from raw.githubusercontent.com
-        - Repo/tree URLs → use GitHub API to list files, fetch key source files
-        Returns concatenated code content, or None if not a GitHub URL.
+        Classify a GitHub URL as single_file, repository, or other.
+
+        Returns:
+            ("single_file", owner, repo, blob_path) for blob URLs
+            ("repository", owner, repo, branch) for repo/tree URLs
+            ("other", None, None, None) for non-GitHub URLs
         """
-        # Check for blob (single file) URL first
         blob_match = re.match(
             r'https?://github\.com/([^/]+)/([^/]+)/blob/(.+)', url
         )
         if blob_match:
             owner, repo, blob_path = blob_match.groups()
-            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{blob_path}"
-            self.logger.info(f"Fetching single file from GitHub: {raw_url}")
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(raw_url)
-                resp.raise_for_status()
-                return resp.text
+            return ("single_file", owner, repo, blob_path)
 
-        # Check for repo/tree URL
         tree_match = re.match(
             r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/tree/(.+?))?(?:\?.*)?$',
             url
         )
-        if not tree_match:
-            return None
+        if tree_match:
+            owner, repo, ref_path = tree_match.groups()
+            branch = ref_path or "main"
+            return ("repository", owner, repo, branch)
 
-        owner, repo, ref_path = tree_match.groups()
-        branch = ref_path or "main"
+        return ("other", None, None, None)
 
-        self.logger.info(f"Fetching GitHub repo: {owner}/{repo} (branch: {branch})")
+    async def _fetch_single_github_file(self, owner: str, repo: str, blob_path: str) -> str:
+        """Fetch a single file from GitHub raw content."""
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{blob_path}"
+        self.logger.info(f"Fetching single file from GitHub: {raw_url}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(raw_url)
+            resp.raise_for_status()
+            return resp.text
 
-        # File extensions to include
-        code_extensions = {
-            '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs',
-            '.rb', '.php', '.cs', '.cpp', '.c', '.h', '.swift', '.kt',
-            '.vue', '.svelte',
-        }
-        # Config/doc files to prioritize
-        priority_files = {
-            'README.md', 'readme.md', 'package.json', 'requirements.txt',
-            'setup.py', 'pyproject.toml', 'Cargo.toml', 'go.mod',
-            'docker-compose.yml', 'Dockerfile', 'main.py', 'app.py',
-            'index.ts', 'index.js', 'main.go', 'manage.py',
-        }
-        # Directories to skip
-        skip_dirs = {
-            'node_modules', '.git', '__pycache__', '.next', 'dist', 'build',
-            '.venv', 'venv', 'env', '.env', 'vendor', '.idea', '.vscode',
-            'coverage', '.pytest_cache', '.mypy_cache', '.tox',
-        }
-
+    async def _get_repo_file_list(self, owner: str, repo: str, branch: str) -> list:
+        """
+        Get the file list for a GitHub repository, suitable for dispatching
+        to repo_analysis_task. Returns list of dicts with path, url, language.
+        """
         async with httpx.AsyncClient(timeout=60.0) as client:
-            # Step 1: Resolve branch → tree SHA via commits API
-            # (handles branch names with slashes safely as a query param)
+            # Resolve branch → tree SHA
             commits_url = f"https://api.github.com/repos/{owner}/{repo}/commits"
             commits_resp = await client.get(
                 commits_url, params={"sha": branch, "per_page": 1}
             )
 
-            if commits_resp.status_code != 200 and not ref_path:
-                # Fallback: try main/master if no explicit branch
+            if commits_resp.status_code != 200:
                 for fb in ["main", "master"]:
                     if fb != branch:
                         commits_resp = await client.get(
@@ -93,22 +104,19 @@ class CodeAnalysisService(LoggerMixin):
 
             if commits_resp.status_code != 200:
                 self.logger.error(f"GitHub API error resolving branch: {commits_resp.status_code}")
-                return None
+                return []
 
             commits_data = commits_resp.json()
             if not commits_data:
-                self.logger.error("No commits found on branch")
-                return None
+                return []
 
             tree_sha = commits_data[0]["commit"]["tree"]["sha"]
 
-            # Step 2: Get the full recursive tree
+            # Get recursive tree
             tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1"
             tree_resp = await client.get(tree_url)
-
             if tree_resp.status_code != 200:
-                self.logger.error(f"GitHub API error fetching tree: {tree_resp.status_code}")
-                return None
+                return []
 
             tree_data = tree_resp.json()
             all_files = [
@@ -116,79 +124,124 @@ class CodeAnalysisService(LoggerMixin):
                 if item["type"] == "blob"
             ]
 
-            # Step 3: Filter to relevant code files
-            relevant_files = []
+            # Filter to relevant code files
+            file_list = []
             for item in all_files:
                 path = item["path"]
                 parts = path.split('/')
-
-                if any(d in skip_dirs for d in parts):
+                if any(d in self.SKIP_DIRS for d in parts):
                     continue
-
                 filename = parts[-1]
                 ext = ''
                 if '.' in filename:
                     ext = '.' + filename.rsplit('.', 1)[-1]
-
-                if filename in priority_files or ext in code_extensions:
-                    relevant_files.append(path)
-
-            # Step 4: Sort by priority (config first, then by depth)
-            def file_priority(p):
-                fname = p.split('/')[-1]
-                depth = p.count('/')
-                return (0 if fname in priority_files else 1, depth, p)
-
-            relevant_files.sort(key=file_priority)
-            selected_files = relevant_files[:30]
+                if ext in self.CODE_EXTENSIONS:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+                    language = self.EXT_TO_LANG.get(ext, "")
+                    file_list.append({
+                        "path": path,
+                        "url": raw_url,
+                        "language": language,
+                    })
 
             self.logger.info(
-                f"Selected {len(selected_files)}/{len(relevant_files)} files "
-                f"from {len(all_files)} total in {owner}/{repo}"
+                f"Found {len(file_list)} code files in {owner}/{repo} "
+                f"(from {len(all_files)} total)"
             )
+            return file_list
 
-            # Step 5: Fetch raw content in parallel batches
-            async def fetch_file(file_path):
-                raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
-                try:
-                    file_resp = await client.get(raw_url)
-                    if file_resp.status_code == 200:
-                        content = file_resp.text
-                        if len(content) > 10000:
-                            content = content[:10000] + "\n... [TRUNCATED]"
-                        return (file_path, content)
-                except Exception:
-                    pass
-                return None
+    async def _resolve_github_url(self, url: str) -> str | None:
+        """
+        Resolve GitHub URLs to actual code content.
+        - Blob URLs → fetch raw file content
+        - Repo/tree URLs → returns sentinel "__REPOSITORY_URL__" to signal
+          that _async_analyze_component should redirect to the repo pipeline.
+        Returns raw content for single files, sentinel for repos, None for non-GitHub.
+        """
+        url_type, owner, repo_name, extra = self._detect_github_url_type(url)
 
-            results = []
-            batch_size = 5
-            for i in range(0, len(selected_files), batch_size):
-                batch = selected_files[i:i + batch_size]
-                batch_results = await asyncio.gather(*[fetch_file(f) for f in batch])
-                results.extend([r for r in batch_results if r])
+        if url_type == "single_file":
+            return await self._fetch_single_github_file(owner, repo_name, extra)
 
-            # Build concatenated content (cap at ~100K chars ≈ 25K tokens)
-            contents = []
-            total_chars = 0
-            max_total = 100000
-            for file_path, content in results:
-                if total_chars >= max_total:
-                    break
-                contents.append(f"=== FILE: {file_path} ===\n{content}")
-                total_chars += len(content)
+        if url_type == "repository":
+            return "__REPOSITORY_URL__"
 
-            if not contents:
-                self.logger.error("No files could be fetched from repository")
-                return None
+        return None
 
-            header = (
-                f"# Repository: {owner}/{repo}\n"
-                f"# Branch: {branch}\n"
-                f"# Total files in repo: {len(all_files)}\n"
-                f"# Analyzed files: {len(contents)}/{len(relevant_files)} code files\n\n"
+    async def _redirect_to_repo_pipeline(self, db, component, tenant_id: int) -> None:
+        """
+        When a user submits a GitHub repository URL as a single code component,
+        redirect to the proper per-file repository analysis pipeline instead
+        of concatenating files (context stuffing).
+
+        Creates a Repository record, builds the file list, and dispatches
+        repo_analysis_task via Celery.
+        """
+        url_type, owner, repo_name, branch = self._detect_github_url_type(component.location)
+        if url_type != "repository":
+            return
+
+        repo_url = f"https://github.com/{owner}/{repo_name}"
+        display_name = f"{owner}/{repo_name}"
+
+        self.logger.info(
+            f"Redirecting component {component.id} to repo pipeline: "
+            f"{display_name} (branch: {branch})"
+        )
+
+        # Check if repo already exists for this tenant
+        existing_repo = crud.repository.get_by_url(
+            db=db, url=repo_url, tenant_id=tenant_id
+        )
+
+        if existing_repo:
+            repo = existing_repo
+            self.logger.info(f"Reusing existing repository {repo.id} for {display_name}")
+        else:
+            # Create Repository record
+            from app.schemas.repository import RepositoryCreate
+            repo_in = RepositoryCreate(
+                name=display_name,
+                url=repo_url,
+                default_branch=branch,
+                description=f"Auto-created from code component {component.id}",
             )
-            return header + "\n\n".join(contents)
+            repo = crud.repository.create_with_owner(
+                db=db, obj_in=repo_in, owner_id=component.owner_id, tenant_id=tenant_id
+            )
+            self.logger.info(f"Created repository {repo.id} for {display_name}")
+
+        # Link component to repository
+        crud.code_component.update(
+            db, db_obj=component, obj_in={
+                "repository_id": repo.id,
+                "analysis_status": "redirected",
+                "summary": f"Redirected to repository analysis (repo_id={repo.id}). "
+                           f"Per-file analysis provides better results than single-prompt concatenation.",
+            }
+        )
+        db.commit()
+
+        # Build file list from GitHub API
+        file_list = await self._get_repo_file_list(owner, repo_name, branch)
+        if not file_list:
+            crud.code_component.update(
+                db, db_obj=component, obj_in={
+                    "analysis_status": "failed",
+                    "summary": f"Failed to fetch file list from {display_name}",
+                }
+            )
+            db.commit()
+            return
+
+        # Dispatch repo_analysis_task via Celery
+        from app.tasks.code_analysis_tasks import repo_analysis_task
+        task = repo_analysis_task.delay(repo.id, tenant_id, file_list)
+
+        self.logger.info(
+            f"Dispatched repo_analysis_task for {display_name}: "
+            f"{len(file_list)} files, celery_task={task.id}"
+        )
 
     def analyze_component_in_background(self, component_id: int, tenant_id: int = None) -> None:
         """
@@ -240,9 +293,17 @@ class CodeAnalysisService(LoggerMixin):
             # 2. Fetch the raw code content
             self.logger.info(f"Fetching code from URL: {component.location}")
             github_content = await self._resolve_github_url(component.location)
+
+            if github_content == "__REPOSITORY_URL__":
+                # Repository URL detected — redirect to proper per-file repo pipeline
+                await self._redirect_to_repo_pipeline(
+                    db=db, component=component, tenant_id=tenant_id
+                )
+                return
+
             if github_content is not None:
                 code_content = github_content
-                self.logger.info(f"Fetched {len(code_content)} chars from GitHub repository")
+                self.logger.info(f"Fetched {len(code_content)} chars from GitHub")
             else:
                 # Non-GitHub URL: fetch directly
                 async with httpx.AsyncClient(timeout=30.0) as client:

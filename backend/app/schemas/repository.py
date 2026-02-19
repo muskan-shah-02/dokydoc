@@ -5,7 +5,7 @@ Pydantic schemas for Repository onboarding, update, and API responses.
 """
 
 from pydantic import BaseModel, field_validator
-from typing import Optional
+from typing import Any, Dict, Optional
 from datetime import datetime
 import re
 
@@ -57,6 +57,8 @@ class RepositoryResponse(BaseModel):
     total_files: int
     analyzed_files: int
     error_message: Optional[str] = None
+    synthesis_data: Optional[Dict[str, Any]] = None
+    synthesis_status: Optional[str] = None
     owner_id: int
     created_at: datetime
     updated_at: datetime

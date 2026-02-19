@@ -25,6 +25,8 @@ class PromptType(Enum):
     # SPRINT 3 Day 5: Enhanced Semantic Analysis (AI-02)
     ENHANCED_SEMANTIC_ANALYSIS = "enhanced_semantic_analysis"
     DELTA_ANALYSIS = "delta_analysis"
+    # SPRINT 4: Repository Synthesis (Reduce Phase)
+    REPOSITORY_SYNTHESIS = "repository_synthesis"
 
 class PromptManager(LoggerMixin):
     """
@@ -980,6 +982,114 @@ CURRENT ANALYSIS:
                         "risk_assessment": {"type": "object"}
                     },
                     "required": ["has_changes", "change_summary", "changes", "risk_assessment"]
+                }
+            },
+
+            # ============================================================
+            # SPRINT 4: Repository Synthesis — "Reduce Phase"
+            # Combines per-file analyses into a System Architecture document
+            # ============================================================
+
+            PromptType.REPOSITORY_SYNTHESIS.value: {
+                "version": "1.0",
+                "description": "Synthesizes per-file code analyses into a comprehensive System Architecture document",
+                "prompt": """
+You are an expert solution architect. You have been given summaries of individual file analyses from a code repository, grouped by architectural layer.
+
+CONTEXT:
+- Repository: {repo_name}
+- Total files analyzed: {total_files}
+- Architectural layers detected: {layer_count}
+
+TASK:
+Synthesize these per-file analyses into a comprehensive System Architecture document. Do NOT just summarize each file — identify cross-cutting patterns, data flows, and architectural decisions that emerge from looking at the codebase as a whole.
+
+LAYER SUMMARIES:
+{layer_summaries}
+
+STRICT RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "system_overview": "3-5 sentence executive summary of what this system does, its architecture style, and its key capabilities",
+    "architecture": {{
+        "style": "The dominant architectural style (e.g., Monolithic MVC, Microservices, Layered, Event-Driven, Hexagonal)",
+        "layers": [
+            {{
+                "name": "Layer name (e.g., API Layer, Service Layer, Data Access Layer)",
+                "description": "What this layer does",
+                "key_files": ["List of critical files in this layer"],
+                "patterns": ["Patterns used in this layer"]
+            }}
+        ],
+        "patterns": ["Cross-cutting architectural patterns (e.g., Repository Pattern, Dependency Injection, CQRS)"]
+    }},
+    "data_flow": [
+        {{
+            "name": "Flow name (e.g., User Registration, Order Processing)",
+            "description": "End-to-end description of the data flow",
+            "steps": ["Step 1: Request hits controller", "Step 2: Service validates", "Step 3: Repository persists"]
+        }}
+    ],
+    "api_surface": {{
+        "total_endpoints": 0,
+        "key_endpoints": [
+            {{
+                "method": "GET|POST|PUT|DELETE",
+                "path": "/api/endpoint",
+                "description": "What it does",
+                "auth_required": true
+            }}
+        ],
+        "authentication_mechanism": "How auth works across the API"
+    }},
+    "technology_stack": {{
+        "languages": ["Primary languages with versions if detectable"],
+        "frameworks": ["Key frameworks"],
+        "databases": ["Database technologies"],
+        "infrastructure": ["Docker, K8s, CI/CD tools if detectable"],
+        "third_party": ["External services/APIs used"]
+    }},
+    "security_posture": {{
+        "strengths": ["Security patterns implemented well"],
+        "gaps": ["Potential security concerns or missing protections"],
+        "authentication": "Auth mechanism summary",
+        "authorization": "RBAC/permission model summary"
+    }},
+    "quality_observations": {{
+        "strengths": ["Code quality strengths"],
+        "concerns": ["Code quality concerns"],
+        "test_coverage": "Observed testing approach",
+        "documentation_quality": "How well the code is documented"
+    }},
+    "cross_cutting_concerns": [
+        {{
+            "concern": "Concern name (e.g., Logging, Error Handling, Configuration)",
+            "approach": "How this concern is handled across the codebase",
+            "consistency": "high|medium|low"
+        }}
+    ]
+}}
+
+CRITICAL:
+- Synthesize ACROSS files — don't just list individual file summaries
+- Identify the SYSTEM ARCHITECTURE that emerges from these files together
+- Flag contradictions (e.g., different auth patterns in different controllers)
+- Identify data flows that span multiple files
+- Note any architectural debt or inconsistencies
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "system_overview": {"type": "string"},
+                        "architecture": {"type": "object"},
+                        "data_flow": {"type": "array"},
+                        "api_surface": {"type": "object"},
+                        "technology_stack": {"type": "object"},
+                        "security_posture": {"type": "object"},
+                        "quality_observations": {"type": "object"},
+                        "cross_cutting_concerns": {"type": "array"}
+                    },
+                    "required": ["system_overview", "architecture", "technology_stack"]
                 }
             }
         }
