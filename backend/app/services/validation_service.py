@@ -185,6 +185,12 @@ class ValidationService(LoggerMixin):
 
                     validation_results = await asyncio.gather(*ai_tasks)
 
+                    # Aggregate validation costs for billing
+                    total_val_cost_inr = 0
+                    total_val_cost_usd = 0
+                    total_val_input_tokens = 0
+                    total_val_output_tokens = 0
+
                     for result in validation_results:
                         # call_gemini_for_validation returns dict with "mismatches" and "_cost"
                         mismatches = result.get("mismatches", []) if isinstance(result, dict) else (result or [])
@@ -197,6 +203,40 @@ class ValidationService(LoggerMixin):
                                     owner_id=user_id
                                 )
                                 self.logger.info(f"Created new mismatch for link {link.id}")
+
+                        # Accumulate cost from each validation pass
+                        if isinstance(result, dict):
+                            cost_info = result.get("_cost")
+                            if cost_info:
+                                total_val_cost_inr += cost_info.get("cost_inr", 0)
+                                total_val_cost_usd += cost_info.get("cost_usd", 0)
+                                total_val_input_tokens += cost_info.get("input_tokens", 0)
+                                total_val_output_tokens += cost_info.get("output_tokens", 0) + cost_info.get("thinking_tokens", 0)
+
+                    # Deduct and log validation costs
+                    if total_val_cost_inr > 0:
+                        try:
+                            from app.services.billing_enforcement_service import billing_enforcement_service
+                            billing_enforcement_service.deduct_cost(
+                                db=db, tenant_id=tenant_id, cost_inr=total_val_cost_inr,
+                                description=f"Validation: {document.filename if document else 'unknown'}"
+                            )
+                        except Exception as billing_err:
+                            self.logger.warning(f"Validation billing deduction failed (non-critical): {billing_err}")
+
+                        try:
+                            crud.usage_log.log_usage(
+                                db=db, tenant_id=tenant_id, user_id=user_id,
+                                feature_type="validation",
+                                operation="semantic_validation",
+                                model_used="gemini-2.5-flash",
+                                input_tokens=total_val_input_tokens,
+                                output_tokens=total_val_output_tokens,
+                                cost_usd=total_val_cost_usd,
+                                cost_inr=total_val_cost_inr,
+                            )
+                        except Exception as log_err:
+                            self.logger.warning(f"Validation usage logging failed (non-critical): {log_err}")
 
                 except Exception as e:
                     self.logger.error(f"Error validating link {link.id}: {e}", exc_info=True)

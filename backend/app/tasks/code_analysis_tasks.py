@@ -131,6 +131,36 @@ def static_analysis_worker(
                 ttl_seconds=2592000  # 30 days
             )
 
+            # Cost tracking for enhanced/basic analysis
+            token_usage = analysis_result.get("_token_usage", {})
+            if token_usage and token_usage.get("input_tokens", 0) > 0:
+                try:
+                    from app.services.cost_service import cost_service
+                    cost_data = cost_service.calculate_cost_from_actual_tokens(
+                        input_tokens=token_usage.get("input_tokens", 0),
+                        output_tokens=token_usage.get("output_tokens", 0),
+                        thinking_tokens=token_usage.get("thinking_tokens", 0),
+                    )
+                    analysis_cost_inr = cost_data.get("cost_inr", 0)
+                    if analysis_cost_inr > 0:
+                        billing_enforcement_service.deduct_cost(
+                            db=db, tenant_id=tenant_id, cost_inr=analysis_cost_inr,
+                            description=f"Code analysis: {file_path or component_id}"
+                        )
+                        crud.usage_log.log_usage(
+                            db=db, tenant_id=tenant_id, user_id=None,
+                            feature_type="code_analysis",
+                            operation="enhanced_analysis" if repo_name else "basic_analysis",
+                            model_used="gemini-2.5-flash",
+                            input_tokens=token_usage.get("input_tokens", 0),
+                            output_tokens=token_usage.get("output_tokens", 0) + token_usage.get("thinking_tokens", 0),
+                            cost_usd=cost_data.get("cost_usd", 0),
+                            cost_inr=analysis_cost_inr,
+                        )
+                        logger.info(f"Billed ₹{analysis_cost_inr:.4f} for analysis of {file_path}")
+                except Exception as cost_err:
+                    logger.warning(f"Cost tracking failed for analysis (non-critical): {cost_err}")
+
         # Delta analysis: compare with previous analysis if it exists
         new_analysis = analysis_result.get("structured_analysis")
         new_hash = _hash_analysis(new_analysis)
@@ -150,6 +180,35 @@ def static_analysis_worker(
                     f"Delta analysis complete: has_changes={delta_result.get('has_changes')}, "
                     f"risk={delta_result.get('risk_assessment', {}).get('overall_risk', 'unknown')}"
                 )
+                # Cost tracking for delta analysis
+                delta_tokens = delta_result.get("_token_usage", {})
+                if delta_tokens and delta_tokens.get("input_tokens", 0) > 0:
+                    try:
+                        from app.services.cost_service import cost_service
+                        delta_cost_data = cost_service.calculate_cost_from_actual_tokens(
+                            input_tokens=delta_tokens.get("input_tokens", 0),
+                            output_tokens=delta_tokens.get("output_tokens", 0),
+                            thinking_tokens=delta_tokens.get("thinking_tokens", 0),
+                        )
+                        delta_cost_inr = delta_cost_data.get("cost_inr", 0)
+                        if delta_cost_inr > 0:
+                            billing_enforcement_service.deduct_cost(
+                                db=db, tenant_id=tenant_id, cost_inr=delta_cost_inr,
+                                description=f"Delta analysis: {file_path or component_id}"
+                            )
+                            crud.usage_log.log_usage(
+                                db=db, tenant_id=tenant_id, user_id=None,
+                                feature_type="code_analysis",
+                                operation="delta_analysis",
+                                model_used="gemini-2.5-flash",
+                                input_tokens=delta_tokens.get("input_tokens", 0),
+                                output_tokens=delta_tokens.get("output_tokens", 0) + delta_tokens.get("thinking_tokens", 0),
+                                cost_usd=delta_cost_data.get("cost_usd", 0),
+                                cost_inr=delta_cost_inr,
+                            )
+                            logger.info(f"Billed ₹{delta_cost_inr:.4f} for delta analysis of {file_path}")
+                    except Exception as cost_err:
+                        logger.warning(f"Cost tracking failed for delta analysis (non-critical): {cost_err}")
             except Exception as delta_err:
                 logger.warning(f"Delta analysis failed (non-critical): {delta_err}")
 
@@ -574,12 +633,14 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
             "synthesis_status": "completed",
         })
 
-        # Cost tracking
+        # Cost tracking (using actual token counts, NOT text-based counting)
         from app.services.cost_service import cost_service
-        cost_inr = cost_service.calculate_cost(
-            tokens.get("input_tokens", 0),
-            tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0)
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens.get("input_tokens", 0),
+            output_tokens=tokens.get("output_tokens", 0),
+            thinking_tokens=tokens.get("thinking_tokens", 0),
         )
+        cost_inr = cost_data.get("cost_inr", 0)
 
         if cost_inr > 0:
             try:
@@ -601,7 +662,7 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
                     model_used="gemini-2.5-flash",
                     input_tokens=tokens.get("input_tokens", 0),
                     output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
-                    cost_usd=cost_inr / 84.0,
+                    cost_usd=cost_data.get("cost_usd", 0),
                     cost_inr=cost_inr,
                 )
             except Exception as log_err:
