@@ -451,15 +451,26 @@ class CodeAnalysisService(LoggerMixin):
         except httpx.RequestError as e:
             self.logger.error(f"HTTP Error fetching code for component {component_id}: {e}")
             if component:
-                crud.code_component.update(db, db_obj=component, obj_in={"analysis_status": "failed"})
+                try:
+                    db.rollback()
+                    crud.code_component.update(db, db_obj=component, obj_in={"analysis_status": "failed"})
+                except Exception as update_err:
+                    self.logger.warning(f"Failed to mark component as failed: {update_err}")
         except Exception as e:
             self.logger.error(f"An unexpected error occurred during analysis for component {component_id}: {e}", exc_info=True)
             if component:
-                crud.code_component.update(db, db_obj=component, obj_in={"analysis_status": "failed", "summary": f"AI analysis failed: {str(e)}"})
+                try:
+                    db.rollback()
+                    crud.code_component.update(db, db_obj=component, obj_in={"analysis_status": "failed", "summary": f"AI analysis failed: {str(e)[:500]}"})
+                except Exception as update_err:
+                    self.logger.warning(f"Failed to mark component as failed: {update_err}")
         finally:
             # 5. Critically important: ensure the database session is always closed
-            if db.is_active:
-                db.commit()
+            try:
+                if db.is_active:
+                    db.commit()
+            except Exception:
+                db.rollback()
             db.close()
 
     # Map code component types to ontology concept types
