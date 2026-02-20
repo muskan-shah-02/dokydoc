@@ -1,6 +1,7 @@
 # This is the final, updated content for your file at:
 # backend/app/api/endpoints/code_components.py
 
+from datetime import datetime, timedelta, timezone
 from typing import List, Any
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
@@ -11,6 +12,9 @@ from app.api import deps
 from app.services.code_analysis_service import code_analysis_service
 from app.core.logging import LoggerMixin
 from app.core.exceptions import NotFoundException, ValidationException
+
+# How long before we consider a "processing" analysis to be stuck
+STALE_ANALYSIS_THRESHOLD_MINUTES = 30
 
 class CodeComponentEndpoints(LoggerMixin):
     """Code component endpoints with enhanced logging and error handling."""
@@ -43,6 +47,29 @@ def read_code_components(
     code_components = crud.code_component.get_multi_by_owner(
         db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=skip, limit=limit
     )
+
+    # Auto-recover stale analyses: if a component has been "processing" for too long,
+    # mark it as failed so the user gets clear feedback instead of infinite spinner.
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_ANALYSIS_THRESHOLD_MINUTES)
+    for comp in code_components:
+        if comp.analysis_status == "processing" and comp.analysis_started_at:
+            started = comp.analysis_started_at
+            # Ensure timezone-aware comparison
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if started < stale_cutoff:
+                logger.warning(
+                    f"Component {comp.id} stuck in 'processing' since {comp.analysis_started_at} "
+                    f"(>{STALE_ANALYSIS_THRESHOLD_MINUTES}min) — marking as failed"
+                )
+                crud.code_component.update(
+                    db, db_obj=comp,
+                    obj_in={
+                        "analysis_status": "failed",
+                        "summary": f"Analysis timed out after {STALE_ANALYSIS_THRESHOLD_MINUTES} minutes. "
+                                   "The worker may have crashed. Please try again.",
+                    }
+                )
 
     logger.info(f"Retrieved {len(code_components)} code components for user {current_user.id} (tenant_id={tenant_id})")
     return code_components

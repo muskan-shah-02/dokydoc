@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -66,12 +66,26 @@ interface CodeComponent {
   component_type: string;
   location: string;
   version: string;
-  analysis_status: "pending" | "processing" | "completed" | "failed";
+  analysis_status: "pending" | "processing" | "completed" | "failed" | "redirected";
   ai_cost_inr: number | null;
   token_count_input: number | null;
   token_count_output: number | null;
   analysis_started_at: string | null;
   analysis_completed_at: string | null;
+}
+
+/** Format seconds into human-readable elapsed time */
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
+}
+
+/** Return elapsed seconds since a given ISO timestamp */
+function elapsedSince(isoTimestamp: string | null): number {
+  if (!isoTimestamp) return 0;
+  return Math.max(0, Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
 }
 
 export default function CodePage() {
@@ -93,10 +107,13 @@ export default function CodePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  // Live ticker: increments every second so elapsed times update in real-time
+  const [tick, setTick] = useState(0);
 
   const router = useRouter();
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchComponents = async (showRefreshing = false) => {
+  const fetchComponents = useCallback(async (showRefreshing = false) => {
     const token = localStorage.getItem("accessToken");
     if (!token) {
       setIsLoading(false);
@@ -120,13 +137,44 @@ export default function CodePage() {
       setIsLoading(false);
       if (showRefreshing) setIsRefreshing(false);
     }
-  };
+  }, []);
 
+  // Check if any component is actively being processed
+  const hasActiveAnalysis = components.some(
+    (c) => c.analysis_status === "processing" || c.analysis_status === "pending"
+  );
+
+  // Smart polling: only poll when there are active analyses
   useEffect(() => {
     fetchComponents();
-    const interval = setInterval(() => fetchComponents(), 10000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [fetchComponents]);
+
+  useEffect(() => {
+    // Clear any existing interval
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    if (hasActiveAnalysis) {
+      // Poll every 10s when analyses are running
+      pollIntervalRef.current = setInterval(() => fetchComponents(), 10000);
+    }
+    // No polling when everything is idle — manual Refresh button still works
+
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+  }, [hasActiveAnalysis, fetchComponents]);
+
+  // Live elapsed-time ticker (1s) — only runs when analyses are active
+  useEffect(() => {
+    if (!hasActiveAnalysis) return;
+    const ticker = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(ticker);
+  }, [hasActiveAnalysis]);
 
   useEffect(() => {
     let filtered = components;
@@ -585,22 +633,44 @@ export default function CodePage() {
                       className="cursor-pointer"
                     >
                       {component.analysis_status === "processing" ? (
-                        <div className="space-y-1.5">
-                          <div className="flex items-center space-x-2">
-                            <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
-                            <span className="text-sm font-medium text-blue-600">
-                              Analyzing...
-                            </span>
-                          </div>
-                          <div className="w-28 bg-blue-100 dark:bg-blue-900 rounded-full h-1.5 overflow-hidden">
-                            <div
-                              className="bg-blue-500 h-1.5 rounded-full animate-pulse"
-                              style={{ width: "65%" }}
-                            />
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            This may take a few minutes
-                          </p>
+                        (() => {
+                          const elapsed = elapsedSince(component.analysis_started_at);
+                          const isStuck = elapsed > 30 * 60; // >30 min
+                          const isSlowWarning = elapsed > 15 * 60; // >15 min
+                          return (
+                            <div className="space-y-1.5">
+                              <div className="flex items-center space-x-2">
+                                {isStuck ? (
+                                  <AlertCircle className="w-4 h-4 text-red-500" />
+                                ) : (
+                                  <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+                                )}
+                                <span className={`text-sm font-medium ${isStuck ? "text-red-500" : isSlowWarning ? "text-amber-600" : "text-blue-600"}`}>
+                                  {isStuck ? "May be stuck" : "Analyzing..."}
+                                </span>
+                              </div>
+                              {!isStuck && (
+                                <div className="w-28 bg-blue-100 dark:bg-blue-900 rounded-full h-1.5 overflow-hidden">
+                                  <div
+                                    className="bg-blue-500 h-1.5 rounded-full animate-pulse"
+                                    style={{ width: "65%" }}
+                                  />
+                                </div>
+                              )}
+                              <p className={`text-xs ${isStuck ? "text-red-400" : isSlowWarning ? "text-amber-500" : "text-muted-foreground"}`}>
+                                {isStuck
+                                  ? `${formatElapsed(elapsed)} — try deleting and re-submitting`
+                                  : isSlowWarning
+                                  ? `${formatElapsed(elapsed)} — taking longer than expected`
+                                  : `${formatElapsed(elapsed)} elapsed`}
+                              </p>
+                            </div>
+                          );
+                        })()
+                      ) : component.analysis_status === "redirected" ? (
+                        <div className="flex items-center space-x-2">
+                          <Loader2 className="w-4 h-4 text-purple-600 animate-spin" />
+                          <Badge variant="secondary">repo analysis</Badge>
                         </div>
                       ) : (
                         <div className="flex items-center space-x-2">
@@ -622,10 +692,12 @@ export default function CodePage() {
                             (new Date(component.analysis_completed_at).getTime() -
                               new Date(component.analysis_started_at).getTime()) / 1000
                           );
-                          return sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`;
+                          return formatElapsed(sec);
                         })()
-                      ) : component.analysis_status === "processing" ? (
-                        <span className="text-blue-600 animate-pulse">Running...</span>
+                      ) : component.analysis_status === "processing" && component.analysis_started_at ? (
+                        <span className={`font-mono ${elapsedSince(component.analysis_started_at) > 15 * 60 ? "text-amber-600" : "text-blue-600"}`}>
+                          {formatElapsed(elapsedSince(component.analysis_started_at))}
+                        </span>
                       ) : (
                         "—"
                       )}
