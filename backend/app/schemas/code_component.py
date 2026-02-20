@@ -40,11 +40,14 @@ class CodeComponentInDBBase(CodeComponentBase):
     owner_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     # Analysis fields
     summary: Optional[str] = None
     structured_analysis: Optional[Dict[str, Any]] = None
     analysis_status: str
+
+    # Link to parent repository (nullable for standalone file components)
+    repository_id: Optional[int] = None
 
     # Cost tracking fields
     ai_cost_inr: Optional[float] = None
@@ -67,4 +70,15 @@ class CodeComponentInDBBase(CodeComponentBase):
 # It inherits everything from our InDBBase and represents a complete object.
 class CodeComponent(CodeComponentInDBBase):
     pass
+
+
+class CodeComponentWithProgress(CodeComponent):
+    """Extended response that includes repository analysis progress.
+    For components linked to a repository, these fields show how many
+    files have been analyzed out of the total — enabling real-time
+    progress indicators in the UI.
+    """
+    repo_analyzed_files: Optional[int] = None
+    repo_total_files: Optional[int] = None
+    repo_analysis_status: Optional[str] = None
 

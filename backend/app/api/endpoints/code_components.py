@@ -28,7 +28,7 @@ code_component_endpoints = CodeComponentEndpoints()
 router = APIRouter()
 
 
-@router.get("/", response_model=List[schemas.CodeComponent])
+@router.get("/", response_model=List[schemas.CodeComponentWithProgress])
 def read_code_components(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
@@ -37,9 +37,9 @@ def read_code_components(
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
-    Retrieve all code components for the current user.
-
-    SPRINT 2: Now filtered by tenant_id for multi-tenancy isolation.
+    Retrieve all code components for the current user, enriched with
+    repository analysis progress (analyzed_files / total_files) for
+    components linked to a repository.
     """
     logger = code_component_endpoints.logger
     logger.info(f"Fetching code components for user {current_user.id} (tenant_id={tenant_id}), skip={skip}, limit={limit}")
@@ -54,7 +54,6 @@ def read_code_components(
     for comp in code_components:
         if comp.analysis_status == "processing" and comp.analysis_started_at:
             started = comp.analysis_started_at
-            # Ensure timezone-aware comparison
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
             if started < stale_cutoff:
@@ -71,8 +70,30 @@ def read_code_components(
                     }
                 )
 
-    logger.info(f"Retrieved {len(code_components)} code components for user {current_user.id} (tenant_id={tenant_id})")
-    return code_components
+    # Batch-fetch linked repositories in ONE query to get progress data
+    repo_ids = {c.repository_id for c in code_components if c.repository_id}
+    repo_map = {}
+    if repo_ids:
+        from app.models.repository import Repository
+        repos = db.query(Repository).filter(
+            Repository.id.in_(repo_ids),
+            Repository.tenant_id == tenant_id,
+        ).all()
+        repo_map = {r.id: r for r in repos}
+
+    # Build enriched response with repo progress
+    result = []
+    for comp in code_components:
+        comp_data = schemas.CodeComponentWithProgress.model_validate(comp)
+        if comp.repository_id and comp.repository_id in repo_map:
+            repo = repo_map[comp.repository_id]
+            comp_data.repo_analyzed_files = repo.analyzed_files
+            comp_data.repo_total_files = repo.total_files
+            comp_data.repo_analysis_status = repo.analysis_status
+        result.append(comp_data)
+
+    logger.info(f"Retrieved {len(result)} code components for user {current_user.id} (tenant_id={tenant_id})")
+    return result
 
 
 @router.post("/", response_model=schemas.CodeComponent)

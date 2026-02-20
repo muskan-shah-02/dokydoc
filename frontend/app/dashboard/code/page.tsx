@@ -72,6 +72,11 @@ interface CodeComponent {
   token_count_output: number | null;
   analysis_started_at: string | null;
   analysis_completed_at: string | null;
+  // Repository analysis progress (populated for components linked to a repo)
+  repository_id: number | null;
+  repo_analyzed_files: number | null;
+  repo_total_files: number | null;
+  repo_analysis_status: string | null;
 }
 
 /** Format seconds into human-readable elapsed time */
@@ -142,6 +147,7 @@ export default function CodePage() {
   // Check if any component is actively being processed
   const hasActiveAnalysis = components.some(
     (c) => c.analysis_status === "processing" || c.analysis_status === "pending"
+      || (c.analysis_status === "redirected" && c.repo_analysis_status === "analyzing")
   );
 
   // Smart polling: only poll when there are active analyses
@@ -668,10 +674,63 @@ export default function CodePage() {
                           );
                         })()
                       ) : component.analysis_status === "redirected" ? (
-                        <div className="flex items-center space-x-2">
-                          <Loader2 className="w-4 h-4 text-purple-600 animate-spin" />
-                          <Badge variant="secondary">repo analysis</Badge>
-                        </div>
+                        (() => {
+                          const analyzed = component.repo_analyzed_files ?? 0;
+                          const total = component.repo_total_files ?? 0;
+                          const repoStatus = component.repo_analysis_status;
+                          const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0;
+                          const isDone = repoStatus === "completed";
+                          const isFailed = repoStatus === "failed";
+
+                          if (isDone) {
+                            return (
+                              <div className="flex items-center space-x-2">
+                                <CheckCircle className="w-4 h-4 text-green-600" />
+                                <Badge variant="success">completed</Badge>
+                              </div>
+                            );
+                          }
+                          if (isFailed) {
+                            return (
+                              <div className="space-y-1">
+                                <div className="flex items-center space-x-2">
+                                  <XCircle className="w-4 h-4 text-red-600" />
+                                  <Badge variant="destructive">failed</Badge>
+                                </div>
+                                {total > 0 && (
+                                  <p className="text-xs text-muted-foreground">{analyzed}/{total} files done</p>
+                                )}
+                              </div>
+                            );
+                          }
+
+                          // Still analyzing
+                          return (
+                            <div className="space-y-1.5">
+                              <div className="flex items-center space-x-2">
+                                <Loader2 className="w-4 h-4 text-purple-600 animate-spin" />
+                                <span className="text-sm font-medium text-purple-600">
+                                  Repo analysis
+                                </span>
+                              </div>
+                              {total > 0 ? (
+                                <>
+                                  <div className="w-28 bg-purple-100 dark:bg-purple-900 rounded-full h-1.5 overflow-hidden">
+                                    <div
+                                      className="bg-purple-500 h-1.5 rounded-full transition-all duration-500"
+                                      style={{ width: `${Math.max(pct, 3)}%` }}
+                                    />
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {analyzed}/{total} files ({pct}%)
+                                  </p>
+                                </>
+                              ) : (
+                                <p className="text-xs text-muted-foreground">Preparing file list...</p>
+                              )}
+                            </div>
+                          );
+                        })()
                       ) : (
                         <div className="flex items-center space-x-2">
                           {getStatusIcon(component.analysis_status)}
@@ -697,6 +756,10 @@ export default function CodePage() {
                       ) : component.analysis_status === "processing" && component.analysis_started_at ? (
                         <span className={`font-mono ${elapsedSince(component.analysis_started_at) > 15 * 60 ? "text-amber-600" : "text-blue-600"}`}>
                           {formatElapsed(elapsedSince(component.analysis_started_at))}
+                        </span>
+                      ) : component.analysis_status === "redirected" && component.repo_analysis_status === "analyzing" ? (
+                        <span className="text-purple-600 font-mono">
+                          {component.repo_analyzed_files ?? 0}/{component.repo_total_files ?? "?"} files
                         </span>
                       ) : (
                         "—"
