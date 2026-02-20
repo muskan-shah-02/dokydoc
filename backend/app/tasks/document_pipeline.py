@@ -9,6 +9,7 @@ from app.services.document_parser import MultiModalDocumentParser
 from app.services.analysis_service import DocumentAnalysisEngine
 from app.services.lock_service import lock_service
 from app.core.logging import logger
+from app.tasks.utils import run_async
 
 @celery_app.task(name="process_document_pipeline", bind=True)
 def process_document_pipeline(self, document_id: int, storage_path: str, tenant_id: int):
@@ -68,10 +69,9 @@ def process_document_pipeline(self, document_id: int, storage_path: str, tenant_
             return
 
         try:
-            # We use asyncio.run() to execute our async pipeline
-            # from within this synchronous Celery task.
+            # Run async pipeline safely in forked Celery worker
             # SPRINT 2 Phase 4: Pass tenant_id for billing
-            asyncio.run(
+            run_async(
                 _run_async_pipeline(db, document, storage_path, document_id, tenant_id)
             )
         except Exception as e:

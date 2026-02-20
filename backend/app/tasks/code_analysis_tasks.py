@@ -28,6 +28,7 @@ from app.worker import celery_app
 from app.db.session import SessionLocal
 from app import crud
 from app.core.logging import logger
+from app.tasks.utils import run_async as _run_async
 
 
 def _hash_analysis(analysis: dict) -> str:
@@ -109,7 +110,7 @@ def static_analysis_worker(
 
             if repo_name:
                 # Enhanced analysis with business rules, API contracts, etc.
-                analysis_result = asyncio.run(
+                analysis_result = _run_async(
                     provider_router.analyze_code_enhanced(
                         code_content,
                         repo_name=repo_name,
@@ -119,7 +120,7 @@ def static_analysis_worker(
                 )
             else:
                 # Fallback to basic analysis for standalone components
-                analysis_result = asyncio.run(
+                analysis_result = _run_async(
                     provider_router.analyze_code(code_content)
                 )
 
@@ -169,7 +170,7 @@ def static_analysis_worker(
         if previous_analysis and previous_hash and new_hash != previous_hash:
             logger.info(f"Analysis changed for component {component_id} — running delta analysis")
             try:
-                delta_result = asyncio.run(
+                delta_result = _run_async(
                     provider_router.analyze_delta(
                         file_path=file_path or component.name,
                         previous_analysis=previous_analysis,
@@ -588,7 +589,7 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
             layer_summaries=layer_summaries_text,
         )
 
-        response = asyncio.run(provider_router.generate_content(prompt))
+        response = _run_async(provider_router.generate_content(prompt))
         response_text = response.text if hasattr(response, 'text') else str(response)
 
         # Extract token usage for cost tracking

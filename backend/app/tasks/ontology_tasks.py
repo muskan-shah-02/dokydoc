@@ -21,6 +21,7 @@ from app.db.session import SessionLocal
 from app import crud
 from app.services.business_ontology_service import business_ontology_service
 from app.core.logging import logger
+from app.tasks.utils import run_async
 
 
 @celery_app.task(name="extract_ontology_entities", bind=True, max_retries=2)
@@ -48,7 +49,7 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
             )
             return
 
-        result = asyncio.run(
+        result = run_async(
             business_ontology_service.extract_entities_from_analysis(
                 db=db, document_id=document_id, tenant_id=tenant_id
             )
@@ -135,7 +136,7 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             )
             return
 
-        result = asyncio.run(
+        result = run_async(
             business_ontology_service.extract_entities_from_code(
                 db=db, repo_id=repo_id, tenant_id=tenant_id
             )
@@ -302,7 +303,7 @@ def detect_synonyms_task(self, tenant_id: int):
         except Exception as cache_err:
             logger.warning(f"Synonym cooldown check failed (proceeding): {cache_err}")
 
-        result = asyncio.run(
+        result = run_async(
             business_ontology_service.detect_synonyms(db=db, tenant_id=tenant_id)
         )
 

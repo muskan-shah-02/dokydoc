@@ -115,10 +115,18 @@ def delete_repository(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> None:
-    """Delete a repository. Its code components keep repository_id=NULL (SET NULL FK)."""
+    """Delete a repository and cascade-delete its code components."""
     repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
+
+    # Cascade: delete all code components linked to this repository
+    from app.models.code_component import CodeComponent
+    db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).delete()
+
     crud.repository.remove(db=db, id=repo_id, tenant_id=tenant_id)
 
 
