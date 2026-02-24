@@ -83,7 +83,7 @@ export default function ProjectsPage() {
       await api.post("/initiatives/", {
         name: createName.trim(),
         description: createDescription.trim() || null,
-        status: "active",
+        status: "ACTIVE",
       });
       setShowCreateDialog(false);
       setCreateName("");
@@ -185,7 +185,7 @@ export default function ProjectsPage() {
                     <div>
                       <h3 className="text-sm font-semibold text-gray-900">{project.name}</h3>
                       <span className={`mt-0.5 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                        project.status === "active"
+                        project.status === "ACTIVE"
                           ? "bg-green-50 text-green-700"
                           : "bg-gray-100 text-gray-500"
                       }`}>
