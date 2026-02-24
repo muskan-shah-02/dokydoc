@@ -152,9 +152,9 @@ def add_asset_to_initiative(
         if not asset:
             raise HTTPException(status_code=404, detail="Document not found")
     elif asset_type == "REPOSITORY":
-        asset = crud.code_component.get(db=db, id=asset_id, tenant_id=tenant_id)
+        asset = crud.repository.get(db=db, id=asset_id, tenant_id=tenant_id)
         if not asset:
-            raise HTTPException(status_code=404, detail="Code component not found")
+            raise HTTPException(status_code=404, detail="Repository not found")
 
     asset_in = InitiativeAssetCreate(
         initiative_id=initiative_id,

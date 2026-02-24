@@ -1,6 +1,3 @@
-// This is the updated content for your file at:
-// frontend/app/dashboard/code/page.tsx
-
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -42,6 +39,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Code2,
   Plus,
   FileCode,
@@ -56,9 +58,28 @@ import {
   RefreshCw,
   AlertCircle,
   Trash2,
+  ChevronRight,
+  ChevronDown,
+  FolderGit2,
+  File,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useRouter } from "next/navigation";
+
+// --- Types ---
+
+interface Repository {
+  id: number;
+  name: string;
+  url: string;
+  default_branch: string;
+  description: string | null;
+  analysis_status: string;
+  analyzed_files: number | null;
+  total_files: number | null;
+  total_ai_cost_inr: number | null;
+  created_at: string;
+}
 
 interface CodeComponent {
   id: number;
@@ -72,7 +93,6 @@ interface CodeComponent {
   token_count_output: number | null;
   analysis_started_at: string | null;
   analysis_completed_at: string | null;
-  // Repository analysis progress (populated for components linked to a repo)
   repository_id: number | null;
   repo_analyzed_files: number | null;
   repo_total_files: number | null;
@@ -94,10 +114,14 @@ function elapsedSince(isoTimestamp: string | null): number {
 }
 
 export default function CodePage() {
-  const [components, setComponents] = useState<CodeComponent[]>([]);
-  const [filteredComponents, setFilteredComponents] = useState<CodeComponent[]>(
-    []
-  );
+  // --- State: Repositories (primary view) ---
+  const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [standaloneComponents, setStandaloneComponents] = useState<CodeComponent[]>([]);
+  const [expandedRepos, setExpandedRepos] = useState<Set<number>>(new Set());
+  const [repoComponents, setRepoComponents] = useState<Record<number, CodeComponent[]>>({});
+  const [loadingRepoComponents, setLoadingRepoComponents] = useState<Set<number>>(new Set());
+
+  // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [newComponent, setNewComponent] = useState({
@@ -112,13 +136,14 @@ export default function CodePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  // Live ticker: increments every second so elapsed times update in real-time
   const [tick, setTick] = useState(0);
 
   const router = useRouter();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchComponents = useCallback(async (showRefreshing = false) => {
+  // --- Data Fetching ---
+
+  const fetchData = useCallback(async (showRefreshing = false) => {
     const token = localStorage.getItem("accessToken");
     if (!token) {
       setIsLoading(false);
@@ -126,76 +151,137 @@ export default function CodePage() {
     }
     if (showRefreshing) setIsRefreshing(true);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/code-components/", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setComponents(data);
+      // Fetch repositories and standalone components in parallel
+      const [reposRes, standaloneRes] = await Promise.all([
+        fetch("http://localhost:8000/api/v1/repositories/", {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch("http://localhost:8000/api/v1/code-components/?standalone=true", {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (reposRes.ok) {
+        const repos = await reposRes.json();
+        setRepositories(repos);
       } else {
-        setComponents([]);
+        setRepositories([]);
+      }
+
+      if (standaloneRes.ok) {
+        const standalone = await standaloneRes.json();
+        setStandaloneComponents(standalone);
+      } else {
+        setStandaloneComponents([]);
       }
     } catch (error) {
-      console.error("Failed to fetch components:", error);
-      setComponents([]);
+      console.error("Failed to fetch data:", error);
+      setRepositories([]);
+      setStandaloneComponents([]);
     } finally {
       setIsLoading(false);
       if (showRefreshing) setIsRefreshing(false);
     }
   }, []);
 
-  // Check if any component is actively being processed
-  const hasActiveAnalysis = components.some(
-    (c) => c.analysis_status === "processing" || c.analysis_status === "pending"
-      || (c.analysis_status === "redirected" && c.repo_analysis_status === "analyzing")
+  const fetchRepoComponents = useCallback(async (repoId: number) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+
+    setLoadingRepoComponents((prev) => new Set(prev).add(repoId));
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/v1/repositories/${repoId}/components`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setRepoComponents((prev) => ({ ...prev, [repoId]: data }));
+      }
+    } catch (error) {
+      console.error(`Failed to fetch components for repo ${repoId}:`, error);
+    } finally {
+      setLoadingRepoComponents((prev) => {
+        const next = new Set(prev);
+        next.delete(repoId);
+        return next;
+      });
+    }
+  }, []);
+
+  // --- Expand/Collapse ---
+
+  const toggleRepo = useCallback(
+    (repoId: number) => {
+      setExpandedRepos((prev) => {
+        const next = new Set(prev);
+        if (next.has(repoId)) {
+          next.delete(repoId);
+        } else {
+          next.add(repoId);
+          // Lazy-fetch components on first expand
+          if (!repoComponents[repoId]) {
+            fetchRepoComponents(repoId);
+          }
+        }
+        return next;
+      });
+    },
+    [repoComponents, fetchRepoComponents]
   );
 
-  // Smart polling: only poll when there are active analyses
+  // Check if any repo is actively being analyzed
+  const hasActiveAnalysis = repositories.some(
+    (r) => r.analysis_status === "analyzing" || r.analysis_status === "pending"
+  );
+
+  // Smart polling
   useEffect(() => {
-    fetchComponents();
-  }, [fetchComponents]);
+    fetchData();
+  }, [fetchData]);
 
   useEffect(() => {
-    // Clear any existing interval
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
-
     if (hasActiveAnalysis) {
-      // Poll every 10s when analyses are running
-      pollIntervalRef.current = setInterval(() => fetchComponents(), 10000);
+      pollIntervalRef.current = setInterval(() => fetchData(), 10000);
     }
-    // No polling when everything is idle — manual Refresh button still works
-
     return () => {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [hasActiveAnalysis, fetchComponents]);
+  }, [hasActiveAnalysis, fetchData]);
 
-  // Live elapsed-time ticker (1s) — only runs when analyses are active
   useEffect(() => {
     if (!hasActiveAnalysis) return;
     const ticker = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(ticker);
   }, [hasActiveAnalysis]);
 
-  useEffect(() => {
-    let filtered = components;
-    if (searchTerm) {
-      filtered = filtered.filter(
-        (c) =>
-          c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          c.location.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    }
-    if (statusFilter !== "all") {
-      filtered = filtered.filter((c) => c.analysis_status === statusFilter);
-    }
-    setFilteredComponents(filtered);
-  }, [components, searchTerm, statusFilter]);
+  // --- Filtering ---
+
+  const filteredRepos = repositories.filter((r) => {
+    const matchesSearch =
+      !searchTerm ||
+      r.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.url.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesStatus =
+      statusFilter === "all" || r.analysis_status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+
+  const filteredStandalone = standaloneComponents.filter((c) => {
+    const matchesSearch =
+      !searchTerm ||
+      c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.location.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesStatus =
+      statusFilter === "all" || c.analysis_status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+
+  // --- Handlers ---
 
   const handleInputChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
@@ -224,27 +310,14 @@ export default function CodePage() {
         body: JSON.stringify(newComponent),
       });
       if (res.ok) {
-        // Close dialog immediately — analysis runs in the background
         setIsDialogOpen(false);
-        setNewComponent({
-          name: "",
-          component_type: "File",
-          location: "",
-          version: "",
-        });
-        setSuccessMessage(
-          "Component registered! Analysis is running in the background."
-        );
+        setNewComponent({ name: "", component_type: "File", location: "", version: "" });
+        setSuccessMessage("Component registered! Analysis is running in the background.");
         setTimeout(() => setSuccessMessage(null), 6000);
-        // Refresh list in background (non-blocking)
-        fetchComponents(true);
+        fetchData(true);
       } else {
         const errorData = await res.json();
-        const errorMessage =
-          errorData.detail?.[0]?.msg ||
-          errorData.detail ||
-          "Failed to create component.";
-        throw new Error(errorMessage);
+        throw new Error(errorData.detail?.[0]?.msg || errorData.detail || "Failed to create component.");
       }
     } catch (error: any) {
       setSubmissionError(error.message);
@@ -253,46 +326,55 @@ export default function CodePage() {
     }
   };
 
-  // --- NEW: Delete Handler for the main dashboard ---
-  const handleDelete = async (id: number) => {
+  const handleDeleteRepo = async (repoId: number) => {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(
-        `http://localhost:8000/api/v1/code-components/${id}`,
-        {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      if (res.ok) {
-        // Refresh the component list on successful deletion
-        fetchComponents(true);
-      } else {
-        console.error("Failed to delete component");
-      }
+      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) fetchData(true);
+    } catch (error) {
+      console.error("Error deleting repository:", error);
+    }
+  };
+
+  const handleDeleteComponent = async (id: number) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/code-components/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) fetchData(true);
     } catch (error) {
       console.error("Error deleting component:", error);
     }
   };
 
-  const getStatusBadgeVariant = (status: CodeComponent["analysis_status"]) => {
+  // --- Status Helpers ---
+
+  const getStatusBadge = (status: string) => {
     switch (status) {
       case "completed":
-        return "success";
+        return <Badge variant="success">completed</Badge>;
+      case "analyzing":
       case "processing":
-        return "default";
+        return <Badge variant="default">analyzing</Badge>;
       case "failed":
-        return "destructive";
+        return <Badge variant="destructive">failed</Badge>;
       default:
-        return "secondary";
+        return <Badge variant="secondary">{status}</Badge>;
     }
   };
 
-  const getStatusIcon = (status: CodeComponent["analysis_status"]) => {
+  const getStatusIcon = (status: string) => {
     switch (status) {
       case "completed":
         return <CheckCircle className="w-4 h-4 text-green-600" />;
+      case "analyzing":
       case "processing":
         return <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />;
       case "failed":
@@ -302,18 +384,16 @@ export default function CodePage() {
     }
   };
 
-  const handleRowClick = (id: number) => {
-    router.push(`/dashboard/code/${id}`);
-  };
+  // --- Stats ---
 
-  const statusCounts = {
-    total: components.length,
-    completed: components.filter((c) => c.analysis_status === "completed")
-      .length,
-    processing: components.filter((c) => c.analysis_status === "processing")
-      .length,
-    failed: components.filter((c) => c.analysis_status === "failed").length,
-    pending: components.filter((c) => c.analysis_status === "pending").length,
+  const repoStatusCounts = {
+    total: repositories.length,
+    completed: repositories.filter((r) => r.analysis_status === "completed").length,
+    analyzing: repositories.filter((r) => r.analysis_status === "analyzing").length,
+    failed: repositories.filter((r) => r.analysis_status === "failed").length,
+    pending: repositories.filter(
+      (r) => !["completed", "analyzing", "failed"].includes(r.analysis_status)
+    ).length,
   };
 
   if (isLoading) {
@@ -326,16 +406,16 @@ export default function CodePage() {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header and Stats Cards remain the same */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div className="flex items-center space-x-3">
           <div className="p-2 bg-blue-100 dark:bg-blue-900 rounded-lg">
             <Code2 className="w-6 h-6 text-blue-600 dark:text-blue-400" />
           </div>
           <div>
-            <h1 className="text-3xl font-bold">Code Component Library</h1>
+            <h1 className="text-3xl font-bold">Code Repository Library</h1>
             <p className="text-muted-foreground">
-              Manage and analyze your code components
+              Manage and analyze your repositories and code components
             </p>
           </div>
         </div>
@@ -343,12 +423,10 @@ export default function CodePage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => fetchComponents(true)}
+            onClick={() => fetchData(true)}
             disabled={isRefreshing}
           >
-            <RefreshCw
-              className={`w-4 h-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`}
-            />{" "}
+            <RefreshCw className={`w-4 h-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
             Refresh
           </Button>
           <Dialog
@@ -359,10 +437,7 @@ export default function CodePage() {
             }}
           >
             <DialogTrigger asChild>
-              <Button
-                onClick={() => setIsDialogOpen(true)}
-                className="bg-blue-600 hover:bg-blue-700"
-              >
+              <Button onClick={() => setIsDialogOpen(true)} className="bg-blue-600 hover:bg-blue-700">
                 <Plus className="w-4 h-4 mr-2" /> Add Component
               </Button>
             </DialogTrigger>
@@ -375,33 +450,15 @@ export default function CodePage() {
               </DialogHeader>
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
-                  <Label htmlFor="name" className="text-sm font-medium">
-                    Component Name
-                  </Label>
-                  <Input
-                    id="name"
-                    name="name"
-                    value={newComponent.name}
-                    onChange={handleInputChange}
-                    placeholder="e.g., Authentication Service"
-                    className="mt-1"
-                    required
-                  />
+                  <Label htmlFor="name" className="text-sm font-medium">Component Name</Label>
+                  <Input id="name" name="name" value={newComponent.name} onChange={handleInputChange}
+                    placeholder="e.g., Authentication Service" className="mt-1" required />
                 </div>
                 <div>
-                  <Label
-                    htmlFor="component_type"
-                    className="text-sm font-medium"
-                  >
-                    Component Type
-                  </Label>
-                  <select
-                    id="component_type"
-                    name="component_type"
-                    value={newComponent.component_type}
+                  <Label htmlFor="component_type" className="text-sm font-medium">Component Type</Label>
+                  <select id="component_type" name="component_type" value={newComponent.component_type}
                     onChange={handleInputChange}
-                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm mt-1"
-                  >
+                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm mt-1">
                     <option value="File">File</option>
                     <option value="Repository">Repository</option>
                     <option value="Class">Class</option>
@@ -409,37 +466,19 @@ export default function CodePage() {
                   </select>
                 </div>
                 <div>
-                  <Label htmlFor="location" className="text-sm font-medium">
-                    Location URL
-                  </Label>
+                  <Label htmlFor="location" className="text-sm font-medium">Location URL</Label>
                   <div className="relative mt-1">
                     <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-                    <Input
-                      id="location"
-                      name="location"
-                      value={newComponent.location}
-                      onChange={handleInputChange}
-                      placeholder="https://..."
-                      className="pl-10"
-                      required
-                    />
+                    <Input id="location" name="location" value={newComponent.location}
+                      onChange={handleInputChange} placeholder="https://..." className="pl-10" required />
                   </div>
                 </div>
                 <div>
-                  <Label htmlFor="version" className="text-sm font-medium">
-                    Version / Git Hash
-                  </Label>
+                  <Label htmlFor="version" className="text-sm font-medium">Version / Git Hash</Label>
                   <div className="relative mt-1">
                     <GitBranch className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-                    <Input
-                      id="version"
-                      name="version"
-                      value={newComponent.version}
-                      onChange={handleInputChange}
-                      placeholder="v1.0.0 or commit hash"
-                      className="pl-10"
-                      required
-                    />
+                    <Input id="version" name="version" value={newComponent.version}
+                      onChange={handleInputChange} placeholder="v1.0.0 or commit hash" className="pl-10" required />
                   </div>
                 </div>
                 {submissionError && (
@@ -450,23 +489,10 @@ export default function CodePage() {
                   </Alert>
                 )}
                 <div className="flex space-x-2 pt-4">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setIsDialogOpen(false)}
-                    className="flex-1"
-                    disabled={isSubmitting}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    type="submit"
-                    className="flex-1 bg-blue-600 hover:bg-blue-700"
-                    disabled={isSubmitting}
-                  >
-                    {isSubmitting && (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    )}
+                  <Button type="button" variant="outline" onClick={() => setIsDialogOpen(false)}
+                    className="flex-1" disabled={isSubmitting}>Cancel</Button>
+                  <Button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700" disabled={isSubmitting}>
+                    {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                     {isSubmitting ? "Registering..." : "Register Component"}
                   </Button>
                 </div>
@@ -475,6 +501,7 @@ export default function CodePage() {
           </Dialog>
         </div>
       </div>
+
       {successMessage && (
         <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
           <CheckCircle className="h-4 w-4 text-green-600" />
@@ -483,73 +510,61 @@ export default function CodePage() {
           </AlertDescription>
         </Alert>
       )}
+
+      {/* Stats Cards — Repo-level */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Total
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Repositories</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{statusCounts.total}</div>
+            <div className="text-2xl font-bold">{repoStatusCounts.total}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-green-600">
-              Completed
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-green-600">Completed</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-green-600">
-              {statusCounts.completed}
-            </div>
+            <div className="text-2xl font-bold text-green-600">{repoStatusCounts.completed}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-blue-600">
-              Processing
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-blue-600">Analyzing</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-blue-600">
-              {statusCounts.processing}
-            </div>
+            <div className="text-2xl font-bold text-blue-600">{repoStatusCounts.analyzing}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-red-600">
-              Failed
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-red-600">Failed</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-red-600">
-              {statusCounts.failed}
-            </div>
+            <div className="text-2xl font-bold text-red-600">{repoStatusCounts.failed}</div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-gray-500">
-              Pending
+              Standalone
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold text-gray-500">
-              {statusCounts.pending}
-            </div>
+            <div className="text-2xl font-bold text-gray-500">{standaloneComponents.length}</div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Search & Filter */}
       <Card>
         <CardContent className="p-4">
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
               <Input
-                placeholder="Search components..."
+                placeholder="Search repositories or components..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-10"
@@ -564,7 +579,7 @@ export default function CodePage() {
               >
                 <option value="all">All Statuses</option>
                 <option value="completed">Completed</option>
-                <option value="processing">Processing</option>
+                <option value="analyzing">Analyzing</option>
                 <option value="failed">Failed</option>
                 <option value="pending">Pending</option>
               </select>
@@ -572,233 +587,250 @@ export default function CodePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Repositories — Expandable Rows */}
       <Card>
         <CardHeader>
-          <CardTitle>Components ({filteredComponents.length})</CardTitle>
+          <CardTitle>Repositories ({filteredRepos.length})</CardTitle>
           <CardDescription>
-            Manage your registered code components
+            Click a repository to expand and view its analyzed files
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {filteredComponents.length === 0 ? (
+          {filteredRepos.length === 0 && filteredStandalone.length === 0 ? (
             <div className="text-center py-8">
               <Code2 className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
               <p className="text-muted-foreground">
-                {components.length === 0
-                  ? "No components registered yet"
-                  : "No components match your filters"}
+                {repositories.length === 0
+                  ? "No repositories onboarded yet"
+                  : "No repositories match your filters"}
               </p>
             </div>
           ) : (
+            <div className="space-y-1">
+              {filteredRepos.map((repo) => {
+                const isExpanded = expandedRepos.has(repo.id);
+                const components = repoComponents[repo.id] || [];
+                const isLoadingComponents = loadingRepoComponents.has(repo.id);
+                const analyzed = repo.analyzed_files ?? 0;
+                const total = repo.total_files ?? 0;
+                const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0;
+
+                return (
+                  <Collapsible key={repo.id} open={isExpanded} onOpenChange={() => toggleRepo(repo.id)}>
+                    {/* Repo Row */}
+                    <div className="flex items-center border rounded-lg px-4 py-3 hover:bg-muted/50 transition-colors group">
+                      <CollapsibleTrigger asChild>
+                        <button className="flex items-center flex-1 text-left gap-3">
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                          )}
+                          <FolderGit2 className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{repo.name}</div>
+                            <div className="text-xs text-muted-foreground truncate">{repo.url}</div>
+                          </div>
+                        </button>
+                      </CollapsibleTrigger>
+
+                      <div className="flex items-center gap-4 flex-shrink-0 ml-4">
+                        {/* Status */}
+                        <div className="flex items-center gap-1.5">
+                          {getStatusIcon(repo.analysis_status)}
+                          {getStatusBadge(repo.analysis_status)}
+                        </div>
+
+                        {/* Files progress */}
+                        <div className="text-sm text-muted-foreground w-24 text-right">
+                          {total > 0 ? (
+                            <span className="font-mono">{analyzed}/{total} files</span>
+                          ) : (
+                            <span>—</span>
+                          )}
+                        </div>
+
+                        {/* Cost */}
+                        <div className="text-sm font-mono w-20 text-right">
+                          {repo.total_ai_cost_inr != null && repo.total_ai_cost_inr > 0 ? (
+                            <span className="text-green-700">&#8377;{repo.total_ai_cost_inr.toFixed(2)}</span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </div>
+
+                        {/* Delete */}
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100">
+                              <Trash2 className="w-4 h-4 text-destructive" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Delete Repository?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                This will permanently delete &quot;{repo.name}&quot; and all its analyzed components.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => handleDeleteRepo(repo.id)}>Delete</AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
+                    </div>
+
+                    {/* Expanded: File Components */}
+                    <CollapsibleContent>
+                      <div className="ml-8 mr-2 border-l-2 border-muted pl-4 py-2 space-y-1">
+                        {isLoadingComponents ? (
+                          <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Loading files...
+                          </div>
+                        ) : components.length === 0 ? (
+                          <div className="py-3 text-sm text-muted-foreground">
+                            No analyzed files yet
+                          </div>
+                        ) : (
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>File</TableHead>
+                                <TableHead>Status</TableHead>
+                                <TableHead className="text-right">Duration</TableHead>
+                                <TableHead className="text-right">Cost</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {components.map((comp) => (
+                                <TableRow
+                                  key={comp.id}
+                                  className="cursor-pointer hover:bg-muted/30"
+                                  onClick={() => router.push(`/dashboard/code/${comp.id}`)}
+                                >
+                                  <TableCell>
+                                    <div className="flex items-center gap-2">
+                                      <File className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                      <span className="truncate text-sm">{comp.name}</span>
+                                    </div>
+                                  </TableCell>
+                                  <TableCell>
+                                    <div className="flex items-center gap-1.5">
+                                      {getStatusIcon(comp.analysis_status)}
+                                      {getStatusBadge(comp.analysis_status)}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="text-right text-sm text-muted-foreground">
+                                    {comp.analysis_started_at && comp.analysis_completed_at ? (
+                                      formatElapsed(
+                                        Math.round(
+                                          (new Date(comp.analysis_completed_at).getTime() -
+                                            new Date(comp.analysis_started_at).getTime()) / 1000
+                                        )
+                                      )
+                                    ) : comp.analysis_status === "processing" && comp.analysis_started_at ? (
+                                      <span className="font-mono text-blue-600">
+                                        {formatElapsed(elapsedSince(comp.analysis_started_at))}
+                                      </span>
+                                    ) : (
+                                      "—"
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono text-sm">
+                                    {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
+                                      <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
+                                    ) : (
+                                      <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Standalone Components (no repository) */}
+      {filteredStandalone.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Standalone Components ({filteredStandalone.length})</CardTitle>
+            <CardDescription>
+              Components not linked to any repository
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Location</TableHead>
-                  <TableHead>Version</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Duration</TableHead>
                   <TableHead className="text-right">Cost</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredComponents.map((component) => (
-                  <TableRow key={component.id} className="group">
+                {filteredStandalone.map((comp) => (
+                  <TableRow key={comp.id} className="group">
                     <TableCell
-                      onClick={() => handleRowClick(component.id)}
+                      onClick={() => router.push(`/dashboard/code/${comp.id}`)}
                       className="font-medium cursor-pointer"
                     >
-                      {component.name}
+                      {comp.name}
                     </TableCell>
-                    <TableCell
-                      onClick={() => handleRowClick(component.id)}
-                      className="cursor-pointer"
-                    >
-                      <div className="flex items-center space-x-2">
+                    <TableCell>
+                      <div className="flex items-center gap-2">
                         <FileCode className="w-4 h-4 text-muted-foreground" />
-                        <span>{component.component_type}</span>
+                        <span>{comp.component_type}</span>
                       </div>
                     </TableCell>
-                    <TableCell
-                      onClick={() => handleRowClick(component.id)}
-                      className="max-w-xs truncate cursor-pointer"
-                      title={component.location}
-                    >
-                      {component.location}
+                    <TableCell className="max-w-xs truncate" title={comp.location}>
+                      {comp.location}
                     </TableCell>
-                    <TableCell
-                      onClick={() => handleRowClick(component.id)}
-                      className="font-mono text-sm cursor-pointer"
-                    >
-                      {component.version}
-                    </TableCell>
-                    <TableCell
-                      onClick={() => handleRowClick(component.id)}
-                      className="cursor-pointer"
-                    >
-                      {component.analysis_status === "processing" ? (
-                        (() => {
-                          const elapsed = elapsedSince(component.analysis_started_at);
-                          const isStuck = elapsed > 30 * 60; // >30 min
-                          const isSlowWarning = elapsed > 15 * 60; // >15 min
-                          return (
-                            <div className="space-y-1.5">
-                              <div className="flex items-center space-x-2">
-                                {isStuck ? (
-                                  <AlertCircle className="w-4 h-4 text-red-500" />
-                                ) : (
-                                  <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
-                                )}
-                                <span className={`text-sm font-medium ${isStuck ? "text-red-500" : isSlowWarning ? "text-amber-600" : "text-blue-600"}`}>
-                                  {isStuck ? "May be stuck" : "Analyzing..."}
-                                </span>
-                              </div>
-                              {!isStuck && (
-                                <div className="w-28 bg-blue-100 dark:bg-blue-900 rounded-full h-1.5 overflow-hidden">
-                                  <div
-                                    className="bg-blue-500 h-1.5 rounded-full animate-pulse"
-                                    style={{ width: "65%" }}
-                                  />
-                                </div>
-                              )}
-                              <p className={`text-xs ${isStuck ? "text-red-400" : isSlowWarning ? "text-amber-500" : "text-muted-foreground"}`}>
-                                {isStuck
-                                  ? `${formatElapsed(elapsed)} — try deleting and re-submitting`
-                                  : isSlowWarning
-                                  ? `${formatElapsed(elapsed)} — taking longer than expected`
-                                  : `${formatElapsed(elapsed)} elapsed`}
-                              </p>
-                            </div>
-                          );
-                        })()
-                      ) : component.analysis_status === "redirected" ? (
-                        (() => {
-                          const analyzed = component.repo_analyzed_files ?? 0;
-                          const total = component.repo_total_files ?? 0;
-                          const repoStatus = component.repo_analysis_status;
-                          const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0;
-                          const isDone = repoStatus === "completed";
-                          const isFailed = repoStatus === "failed";
-
-                          if (isDone) {
-                            return (
-                              <div className="flex items-center space-x-2">
-                                <CheckCircle className="w-4 h-4 text-green-600" />
-                                <Badge variant="success">completed</Badge>
-                              </div>
-                            );
-                          }
-                          if (isFailed) {
-                            return (
-                              <div className="space-y-1">
-                                <div className="flex items-center space-x-2">
-                                  <XCircle className="w-4 h-4 text-red-600" />
-                                  <Badge variant="destructive">failed</Badge>
-                                </div>
-                                {total > 0 && (
-                                  <p className="text-xs text-muted-foreground">{analyzed}/{total} files done</p>
-                                )}
-                              </div>
-                            );
-                          }
-
-                          // Still analyzing
-                          return (
-                            <div className="space-y-1.5">
-                              <div className="flex items-center space-x-2">
-                                <Loader2 className="w-4 h-4 text-purple-600 animate-spin" />
-                                <span className="text-sm font-medium text-purple-600">
-                                  Repo analysis
-                                </span>
-                              </div>
-                              {total > 0 ? (
-                                <>
-                                  <div className="w-28 bg-purple-100 dark:bg-purple-900 rounded-full h-1.5 overflow-hidden">
-                                    <div
-                                      className="bg-purple-500 h-1.5 rounded-full transition-all duration-500"
-                                      style={{ width: `${Math.max(pct, 3)}%` }}
-                                    />
-                                  </div>
-                                  <p className="text-xs text-muted-foreground">
-                                    {analyzed}/{total} files ({pct}%)
-                                  </p>
-                                </>
-                              ) : (
-                                <p className="text-xs text-muted-foreground">Preparing file list...</p>
-                              )}
-                            </div>
-                          );
-                        })()
-                      ) : (
-                        <div className="flex items-center space-x-2">
-                          {getStatusIcon(component.analysis_status)}
-                          <Badge
-                            variant={getStatusBadgeVariant(
-                              component.analysis_status
-                            )}
-                          >
-                            {component.analysis_status}
-                          </Badge>
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right text-sm text-muted-foreground">
-                      {component.analysis_started_at && component.analysis_completed_at ? (
-                        (() => {
-                          const sec = Math.round(
-                            (new Date(component.analysis_completed_at).getTime() -
-                              new Date(component.analysis_started_at).getTime()) / 1000
-                          );
-                          return formatElapsed(sec);
-                        })()
-                      ) : component.analysis_status === "processing" && component.analysis_started_at ? (
-                        <span className={`font-mono ${elapsedSince(component.analysis_started_at) > 15 * 60 ? "text-amber-600" : "text-blue-600"}`}>
-                          {formatElapsed(elapsedSince(component.analysis_started_at))}
-                        </span>
-                      ) : component.analysis_status === "redirected" && component.repo_analysis_status === "analyzing" ? (
-                        <span className="text-purple-600 font-mono">
-                          {component.repo_analyzed_files ?? 0}/{component.repo_total_files ?? "?"} files
-                        </span>
-                      ) : (
-                        "—"
-                      )}
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        {getStatusIcon(comp.analysis_status)}
+                        {getStatusBadge(comp.analysis_status)}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">
-                      {component.ai_cost_inr != null && component.ai_cost_inr > 0 ? (
-                        <span className="text-green-700">₹{component.ai_cost_inr.toFixed(2)}</span>
+                      {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
+                        <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      {/* --- Delete Button with Confirmation --- */}
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="opacity-0 group-hover:opacity-100"
-                          >
+                          <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100">
                             <Trash2 className="w-4 h-4 text-destructive" />
                           </Button>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              Are you absolutely sure?
-                            </AlertDialogTitle>
+                            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
                             <AlertDialogDescription>
-                              This will permanently delete the "{component.name}
-                              " component and its analysis data.
+                              This will permanently delete &quot;{comp.name}&quot; and its analysis data.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => handleDelete(component.id)}
-                            >
+                            <AlertDialogAction onClick={() => handleDeleteComponent(comp.id)}>
                               Delete
                             </AlertDialogAction>
                           </AlertDialogFooter>
@@ -809,9 +841,9 @@ export default function CodePage() {
                 ))}
               </TableBody>
             </Table>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

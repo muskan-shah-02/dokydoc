@@ -7,9 +7,10 @@ from typing import List, Any
 import uuid
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request, Response, Query
 from fastapi.responses import FileResponse # Added for download endpoint
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app import crud, models, schemas
 from app.api import deps
@@ -43,19 +44,27 @@ def read_documents(
     tenant_id: int = Depends(deps.get_tenant_id),  # SPRINT 2: Tenant context
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by initiative (project) ID"),
 ) -> Any:
     """
-    Retrieve all documents for the current tenant.
+    Retrieve all documents for the current tenant, optionally filtered by initiative.
 
     SPRINT 2: Documents are scoped to tenant, not just owner.
-    Users can see all documents in their tenant (role-based filtering in Phase 5).
+    SPRINT 4: Optional initiative_id filtering via project context.
     """
-    document_endpoints.logger.info(f"Fetching documents for tenant {tenant_id}, user {current_user.id}")
-    documents = crud.document.get_multi_by_owner(
-        db=db,
-        owner_id=current_user.id,
-        tenant_id=tenant_id  # SPRINT 2: Mandatory tenant filtering
-    )
+    document_endpoints.logger.info(f"Fetching documents for tenant {tenant_id}, user {current_user.id}, initiative_id={initiative_id}")
+    if initiative_id:
+        documents = crud.document.get_by_initiative(
+            db=db,
+            initiative_id=initiative_id,
+            tenant_id=tenant_id
+        )
+    else:
+        documents = crud.document.get_multi_by_owner(
+            db=db,
+            owner_id=current_user.id,
+            tenant_id=tenant_id  # SPRINT 2: Mandatory tenant filtering
+        )
     document_endpoints.logger.info(f"Retrieved {len(documents)} documents for tenant {tenant_id}")
     return documents
 
@@ -267,6 +276,7 @@ async def upload_document(
     document_type: str = Form(...),
     version: str = Form(...),
     file: UploadFile = File(...),
+    initiative_id: Optional[int] = Form(None),  # SPRINT 4: Auto-link to project
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
@@ -328,6 +338,23 @@ async def upload_document(
             storage_path=str(storage_path),
             tenant_id=tenant_id  # SPRINT 2: Mandatory tenant assignment
         )
+
+        # SPRINT 4: Auto-link document to initiative (project) if specified
+        if initiative_id:
+            try:
+                from app.schemas.initiative import InitiativeAssetCreate
+                crud.initiative_asset.create_asset(
+                    db=db,
+                    obj_in=InitiativeAssetCreate(
+                        initiative_id=initiative_id,
+                        asset_type="DOCUMENT",
+                        asset_id=document.id,
+                    ),
+                    tenant_id=tenant_id
+                )
+                logger.info(f"Document {document.id} auto-linked to initiative {initiative_id}")
+            except Exception as e:
+                logger.warning(f"Failed to auto-link document {document.id} to initiative {initiative_id}: {e}")
 
         logger.info(f"Document {document.id} uploaded successfully to tenant {tenant_id}. Ready for analysis.")
         return document

@@ -16,6 +16,7 @@ import React, { useState, useEffect, createContext, useContext } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth, Permission, Role } from "@/contexts/AuthContext";
+import { useProject } from "@/contexts/ProjectContext";
 import {
   LayoutDashboard,
   FileText,
@@ -38,6 +39,9 @@ import {
   CreditCard,
   Shield,
   X,
+  FolderKanban,
+  Plus,
+  Check,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -51,8 +55,10 @@ interface SidebarProps {
 export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { user, tenant, isCXO, isAdmin, hasPermission, logout } = useAuth();
+  const { selectedProject, setSelectedProject, projects, refreshProjects } = useProject();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
 
   // Check if user can access management features
   const canAccessManagement = isCXO() || isAdmin();
@@ -86,10 +92,15 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       href: "/dashboard/validation-panel",
     },
     {
+      icon: FolderKanban,
+      text: "Projects",
+      href: "/dashboard/projects",
+      badge: "New",
+    },
+    {
       icon: Network,
       text: "Business Ontology",
       href: "/dashboard/ontology",
-      badge: "New",
     },
     {
       icon: History,
@@ -213,6 +224,86 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
               <p className="text-sm font-medium text-gray-800 truncate">
                 {tenant.name}
               </p>
+            </div>
+          )}
+
+          {/* Project Selector */}
+          {!isCollapsed && (
+            <div className="px-3 py-2 border-b border-gray-100">
+              <p className="px-1 mb-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                Project
+              </p>
+              <div className="relative">
+                <button
+                  onClick={() => setProjectDropdownOpen(!projectDropdownOpen)}
+                  className="w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FolderKanban className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                    <span className="truncate font-medium text-gray-700">
+                      {selectedProject ? selectedProject.name : "All Projects"}
+                    </span>
+                  </div>
+                  <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${projectDropdownOpen ? "rotate-180" : ""}`} />
+                </button>
+
+                {projectDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto">
+                    {/* All Projects option */}
+                    <button
+                      onClick={() => {
+                        setSelectedProject(null);
+                        setProjectDropdownOpen(false);
+                      }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors ${
+                        !selectedProject ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-700"
+                      }`}
+                    >
+                      {!selectedProject && <Check className="h-3.5 w-3.5" />}
+                      <span className={!selectedProject ? "" : "ml-5"}>All Projects</span>
+                    </button>
+
+                    {projects.length > 0 && (
+                      <div className="border-t border-gray-100">
+                        {projects.map((project) => (
+                          <button
+                            key={project.id}
+                            onClick={() => {
+                              setSelectedProject(project);
+                              setProjectDropdownOpen(false);
+                            }}
+                            className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors ${
+                              selectedProject?.id === project.id
+                                ? "bg-blue-50 text-blue-700 font-medium"
+                                : "text-gray-700"
+                            }`}
+                          >
+                            {selectedProject?.id === project.id && <Check className="h-3.5 w-3.5" />}
+                            <span className={selectedProject?.id === project.id ? "" : "ml-5"}>
+                              {project.name}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Create new project link */}
+                    <div className="border-t border-gray-100">
+                      <Link
+                        href="/dashboard/projects"
+                        onClick={() => {
+                          setProjectDropdownOpen(false);
+                          isOpen && onClose();
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 transition-colors"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Manage Projects</span>
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

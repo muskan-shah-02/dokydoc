@@ -5,7 +5,7 @@ Represents a concept in the business ontology (e.g., "User Authentication", "Pay
 These are the nodes in the knowledge graph.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from app.db.base_class import Base
@@ -16,6 +16,7 @@ class OntologyConcept(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
+    initiative_id: Mapped[int] = mapped_column(Integer, ForeignKey("initiatives.id"), nullable=True, index=True)  # SPRINT 4: Project-scoped ontology (NULL = global/unscoped)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     concept_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., "FEATURE", "TECHNOLOGY", "PROCESS"
     description: Mapped[str] = mapped_column(Text, nullable=True)

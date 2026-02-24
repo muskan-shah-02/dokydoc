@@ -37,10 +37,16 @@ def list_repositories(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
     analysis_status: Optional[str] = Query(None, description="Filter by status"),
+    initiative_id: Optional[int] = Query(None, description="Filter by initiative (project) ID"),
     skip: int = 0,
     limit: int = 100,
 ) -> Any:
-    """List all repositories for the current tenant."""
+    """List all repositories for the current tenant, optionally filtered by initiative."""
+    if initiative_id:
+        return crud.repository.get_by_initiative(
+            db=db, initiative_id=initiative_id, tenant_id=tenant_id,
+            skip=skip, limit=limit
+        )
     if analysis_status:
         return crud.repository.get_by_status(
             db=db, analysis_status=analysis_status, tenant_id=tenant_id,
@@ -58,10 +64,12 @@ def onboard_repository(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Auto-link repo to initiative (project)"),
 ) -> Any:
     """
     Onboard a new repository. Checks for duplicate URLs within the tenant.
     Does NOT trigger analysis — use POST /{id}/analyze for that.
+    SPRINT 4: Optional initiative_id to auto-link repo to a project.
     """
     # Dedup: prevent duplicate repos by URL
     existing = crud.repository.get_by_url(db=db, url=obj_in.url, tenant_id=tenant_id)
@@ -75,6 +83,24 @@ def onboard_repository(
         db=db, obj_in=obj_in, owner_id=current_user.id, tenant_id=tenant_id
     )
     logger.info(f"Repository '{repo.name}' onboarded by user {current_user.id} in tenant {tenant_id}")
+
+    # Auto-link to initiative if specified
+    if initiative_id:
+        try:
+            from app.schemas.initiative import InitiativeAssetCreate
+            crud.initiative_asset.create_asset(
+                db=db,
+                obj_in=InitiativeAssetCreate(
+                    initiative_id=initiative_id,
+                    asset_type="REPOSITORY",
+                    asset_id=repo.id,
+                ),
+                tenant_id=tenant_id
+            )
+            logger.info(f"Repository {repo.id} auto-linked to initiative {initiative_id}")
+        except Exception as e:
+            logger.warning(f"Failed to auto-link repository {repo.id} to initiative {initiative_id}: {e}")
+
     return repo
 
 

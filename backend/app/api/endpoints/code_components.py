@@ -4,7 +4,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import List, Any
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Query
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
@@ -34,19 +34,45 @@ def read_code_components(
     db: Session = Depends(deps.get_db),
     skip: int = 0,
     limit: int = 100,
+    standalone: bool = Query(False, description="When true, return only components with no repository (standalone)"),
+    initiative_id: int = Query(None, description="Filter by initiative (project) ID"),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
     Retrieve all code components for the current user, enriched with
     repository analysis progress (analyzed_files / total_files) for
     components linked to a repository.
+
+    - standalone=true: only components with repository_id IS NULL
+    - initiative_id: filter via repository → InitiativeAsset join
     """
     logger = code_component_endpoints.logger
-    logger.info(f"Fetching code components for user {current_user.id} (tenant_id={tenant_id}), skip={skip}, limit={limit}")
+    logger.info(f"Fetching code components for user {current_user.id} (tenant_id={tenant_id}), skip={skip}, limit={limit}, standalone={standalone}")
 
-    code_components = crud.code_component.get_multi_by_owner(
-        db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=skip, limit=limit
-    )
+    if initiative_id:
+        # Filter code components via their repository's initiative asset link
+        from app.models.initiative_asset import InitiativeAsset
+        from app.models.code_component import CodeComponent
+        repo_ids_sub = db.query(InitiativeAsset.asset_id).filter(
+            InitiativeAsset.initiative_id == initiative_id,
+            InitiativeAsset.asset_type == "REPOSITORY",
+            InitiativeAsset.tenant_id == tenant_id,
+            InitiativeAsset.is_active == True,
+        ).subquery()
+        code_components = db.query(CodeComponent).filter(
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.repository_id.in_(repo_ids_sub),
+        ).offset(skip).limit(limit).all()
+    elif standalone:
+        from app.models.code_component import CodeComponent
+        code_components = db.query(CodeComponent).filter(
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.repository_id.is_(None),
+        ).offset(skip).limit(limit).all()
+    else:
+        code_components = crud.code_component.get_multi_by_owner(
+            db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=skip, limit=limit
+        )
 
     # Auto-recover stale analyses: if a component has been "processing" for too long,
     # mark it as failed so the user gets clear feedback instead of infinite spinner.

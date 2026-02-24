@@ -100,6 +100,27 @@ class CRUDRepository(CRUDBase[Repository, RepositoryCreate, RepositoryUpdate]):
 
         return self.update(db=db, db_obj=repo, obj_in=update_data)
 
+    def get_by_initiative(
+        self, db: Session, *, initiative_id: int, tenant_id: int,
+        skip: int = 0, limit: int = 100
+    ) -> List[Repository]:
+        """Get repositories linked to a specific initiative via InitiativeAsset."""
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_by_initiative()")
+
+        from app.models.initiative_asset import InitiativeAsset
+        asset_ids = db.query(InitiativeAsset.asset_id).filter(
+            InitiativeAsset.initiative_id == initiative_id,
+            InitiativeAsset.asset_type == "REPOSITORY",
+            InitiativeAsset.tenant_id == tenant_id,
+            InitiativeAsset.is_active == True,
+        ).subquery()
+
+        return db.query(self.model).filter(
+            self.model.id.in_(asset_ids),
+            self.model.tenant_id == tenant_id,
+        ).offset(skip).limit(limit).all()
+
     def count_by_tenant(self, db: Session, *, tenant_id: int) -> int:
         """Count all repositories for a tenant."""
         if not tenant_id:

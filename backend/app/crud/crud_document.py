@@ -96,5 +96,33 @@ class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
             .all()
         )
 
+    def get_by_initiative(
+        self, db: Session, *, initiative_id: int, tenant_id: int,
+        skip: int = 0, limit: int = 100
+    ) -> List[Document]:
+        """Get documents linked to a specific initiative via InitiativeAsset."""
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_by_initiative()")
+
+        from app.models.initiative_asset import InitiativeAsset
+        asset_ids = db.query(InitiativeAsset.asset_id).filter(
+            InitiativeAsset.initiative_id == initiative_id,
+            InitiativeAsset.asset_type == "DOCUMENT",
+            InitiativeAsset.tenant_id == tenant_id,
+            InitiativeAsset.is_active == True,
+        ).subquery()
+
+        return (
+            db.query(self.model)
+            .options(selectinload(Document.segments))
+            .filter(
+                self.model.id.in_(asset_ids),
+                self.model.tenant_id == tenant_id,
+            )
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
 # Create a single instance of the CRUDDocument class that we can import elsewhere
 document = CRUDDocument(Document)
