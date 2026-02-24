@@ -12,6 +12,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = 's4a2_cross_project_mappings'
 down_revision: Union[str, None] = 's4a1_initiative_ontology'
@@ -20,27 +21,35 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        'cross_project_mappings',
-        sa.Column('id', sa.Integer(), primary_key=True, index=True),
-        sa.Column('tenant_id', sa.Integer(), nullable=False, index=True),
-        sa.Column('concept_a_id', sa.Integer(), sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
-        sa.Column('concept_b_id', sa.Integer(), sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
-        sa.Column('initiative_a_id', sa.Integer(), sa.ForeignKey('initiatives.id'), nullable=False, index=True),
-        sa.Column('initiative_b_id', sa.Integer(), sa.ForeignKey('initiatives.id'), nullable=False, index=True),
-        sa.Column('mapping_method', sa.String(20), nullable=False),
-        sa.Column('confidence_score', sa.Float(), nullable=False, default=0.0),
-        sa.Column('status', sa.String(20), nullable=False, default='candidate', index=True),
-        sa.Column('relationship_type', sa.String(50), nullable=False, default='shares_concept'),
-        sa.Column('ai_reasoning', sa.Text(), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()),
-    )
-    # Composite index for fast cross-project queries
-    op.create_index(
-        'ix_cross_project_mappings_initiatives',
-        'cross_project_mappings', ['initiative_a_id', 'initiative_b_id']
-    )
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    existing_tables = inspector.get_table_names()
+
+    if 'cross_project_mappings' not in existing_tables:
+        op.create_table(
+            'cross_project_mappings',
+            sa.Column('id', sa.Integer(), primary_key=True, index=True),
+            sa.Column('tenant_id', sa.Integer(), nullable=False, index=True),
+            sa.Column('concept_a_id', sa.Integer(), sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
+            sa.Column('concept_b_id', sa.Integer(), sa.ForeignKey('ontology_concepts.id'), nullable=False, index=True),
+            sa.Column('initiative_a_id', sa.Integer(), sa.ForeignKey('initiatives.id'), nullable=False, index=True),
+            sa.Column('initiative_b_id', sa.Integer(), sa.ForeignKey('initiatives.id'), nullable=False, index=True),
+            sa.Column('mapping_method', sa.String(20), nullable=False),
+            sa.Column('confidence_score', sa.Float(), nullable=False, default=0.0),
+            sa.Column('status', sa.String(20), nullable=False, default='candidate', index=True),
+            sa.Column('relationship_type', sa.String(50), nullable=False, default='shares_concept'),
+            sa.Column('ai_reasoning', sa.Text(), nullable=True),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()),
+        )
+
+    # Composite index — only if it doesn't already exist
+    existing_indexes = [idx['name'] for idx in inspector.get_indexes('cross_project_mappings')]
+    if 'ix_cross_project_mappings_initiatives' not in existing_indexes:
+        op.create_index(
+            'ix_cross_project_mappings_initiatives',
+            'cross_project_mappings', ['initiative_a_id', 'initiative_b_id']
+        )
 
 
 def downgrade() -> None:
