@@ -492,10 +492,10 @@ export default function OntologyDashboard() {
     }
   }, [graphLayer, fetchMetaGraph]);
 
-  // Fetch repos for branch preview selector
+  // Fetch repos for branch preview selector — no initiative filter (repos are global)
   const fetchRepos = useCallback(async () => {
     try {
-      const data = await api.get<RepoInfo[]>("/repositories/", { limit: 100, ...queryParams });
+      const data = await api.get<RepoInfo[]>("/repositories/", { limit: 100 });
       setRepos(data);
       // Auto-select first repo if none selected
       if (data.length > 0 && !selectedRepoId) {
@@ -504,7 +504,7 @@ export default function OntologyDashboard() {
     } catch (err) {
       console.error("Failed to fetch repos:", err);
     }
-  }, [queryParams, selectedRepoId]);
+  }, [selectedRepoId]);
 
   // Fetch branch previews for selected repo
   const fetchBranchPreviews = useCallback(async () => {
