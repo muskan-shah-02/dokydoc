@@ -1,7 +1,7 @@
 """Add initiative_id to ontology_concepts for project-scoped ontology
 
 Revision ID: s4a1_initiative_ontology
-Revises: s3d5_delta_analysis
+Revises: s3a8_fix_synthesis
 Create Date: 2026-02-24 10:00:00.000000
 
 SPRINT 4 Phase 2: Project-Scoped Ontology
@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = 's4a1_initiative_ontology'
-down_revision: Union[str, None] = 's3d5_delta_analysis'
+down_revision: Union[str, None] = 's3a8_fix_synthesis'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
