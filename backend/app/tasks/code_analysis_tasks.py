@@ -75,9 +75,14 @@ def static_analysis_worker(
         previous_analysis = component.structured_analysis
         previous_hash = _hash_analysis(previous_analysis)
 
-        # Update status
+        # Update status + start timestamp
+        from datetime import datetime as dt
+        analysis_start = dt.utcnow()
         crud.code_component.update(
-            db, db_obj=component, obj_in={"analysis_status": "processing"}
+            db, db_obj=component, obj_in={
+                "analysis_status": "processing",
+                "analysis_started_at": analysis_start,
+            }
         )
 
         # Check cache first
@@ -214,17 +219,49 @@ def static_analysis_worker(
             except Exception as delta_err:
                 logger.warning(f"Delta analysis failed (non-critical): {delta_err}")
 
-        # Persist results
+        # Persist results + cost/timing data
+        analysis_end = dt.utcnow()
+        token_usage_final = analysis_result.get("_token_usage", {})
+        total_cost_inr = 0
+        try:
+            if token_usage_final and token_usage_final.get("input_tokens", 0) > 0:
+                from app.services.cost_service import cost_service as _cs
+                _cost = _cs.calculate_cost_from_actual_tokens(
+                    input_tokens=token_usage_final.get("input_tokens", 0),
+                    output_tokens=token_usage_final.get("output_tokens", 0),
+                    thinking_tokens=token_usage_final.get("thinking_tokens", 0),
+                )
+                total_cost_inr = _cost.get("cost_inr", 0)
+        except Exception:
+            pass
+
         update_data = {
             "summary": analysis_result.get("summary"),
             "structured_analysis": new_analysis,
             "analysis_status": "completed",
             "previous_analysis_hash": previous_hash if previous_analysis else None,
+            "analysis_completed_at": analysis_end,
+            "ai_cost_inr": total_cost_inr if total_cost_inr > 0 else None,
+            "token_count_input": token_usage_final.get("input_tokens") if token_usage_final else None,
+            "token_count_output": token_usage_final.get("output_tokens") if token_usage_final else None,
         }
         if delta_result:
             update_data["analysis_delta"] = delta_result
 
         crud.code_component.update(db, db_obj=component, obj_in=update_data)
+
+        # Extract ontology concepts inline (source_type="code") so Code tab
+        # populates immediately — no need to wait for full repo completion
+        if new_analysis and tenant_id:
+            try:
+                from app.services.code_analysis_service import code_analysis_service
+                code_analysis_service._extract_ontology_from_analysis(
+                    db, structured_analysis=new_analysis,
+                    component_name=file_path or component.name,
+                    tenant_id=tenant_id,
+                )
+            except Exception as onto_err:
+                logger.warning(f"Inline ontology extraction failed (non-critical): {onto_err}")
 
         logger.info(f"ANALYSIS_WORKER completed for component {component_id}")
         return {
