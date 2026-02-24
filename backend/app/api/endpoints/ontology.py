@@ -632,3 +632,236 @@ def extract_code_concepts(
         "components_processed": total_concepts,
         "total_components": len(components),
     }
+
+
+# ============================================================
+# CROSS-PROJECT MAPPING ENDPOINTS (SPRINT 4 Phase 3)
+# ============================================================
+
+@router.post("/cross-project/run", status_code=status.HTTP_202_ACCEPTED)
+def trigger_cross_project_mapping(
+    *,
+    initiative_a_id: int = Query(..., description="First project ID"),
+    initiative_b_id: int = Query(..., description="Second project ID"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    background_tasks: BackgroundTasks = None,
+) -> Any:
+    """
+    Trigger 3-tier cross-project mapping between two projects.
+    Runs in background: exact → fuzzy → AI validation.
+    """
+    if initiative_a_id == initiative_b_id:
+        raise HTTPException(status_code=400, detail="Cannot map a project to itself")
+
+    from app.services.cross_project_mapping_service import cross_project_mapping_service
+
+    def _run():
+        return cross_project_mapping_service.run_cross_project_mapping(
+            db=db, initiative_a_id=initiative_a_id,
+            initiative_b_id=initiative_b_id, tenant_id=tenant_id
+        )
+
+    background_tasks.add_task(_run)
+    return {
+        "message": "Cross-project mapping started",
+        "initiative_a_id": initiative_a_id,
+        "initiative_b_id": initiative_b_id,
+    }
+
+
+@router.get("/cross-project/mappings")
+def list_cross_project_mappings(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by project"),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    skip: int = 0,
+    limit: int = 200,
+) -> Any:
+    """List cross-project mappings with enriched concept/project names."""
+    if status_filter:
+        mappings = crud.cross_project_mapping.get_by_status(
+            db=db, status=status_filter, tenant_id=tenant_id,
+            skip=skip, limit=limit
+        )
+    elif initiative_id:
+        mappings = crud.cross_project_mapping.get_by_initiative(
+            db=db, initiative_id=initiative_id, tenant_id=tenant_id,
+            skip=skip, limit=limit
+        )
+    else:
+        mappings = crud.cross_project_mapping.get_all_for_tenant(
+            db=db, tenant_id=tenant_id, skip=skip, limit=limit
+        )
+
+    result = []
+    for m in mappings:
+        concept_a = crud.ontology_concept.get(db=db, id=m.concept_a_id, tenant_id=tenant_id)
+        concept_b = crud.ontology_concept.get(db=db, id=m.concept_b_id, tenant_id=tenant_id)
+        init_a = crud.initiative.get(db=db, id=m.initiative_a_id, tenant_id=tenant_id)
+        init_b = crud.initiative.get(db=db, id=m.initiative_b_id, tenant_id=tenant_id)
+        result.append({
+            "id": m.id,
+            "tenant_id": m.tenant_id,
+            "concept_a_id": m.concept_a_id,
+            "concept_b_id": m.concept_b_id,
+            "initiative_a_id": m.initiative_a_id,
+            "initiative_b_id": m.initiative_b_id,
+            "mapping_method": m.mapping_method,
+            "confidence_score": m.confidence_score,
+            "status": m.status,
+            "relationship_type": m.relationship_type,
+            "ai_reasoning": m.ai_reasoning,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "concept_a_name": concept_a.name if concept_a else "Unknown",
+            "concept_a_type": concept_a.concept_type if concept_a else "Unknown",
+            "concept_b_name": concept_b.name if concept_b else "Unknown",
+            "concept_b_type": concept_b.concept_type if concept_b else "Unknown",
+            "initiative_a_name": init_a.name if init_a else "Unknown",
+            "initiative_b_name": init_b.name if init_b else "Unknown",
+        })
+    return result
+
+
+@router.put("/cross-project/mappings/{mapping_id}/confirm")
+def confirm_cross_project_mapping(
+    mapping_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Confirm a candidate cross-project mapping."""
+    result = crud.cross_project_mapping.confirm_mapping(
+        db=db, mapping_id=mapping_id, tenant_id=tenant_id
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return {"status": "confirmed", "mapping_id": mapping_id}
+
+
+@router.put("/cross-project/mappings/{mapping_id}/reject")
+def reject_cross_project_mapping(
+    mapping_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Reject a candidate cross-project mapping."""
+    result = crud.cross_project_mapping.reject_mapping(
+        db=db, mapping_id=mapping_id, tenant_id=tenant_id
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return {"status": "rejected", "mapping_id": mapping_id}
+
+
+@router.get("/cross-project/stats")
+def get_cross_project_stats(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get cross-project mapping statistics."""
+    all_mappings = crud.cross_project_mapping.get_all_for_tenant(
+        db=db, tenant_id=tenant_id
+    )
+    confirmed = sum(1 for m in all_mappings if m.status == "confirmed")
+    candidates = sum(1 for m in all_mappings if m.status == "candidate")
+    # Count unique project pairs
+    pairs = set()
+    for m in all_mappings:
+        pair = tuple(sorted([m.initiative_a_id, m.initiative_b_id]))
+        pairs.add(pair)
+
+    return {
+        "total_mappings": len(all_mappings),
+        "confirmed_mappings": confirmed,
+        "candidate_mappings": candidates,
+        "project_pairs": len(pairs),
+    }
+
+
+# ============================================================
+# META-GRAPH ENDPOINT (SPRINT 4 Phase 3 — Org-Wide View)
+# ============================================================
+
+@router.get("/graph/meta", response_model=None)
+def get_meta_graph(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Org-wide meta-graph: all concepts clustered by project,
+    with both intra-project edges and cross-project edges.
+    """
+    # Get all concepts with their project assignments
+    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    relationships = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+    cross_mappings = crud.cross_project_mapping.get_all_for_tenant(
+        db=db, tenant_id=tenant_id
+    )
+
+    # Build nodes with project cluster info
+    nodes = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "concept_type": c.concept_type,
+            "source_type": c.source_type,
+            "initiative_id": c.initiative_id,
+            "confidence_score": c.confidence_score,
+        }
+        for c in concepts
+    ]
+
+    # Intra-project edges (from OntologyRelationship)
+    intra_edges = [
+        {
+            "id": r.id,
+            "source_concept_id": r.source_concept_id,
+            "target_concept_id": r.target_concept_id,
+            "relationship_type": r.relationship_type,
+            "confidence_score": r.confidence_score,
+            "edge_type": "intra_project",
+        }
+        for r in relationships
+    ]
+
+    # Cross-project edges (from CrossProjectMapping)
+    cross_edges = [
+        {
+            "id": m.id + 100000,  # Offset to avoid ID collision with intra edges
+            "source_concept_id": m.concept_a_id,
+            "target_concept_id": m.concept_b_id,
+            "relationship_type": m.relationship_type,
+            "confidence_score": m.confidence_score,
+            "edge_type": "cross_project",
+            "status": m.status,
+            "mapping_method": m.mapping_method,
+            "initiative_a_id": m.initiative_a_id,
+            "initiative_b_id": m.initiative_b_id,
+        }
+        for m in cross_mappings
+        if m.status != "rejected"
+    ]
+
+    # Get project names for clustering
+    projects = crud.initiative.get_multi(db=db, tenant_id=tenant_id)
+    project_map = {p.id: p.name for p in projects}
+
+    return {
+        "nodes": nodes,
+        "intra_edges": intra_edges,
+        "cross_edges": cross_edges,
+        "total_nodes": len(nodes),
+        "total_intra_edges": len(intra_edges),
+        "total_cross_edges": len(cross_edges),
+        "projects": [
+            {"id": p.id, "name": p.name}
+            for p in projects
+        ],
+    }

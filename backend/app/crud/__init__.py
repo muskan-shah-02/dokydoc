@@ -21,3 +21,6 @@ from .crud_repository import repository
 
 # SPRINT 3 ADHOC: Cross-Graph Mapping
 from .crud_concept_mapping import concept_mapping
+
+# SPRINT 4: Cross-Project Mapping
+from .crud_cross_project_mapping import cross_project_mapping

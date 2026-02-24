@@ -33,6 +33,7 @@ import { useProject } from "@/contexts/ProjectContext";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { ConceptDialog } from "@/components/ontology/ConceptDialog";
 import { RelationshipDialog } from "@/components/ontology/RelationshipDialog";
+import { MetaGraphView } from "@/components/ontology/MetaGraphView";
 
 // --- Types ---
 
@@ -356,7 +357,7 @@ function ConceptEditRow({
 
 // --- Main Page ---
 
-type GraphLayer = "all" | "document" | "code";
+type GraphLayer = "all" | "document" | "code" | "meta";
 type ViewMode = "table" | "graph";
 
 export default function OntologyDashboard() {
@@ -388,11 +389,16 @@ export default function OntologyDashboard() {
   const [sortBy, setSortBy] = useState<"name" | "type" | "confidence" | "source">("name");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
+  // Meta-graph state (cross-project view)
+  const [metaGraph, setMetaGraph] = useState<any>(null);
+  const [metaLoading, setMetaLoading] = useState(false);
+
   // --- Data Fetching ---
 
   const graphEndpoint = graphLayer === "all" ? "/ontology/graph"
     : graphLayer === "document" ? "/ontology/graph/document"
-    : "/ontology/graph/code";
+    : graphLayer === "code" ? "/ontology/graph/code"
+    : "/ontology/graph"; // meta uses a separate fetch
 
   // Build query params — include initiative_id when a project is selected
   const queryParams = useMemo(() => {
@@ -417,6 +423,25 @@ export default function OntologyDashboard() {
       setError(err.detail || "Failed to load ontology data");
     }
   }, [graphEndpoint, queryParams]);
+
+  // Fetch meta-graph when "meta" tab is active
+  const fetchMetaGraph = useCallback(async () => {
+    setMetaLoading(true);
+    try {
+      const data = await api.get<any>("/ontology/graph/meta");
+      setMetaGraph(data);
+    } catch (err: any) {
+      console.error("Failed to fetch meta-graph:", err);
+    } finally {
+      setMetaLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (graphLayer === "meta") {
+      fetchMetaGraph();
+    }
+  }, [graphLayer, fetchMetaGraph]);
 
   const fetchConceptDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
@@ -670,6 +695,7 @@ export default function OntologyDashboard() {
             { key: "all" as GraphLayer, label: "All", icon: Layers },
             { key: "document" as GraphLayer, label: "Document", icon: FileText },
             { key: "code" as GraphLayer, label: "Code", icon: Code2 },
+            { key: "meta" as GraphLayer, label: "Meta-Graph", icon: Share2 },
           ].map((tab) => (
             <button key={tab.key} onClick={() => setGraphLayer(tab.key)}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
@@ -729,8 +755,26 @@ export default function OntologyDashboard() {
         </span>
       </div>
 
+      {/* === META-GRAPH VIEW === */}
+      {graphLayer === "meta" && (
+        <div>
+          {metaLoading ? (
+            <div className="flex h-64 items-center justify-center rounded-lg border bg-white">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading meta-graph...</span>
+            </div>
+          ) : metaGraph ? (
+            <MetaGraphView data={metaGraph} />
+          ) : (
+            <div className="flex h-64 items-center justify-center rounded-lg border bg-white text-sm text-gray-400">
+              No meta-graph data available
+            </div>
+          )}
+        </div>
+      )}
+
       {/* === TABLE VIEW === */}
-      {viewMode === "table" && (
+      {graphLayer !== "meta" && viewMode === "table" && (
         <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
           <table className="w-full text-sm">
             <thead>
@@ -833,7 +877,7 @@ export default function OntologyDashboard() {
       )}
 
       {/* === GRAPH VIEW === */}
-      {viewMode === "graph" && (
+      {graphLayer !== "meta" && viewMode === "graph" && (
         <div>
           {/* Legend */}
           <div className="mb-3 flex flex-wrap items-center gap-4 rounded-lg border bg-white px-4 py-2.5">
