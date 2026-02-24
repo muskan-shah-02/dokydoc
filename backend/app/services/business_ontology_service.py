@@ -39,16 +39,18 @@ class BusinessOntologyService(LoggerMixin):
     def get_or_create_concept(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
         description: str = None, confidence_score: float = None,
-        source_type: str = "document"
+        source_type: str = "document", initiative_id: int = None
     ):
         """
         Idempotent concept creation with name normalization and cross-reference.
         Delegates to CRUD layer which handles deduplication and source_type promotion.
+        If initiative_id is provided, the concept is scoped to that project.
         """
         return crud.ontology_concept.get_or_create(
             db=db, name=name, concept_type=concept_type,
             tenant_id=tenant_id, description=description,
-            confidence_score=confidence_score, source_type=source_type
+            confidence_score=confidence_score, source_type=source_type,
+            initiative_id=initiative_id
         )
 
     def link_concepts(
@@ -132,15 +134,19 @@ class BusinessOntologyService(LoggerMixin):
         entities = extraction_result.get("entities", [])
         relationships = extraction_result.get("relationships", [])
 
+        # Look up initiative_id for this document via InitiativeAsset
+        initiative_id = self._resolve_initiative_for_document(db=db, document_id=document_id, tenant_id=tenant_id)
+
         entities_created, relationships_created = self._ingest_extraction_result(
             db=db, entities=entities, relationships=relationships,
-            document_id=document_id, tenant_id=tenant_id
+            document_id=document_id, tenant_id=tenant_id,
+            initiative_id=initiative_id
         )
 
         self.logger.info(
             f"🧠 Entity extraction complete for document {document_id}: "
             f"{entities_created} concepts, {relationships_created} relationships, "
-            f"₹{total_cost_inr:.4f}"
+            f"initiative_id={initiative_id}, ₹{total_cost_inr:.4f}"
         )
 
         return {
@@ -154,7 +160,8 @@ class BusinessOntologyService(LoggerMixin):
 
     def _ingest_extraction_result(
         self, db: Session, *, entities: List[Dict], relationships: List[Dict],
-        document_id: int = None, tenant_id: int, source_type: str = "document"
+        document_id: int = None, tenant_id: int, source_type: str = "document",
+        initiative_id: int = None
     ) -> Tuple[int, int]:
         """
         Takes the AI-extracted entities and relationships and persists them
@@ -164,6 +171,8 @@ class BusinessOntologyService(LoggerMixin):
         - "document" for entities extracted from BRD/SRS analysis
         - "code" for entities extracted from code analysis
         If a concept already exists from the other source, CRUD promotes it to "both".
+
+        If initiative_id is provided, concepts are scoped to that project.
         """
         entities_created = 0
         concept_map = {}  # name -> OntologyConcept object (for relationship linking)
@@ -182,7 +191,8 @@ class BusinessOntologyService(LoggerMixin):
                 concept = self.get_or_create_concept(
                     db=db, name=name, concept_type=concept_type,
                     tenant_id=tenant_id, description=context,
-                    confidence_score=confidence, source_type=source_type
+                    confidence_score=confidence, source_type=source_type,
+                    initiative_id=initiative_id
                 )
                 concept_map[name] = concept
                 entities_created += 1
@@ -232,6 +242,9 @@ class BusinessOntologyService(LoggerMixin):
         This is the code counterpart to extract_entities_from_analysis() (documents).
         """
         self.logger.info(f"🔧 Starting CODE entity extraction for repo {repo_id}")
+
+        # Look up initiative_id for this repository via InitiativeAsset
+        initiative_id = self._resolve_initiative_for_repository(db=db, repo_id=repo_id, tenant_id=tenant_id)
 
         # Get all completed code components for this repository
         components = db.query(crud.code_component.model).filter(
@@ -303,7 +316,8 @@ class BusinessOntologyService(LoggerMixin):
 
             batch_entities, batch_rels = self._ingest_extraction_result(
                 db=db, entities=entities, relationships=relationships,
-                tenant_id=tenant_id, source_type="code"
+                tenant_id=tenant_id, source_type="code",
+                initiative_id=initiative_id
             )
             total_entities += batch_entities
             total_relationships += batch_rels
@@ -573,6 +587,38 @@ class BusinessOntologyService(LoggerMixin):
             "output_tokens": tokens['output_tokens'],
             "thinking_tokens": tokens['thinking_tokens'],
         }
+
+    def _resolve_initiative_for_document(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> Optional[int]:
+        """Look up which initiative/project a document belongs to via InitiativeAsset."""
+        try:
+            from app.models.initiative_asset import InitiativeAsset
+            asset = db.query(InitiativeAsset).filter(
+                InitiativeAsset.tenant_id == tenant_id,
+                InitiativeAsset.asset_type == "DOCUMENT",
+                InitiativeAsset.asset_id == document_id,
+                InitiativeAsset.is_active == True
+            ).first()
+            return asset.initiative_id if asset else None
+        except Exception:
+            return None
+
+    def _resolve_initiative_for_repository(
+        self, db: Session, *, repo_id: int, tenant_id: int
+    ) -> Optional[int]:
+        """Look up which initiative/project a repository belongs to via InitiativeAsset."""
+        try:
+            from app.models.initiative_asset import InitiativeAsset
+            asset = db.query(InitiativeAsset).filter(
+                InitiativeAsset.tenant_id == tenant_id,
+                InitiativeAsset.asset_type == "REPOSITORY",
+                InitiativeAsset.asset_id == repo_id,
+                InitiativeAsset.is_active == True
+            ).first()
+            return asset.initiative_id if asset else None
+        except Exception:
+            return None
 
     def get_domain_vocabulary(
         self, db: Session, *, tenant_id: int

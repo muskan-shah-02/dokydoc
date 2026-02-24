@@ -29,6 +29,7 @@ import {
   Code2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useProject } from "@/contexts/ProjectContext";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { ConceptDialog } from "@/components/ontology/ConceptDialog";
 import { RelationshipDialog } from "@/components/ontology/RelationshipDialog";
@@ -42,6 +43,7 @@ interface Concept {
   description: string | null;
   confidence_score: number;
   source_type?: string;
+  initiative_id?: number | null;
   is_active: boolean;
   created_at: string;
 }
@@ -65,6 +67,7 @@ interface GraphNode {
   name: string;
   concept_type: string;
   source_type?: string;
+  initiative_id?: number | null;
   confidence_score: number;
 }
 
@@ -357,6 +360,10 @@ type GraphLayer = "all" | "document" | "code";
 type ViewMode = "table" | "graph";
 
 export default function OntologyDashboard() {
+  // Project context — scopes all API calls to selected project
+  const { selectedProject } = useProject();
+  const initiativeId = selectedProject?.id ?? null;
+
   // Data state
   const [concepts, setConcepts] = useState<Concept[]>([]);
   const [graph, setGraph] = useState<GraphData>({ nodes: [], edges: [], total_nodes: 0, total_edges: 0 });
@@ -387,12 +394,19 @@ export default function OntologyDashboard() {
     : graphLayer === "document" ? "/ontology/graph/document"
     : "/ontology/graph/code";
 
+  // Build query params — include initiative_id when a project is selected
+  const queryParams = useMemo(() => {
+    const params: Record<string, string | number | boolean> = {};
+    if (initiativeId) params.initiative_id = initiativeId;
+    return params;
+  }, [initiativeId]);
+
   const fetchAll = useCallback(async () => {
     try {
       const [conceptsRes, graphRes, statsRes] = await Promise.all([
-        api.get<Concept[]>("/ontology/concepts", { limit: 500 }),
-        api.get<GraphData>(graphEndpoint),
-        api.get<OntologyStats>("/ontology/stats"),
+        api.get<Concept[]>("/ontology/concepts", { limit: 500, ...queryParams }),
+        api.get<GraphData>(graphEndpoint, queryParams),
+        api.get<OntologyStats>("/ontology/stats", queryParams),
       ]);
       setConcepts(conceptsRes);
       setGraph(graphRes);
@@ -402,7 +416,7 @@ export default function OntologyDashboard() {
       console.error("Failed to fetch ontology data:", err);
       setError(err.detail || "Failed to load ontology data");
     }
-  }, [graphEndpoint]);
+  }, [graphEndpoint, queryParams]);
 
   const fetchConceptDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
@@ -493,7 +507,9 @@ export default function OntologyDashboard() {
   const handleCreateConcept = async (data: {
     name: string; concept_type: string; description: string; confidence_score: number;
   }) => {
-    await api.post("/ontology/concepts", data);
+    // Scope new concept to current project if one is selected
+    const payload = initiativeId ? { ...data, initiative_id: initiativeId } : data;
+    await api.post("/ontology/concepts", payload);
     await fetchAll();
   };
 
@@ -585,9 +601,18 @@ export default function OntologyDashboard() {
       {/* Header */}
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Business Ontology</h1>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Business Ontology
+            {selectedProject && (
+              <span className="ml-2 text-base font-medium text-blue-600">
+                — {selectedProject.name}
+              </span>
+            )}
+          </h1>
           <p className="mt-0.5 text-sm text-gray-500">
-            Knowledge graph extracted from your documents — review, curate, and connect business concepts
+            {selectedProject
+              ? `Knowledge graph for ${selectedProject.name} — concepts scoped to this project plus shared concepts`
+              : "Knowledge graph extracted from your documents — review, curate, and connect business concepts"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

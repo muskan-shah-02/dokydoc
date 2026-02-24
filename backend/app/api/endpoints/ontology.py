@@ -41,10 +41,19 @@ def list_concepts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
     concept_type: Optional[str] = Query(None, description="Filter by concept type"),
+    initiative_id: Optional[int] = Query(None, description="Filter by project/initiative"),
     skip: int = 0,
     limit: int = 100,
 ) -> Any:
-    """List all ontology concepts for the current tenant, optionally filtered by type."""
+    """List ontology concepts, optionally filtered by type and/or project."""
+    if initiative_id:
+        concepts = crud.ontology_concept.get_by_initiative(
+            db=db, initiative_id=initiative_id, tenant_id=tenant_id,
+            skip=skip, limit=limit
+        )
+        if concept_type:
+            concepts = [c for c in concepts if c.concept_type == concept_type]
+        return concepts
     if concept_type:
         return crud.ontology_concept.get_by_type(
             db=db, concept_type=concept_type, tenant_id=tenant_id,
@@ -103,11 +112,12 @@ def create_concept(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
-    """Manually create a new ontology concept."""
+    """Manually create a new ontology concept, optionally scoped to a project."""
     return crud.ontology_concept.get_or_create(
         db=db, name=obj_in.name, concept_type=obj_in.concept_type,
         tenant_id=tenant_id, description=obj_in.description,
-        confidence_score=obj_in.confidence_score
+        confidence_score=obj_in.confidence_score,
+        initiative_id=obj_in.initiative_id
     )
 
 
@@ -220,18 +230,29 @@ def get_graph(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by project/initiative"),
 ) -> Any:
     """
-    Get the full ontology graph for the tenant.
+    Get the ontology graph for the tenant, optionally scoped to a project.
     Returns nodes (concepts) and edges (relationships) for frontend visualization.
     """
-    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    concepts = crud.ontology_concept.get_all_active(
+        db=db, tenant_id=tenant_id, initiative_id=initiative_id
+    )
+    concept_ids = {c.id for c in concepts}
+
     relationships = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+    # Filter relationships to only include edges between visible concepts
+    filtered_rels = [
+        r for r in relationships
+        if r.source_concept_id in concept_ids and r.target_concept_id in concept_ids
+    ]
 
     nodes = [
         OntologyGraphNode(
             id=c.id, name=c.name, concept_type=c.concept_type,
-            source_type=c.source_type, confidence_score=c.confidence_score
+            source_type=c.source_type, initiative_id=c.initiative_id,
+            confidence_score=c.confidence_score
         ) for c in concepts
     ]
     edges = [
@@ -240,7 +261,7 @@ def get_graph(
             target_concept_id=r.target_concept_id,
             relationship_type=r.relationship_type,
             confidence_score=r.confidence_score
-        ) for r in relationships
+        ) for r in filtered_rels
     ]
 
     return OntologyGraphResponse(
@@ -258,12 +279,32 @@ def get_ontology_stats(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by project/initiative"),
 ) -> Any:
-    """Get ontology statistics for the tenant."""
+    """Get ontology statistics, optionally scoped to a project."""
+    total_concepts = crud.ontology_concept.count_by_tenant(
+        db=db, tenant_id=tenant_id, initiative_id=initiative_id
+    )
+    # For relationships, filter by counting edges between project-scoped concepts
+    if initiative_id:
+        concepts = crud.ontology_concept.get_all_active(
+            db=db, tenant_id=tenant_id, initiative_id=initiative_id
+        )
+        concept_ids = {c.id for c in concepts}
+        all_rels = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+        total_rels = sum(
+            1 for r in all_rels
+            if r.source_concept_id in concept_ids and r.target_concept_id in concept_ids
+        )
+        concept_types = list({c.concept_type for c in concepts})
+    else:
+        total_rels = crud.ontology_relationship.count_by_tenant(db=db, tenant_id=tenant_id)
+        concept_types = crud.ontology_concept.get_concept_types(db=db, tenant_id=tenant_id)
+
     return {
-        "total_concepts": crud.ontology_concept.count_by_tenant(db=db, tenant_id=tenant_id),
-        "total_relationships": crud.ontology_relationship.count_by_tenant(db=db, tenant_id=tenant_id),
-        "concept_types": crud.ontology_concept.get_concept_types(db=db, tenant_id=tenant_id),
+        "total_concepts": total_concepts,
+        "total_relationships": total_rels,
+        "concept_types": concept_types,
     }
 
 
@@ -324,9 +365,12 @@ def get_document_graph(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by project/initiative"),
 ) -> Any:
-    """Get only the document-layer concepts and their relationships."""
-    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    """Get only the document-layer concepts and their relationships, optionally scoped to a project."""
+    concepts = crud.ontology_concept.get_all_active(
+        db=db, tenant_id=tenant_id, initiative_id=initiative_id
+    )
     doc_concepts = [c for c in concepts if c.source_type in ("document", "both")]
     doc_ids = {c.id for c in doc_concepts}
 
@@ -339,7 +383,8 @@ def get_document_graph(
     nodes = [
         OntologyGraphNode(
             id=c.id, name=c.name, concept_type=c.concept_type,
-            source_type=c.source_type, confidence_score=c.confidence_score
+            source_type=c.source_type, initiative_id=c.initiative_id,
+            confidence_score=c.confidence_score
         ) for c in doc_concepts
     ]
     edges = [
@@ -359,9 +404,12 @@ def get_code_graph(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter by project/initiative"),
 ) -> Any:
-    """Get only the code-layer concepts and their relationships."""
-    concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    """Get only the code-layer concepts and their relationships, optionally scoped to a project."""
+    concepts = crud.ontology_concept.get_all_active(
+        db=db, tenant_id=tenant_id, initiative_id=initiative_id
+    )
     code_concepts = [c for c in concepts if c.source_type in ("code", "both")]
     code_ids = {c.id for c in code_concepts}
 
@@ -374,7 +422,8 @@ def get_code_graph(
     nodes = [
         OntologyGraphNode(
             id=c.id, name=c.name, concept_type=c.concept_type,
-            source_type=c.source_type, confidence_score=c.confidence_score
+            source_type=c.source_type, initiative_id=c.initiative_id,
+            confidence_score=c.confidence_score
         ) for c in code_concepts
     ]
     edges = [

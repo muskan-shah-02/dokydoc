@@ -14,6 +14,7 @@ class OntologyConceptBase(BaseModel):
 
 class OntologyConceptCreate(OntologyConceptBase):
     source_type: Literal["document", "code"] = "document"
+    initiative_id: Optional[int] = None
 
 
 class OntologyConceptUpdate(BaseModel):
@@ -27,6 +28,7 @@ class OntologyConceptUpdate(BaseModel):
 class OntologyConceptResponse(OntologyConceptBase):
     id: int
     source_type: str = "document"  # "document", "code", or "both"
+    initiative_id: Optional[int] = None
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -78,6 +80,7 @@ class OntologyGraphNode(BaseModel):
     name: str
     concept_type: str
     source_type: str = "document"
+    initiative_id: Optional[int] = None
     confidence_score: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)

@@ -12,20 +12,20 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
     def get_or_create(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
         description: str = None, confidence_score: float = None,
-        source_type: str = "document"
+        source_type: str = "document", initiative_id: int = None
     ) -> OntologyConcept:
         """
         Idempotent concept creation within a SINGLE source layer.
 
-        Deduplication matches on name + type + tenant + source_type.
+        Deduplication matches on name + type + tenant + source_type + initiative_id.
         This keeps document-layer and code-layer concepts SEPARATE:
         - "User Authentication" (FEATURE, document) is a different concept from
           "User Authentication" (SYSTEM, code)
         - They live in different layers and are connected via bridge relationships
           created by the reconciliation pass, NOT by auto-merging.
 
-        Within the SAME layer, if a concept with the same name+type already exists,
-        update confidence if higher.
+        Within the SAME layer AND project, if a concept with the same name+type
+        already exists, update confidence if higher.
 
         Cross-referencing between layers is handled by reconcile_document_code_concepts(),
         NOT here. This prevents:
@@ -38,13 +38,19 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
 
         normalized_name = name.strip().lower()
 
-        # Match within the SAME source layer only
-        existing = db.query(self.model).filter(
+        # Match within the SAME source layer AND project
+        query = db.query(self.model).filter(
             func.lower(self.model.name) == normalized_name,
             self.model.concept_type == concept_type,
             self.model.tenant_id == tenant_id,
             self.model.source_type == source_type
-        ).first()
+        )
+        if initiative_id is not None:
+            query = query.filter(self.model.initiative_id == initiative_id)
+        else:
+            query = query.filter(self.model.initiative_id.is_(None))
+
+        existing = query.first()
 
         if existing:
             # Update confidence if new score is higher
@@ -60,7 +66,8 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             description=description,
             confidence_score=confidence_score,
             source_type=source_type,
-            tenant_id=tenant_id
+            tenant_id=tenant_id,
+            initiative_id=initiative_id
         )
         db.add(db_obj)
         db.commit()
@@ -142,16 +149,50 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         ).first()
 
     def get_all_active(
-        self, db: Session, *, tenant_id: int
+        self, db: Session, *, tenant_id: int, initiative_id: int = None
     ) -> List[OntologyConcept]:
-        """Get all active concepts for a tenant (for graph building)."""
+        """
+        Get all active concepts for a tenant (for graph building).
+        If initiative_id is provided, returns concepts for that project
+        PLUS shared/unscoped concepts (initiative_id IS NULL).
+        """
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for get_all_active()")
 
-        return db.query(self.model).filter(
+        query = db.query(self.model).filter(
             self.model.tenant_id == tenant_id,
             self.model.is_active == True
-        ).all()
+        )
+        if initiative_id is not None:
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    self.model.initiative_id == initiative_id,
+                    self.model.initiative_id.is_(None)
+                )
+            )
+        return query.all()
+
+    def get_by_initiative(
+        self, db: Session, *, initiative_id: int, tenant_id: int,
+        skip: int = 0, limit: int = 500
+    ) -> List[OntologyConcept]:
+        """
+        Get concepts scoped to a specific project.
+        Returns project-specific concepts + shared/unscoped concepts (initiative_id IS NULL).
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED for get_by_initiative()")
+
+        from sqlalchemy import or_
+        return db.query(self.model).filter(
+            self.model.tenant_id == tenant_id,
+            self.model.is_active == True,
+            or_(
+                self.model.initiative_id == initiative_id,
+                self.model.initiative_id.is_(None)
+            )
+        ).offset(skip).limit(limit).all()
 
     def get_concept_types(
         self, db: Session, *, tenant_id: int
@@ -166,15 +207,24 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         ).distinct().all()
         return [r[0] for r in results]
 
-    def count_by_tenant(self, db: Session, *, tenant_id: int) -> int:
-        """Count all active concepts for a tenant."""
+    def count_by_tenant(self, db: Session, *, tenant_id: int, initiative_id: int = None) -> int:
+        """Count all active concepts for a tenant, optionally scoped to a project."""
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for count_by_tenant()")
 
-        return db.query(self.model).filter(
+        query = db.query(self.model).filter(
             self.model.tenant_id == tenant_id,
             self.model.is_active == True
-        ).count()
+        )
+        if initiative_id is not None:
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    self.model.initiative_id == initiative_id,
+                    self.model.initiative_id.is_(None)
+                )
+            )
+        return query.count()
 
 
 ontology_concept = CRUDOntologyConcept(OntologyConcept)
