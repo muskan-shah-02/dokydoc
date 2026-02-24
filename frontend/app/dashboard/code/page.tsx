@@ -87,6 +87,7 @@ interface CodeComponent {
   component_type: string;
   location: string;
   version: string;
+  summary: string | null;
   analysis_status: "pending" | "processing" | "completed" | "failed" | "redirected";
   ai_cost_inr: number | null;
   token_count_input: number | null;
@@ -351,6 +352,45 @@ export default function CodePage() {
       if (res.ok) fetchData(true);
     } catch (error) {
       console.error("Error deleting component:", error);
+    }
+  };
+
+  // --- Retry failed component ---
+
+  const [retryingIds, setRetryingIds] = useState<Set<number>>(new Set());
+
+  const handleRetryComponent = async (compId: number, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent row click navigation
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setRetryingIds((prev) => new Set(prev).add(compId));
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/code-components/${compId}/retry`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setSuccessMessage("Retry started for the component. Analysis running in background.");
+        setTimeout(() => setSuccessMessage(null), 5000);
+        // Re-fetch to show updated status
+        fetchData(true);
+        // Also refresh expanded repo components
+        for (const repoId of expandedRepos) {
+          fetchRepoComponents(repoId);
+        }
+      } else {
+        const err = await res.json();
+        setSubmissionError(err.detail || "Retry failed");
+        setTimeout(() => setSubmissionError(null), 5000);
+      }
+    } catch (error) {
+      console.error("Failed to retry component:", error);
+    } finally {
+      setRetryingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(compId);
+        return next;
+      });
     }
   };
 
@@ -703,19 +743,29 @@ export default function CodePage() {
                                 <TableHead>Status</TableHead>
                                 <TableHead className="text-right">Duration</TableHead>
                                 <TableHead className="text-right">Cost</TableHead>
+                                <TableHead className="text-right w-20">Actions</TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
                               {components.map((comp) => (
                                 <TableRow
                                   key={comp.id}
-                                  className="cursor-pointer hover:bg-muted/30"
-                                  onClick={() => router.push(`/dashboard/code/${comp.id}`)}
+                                  className={`hover:bg-muted/30 ${comp.analysis_status === "failed" ? "bg-red-50/50" : ""}`}
                                 >
-                                  <TableCell>
+                                  <TableCell
+                                    className="cursor-pointer"
+                                    onClick={() => router.push(`/dashboard/code/${comp.id}`)}
+                                  >
                                     <div className="flex items-center gap-2">
-                                      <File className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                                      <span className="truncate text-sm">{comp.name}</span>
+                                      <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
+                                      <div className="min-w-0">
+                                        <span className="truncate text-sm block">{comp.name}</span>
+                                        {comp.analysis_status === "failed" && comp.summary && (
+                                          <span className="text-xs text-red-500 block truncate" title={comp.summary}>
+                                            {comp.summary.length > 80 ? comp.summary.slice(0, 78) + "..." : comp.summary}
+                                          </span>
+                                        )}
+                                      </div>
                                     </div>
                                   </TableCell>
                                   <TableCell>
@@ -745,6 +795,24 @@ export default function CodePage() {
                                       <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
                                     ) : (
                                       <span className="text-muted-foreground">—</span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    {comp.analysis_status === "failed" && (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-7 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                        disabled={retryingIds.has(comp.id)}
+                                        onClick={(e) => handleRetryComponent(comp.id, e)}
+                                      >
+                                        {retryingIds.has(comp.id) ? (
+                                          <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                        ) : (
+                                          <RefreshCw className="w-3 h-3 mr-1" />
+                                        )}
+                                        Retry
+                                      </Button>
                                     )}
                                   </TableCell>
                                 </TableRow>
