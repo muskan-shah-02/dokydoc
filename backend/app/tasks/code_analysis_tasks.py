@@ -386,9 +386,38 @@ def repo_analysis_task(
                 ).first()
 
                 if existing_component:
-                    # Re-analysis: reuse existing component (delta analysis will kick in)
+                    # Re-analysis: check if content actually changed before re-analyzing
                     component = existing_component
-                    logger.info(f"Re-analyzing existing component {component.id} for {file_path}")
+                    content_hash = hashlib.sha256(code_content.encode()).hexdigest()
+                    prev_hash = component.previous_analysis_hash or ""
+
+                    # Also check cache: if content is identical to last analysis, skip AI call
+                    from app.services.cache_service import cache_service as _cache
+                    cache_type = "enhanced_analysis" if repo.name else "code_analysis"
+                    cached_result = _cache.get_cached_analysis(content=code_content, analysis_type=cache_type)
+
+                    if cached_result and component.analysis_status == "completed" and component.structured_analysis:
+                        # Content unchanged and previous analysis exists — skip entirely
+                        logger.info(
+                            f"SKIP re-analysis for {file_path} (component {component.id}) "
+                            f"— content unchanged (cache hit), reusing existing analysis"
+                        )
+                        completed += 1
+                        # Still contribute to cross-file context
+                        if component.summary:
+                            sa = component.structured_analysis or {}
+                            repo_context.append({
+                                "path": file_path,
+                                "summary": (component.summary or "")[:200],
+                                "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
+                            })
+                        crud.repository.update_analysis_progress(
+                            db=db, repo_id=repo_id, tenant_id=tenant_id,
+                            analyzed_files=completed + failed
+                        )
+                        continue
+
+                    logger.info(f"Re-analyzing existing component {component.id} for {file_path} (content changed or no cache)")
                 else:
                     # New file: create CodeComponent record
                     from app.schemas.code_component import CodeComponentCreate

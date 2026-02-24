@@ -214,3 +214,90 @@ def delete_code_component(
     crud.code_component.remove_with_links(db=db, id=id, tenant_id=tenant_id)
     logger.info(f"Successfully deleted component {id} from tenant {tenant_id}")
     # No return value is needed, as the 204 status code implies success with no content.
+
+
+@router.post("/{id}/retry", response_model=schemas.CodeComponent)
+def retry_failed_component(
+    *,
+    id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Retry analysis for a failed component. Resets status to 'pending'
+    and dispatches the analysis worker.
+    Only works on components with status 'failed'.
+    """
+    logger = code_component_endpoints.logger
+    component = crud.code_component.get(db=db, id=id, tenant_id=tenant_id)
+    if not component:
+        raise HTTPException(status_code=404, detail="CodeComponent not found")
+
+    if component.analysis_status not in ("failed", "pending"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only retry failed or pending components (current: {component.analysis_status})"
+        )
+
+    # Reset the component for re-analysis
+    crud.code_component.update(
+        db, db_obj=component,
+        obj_in={
+            "analysis_status": "pending",
+            "summary": None,
+            "analysis_started_at": None,
+            "analysis_completed_at": None,
+            "ai_cost_inr": 0,
+        }
+    )
+
+    # Dispatch analysis
+    if component.repository_id:
+        # Repository component: use static_analysis_worker
+        from app.tasks.code_analysis_tasks import static_analysis_worker
+        import httpx
+
+        # Fetch file content from the stored URL
+        try:
+            resp = httpx.get(component.location, timeout=30, follow_redirects=True)
+            code_content = resp.text if resp.status_code == 200 else ""
+        except Exception:
+            code_content = ""
+
+        if not code_content:
+            crud.code_component.update(
+                db, db_obj=component,
+                obj_in={"analysis_status": "failed", "summary": "Could not fetch file content from URL. Check if the repository is accessible."}
+            )
+            raise HTTPException(status_code=400, detail="Could not fetch file content from URL")
+
+        repo = crud.repository.get(db=db, id=component.repository_id, tenant_id=tenant_id)
+        repo_name = repo.name if repo else ""
+        file_path = component.name
+
+        # Detect language from file extension
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+        lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "tsx": "typescript",
+                     "jsx": "javascript", "java": "java", "go": "go", "rs": "rust", "rb": "ruby"}
+        language = lang_map.get(ext, ext)
+
+        static_analysis_worker.delay(
+            component.id, tenant_id, code_content,
+            repo_name=repo_name, file_path=file_path, language=language
+        )
+        logger.info(f"Retrying repo component {id} via static_analysis_worker")
+    else:
+        # Standalone component: use the service
+        from app.services.code_analysis_service import code_analysis_service
+        import threading
+        threading.Thread(
+            target=code_analysis_service.analyze_component_in_background,
+            args=(component.id, tenant_id),
+            daemon=True,
+        ).start()
+        logger.info(f"Retrying standalone component {id} via code_analysis_service")
+
+    # Return the updated component
+    db.refresh(component)
+    return component
