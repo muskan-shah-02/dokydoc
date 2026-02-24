@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import httpx
+from datetime import datetime
 from typing import Optional
 
 from app.worker import celery_app
@@ -715,7 +716,10 @@ def webhook_triggered_analysis(
 ):
     """
     Incremental analysis triggered by a git webhook push event.
-    Only re-analyzes files that changed, not the entire repo.
+
+    Sprint 4 Phase 4: Routes based on branch type:
+    - Main branches (main/master/develop) → permanent PostgreSQL write (existing flow)
+    - Feature branches → ephemeral Redis preview (branch_preview_extraction)
     """
     logger.info(
         f"WEBHOOK_ANALYSIS started for repo {repo_id}: "
@@ -729,6 +733,30 @@ def webhook_triggered_analysis(
             logger.error(f"Webhook analysis: repo {repo_id} not found")
             return {"status": "error", "reason": "repo_not_found"}
 
+        # Determine if this is a main branch or feature branch
+        default_branch = getattr(repo, "default_branch", None) or "main"
+        main_branches = {"main", "master", "develop", default_branch}
+        is_main = branch in main_branches
+
+        if not is_main and branch:
+            # Feature branch → dispatch ephemeral preview extraction
+            logger.info(
+                f"Webhook: feature branch '{branch}' detected — routing to preview extraction"
+            )
+            branch_preview_extraction.delay(
+                repo_id=repo_id,
+                tenant_id=tenant_id,
+                branch=branch,
+                commit_hash=commit_hash,
+                changed_files=changed_files,
+            )
+            return {
+                "status": "dispatched_preview",
+                "branch": branch,
+                "files": len(changed_files),
+            }
+
+        # Main branch → permanent write to PostgreSQL (existing flow)
         from app.models.code_component import CodeComponent
 
         completed = 0
@@ -810,3 +838,332 @@ def _fetch_file_content(url: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to fetch {url}: {e}")
         return None
+
+
+def _detect_language(file_path: str) -> str:
+    """Detect programming language from file extension."""
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    lang_map = {
+        "py": "python", "js": "javascript", "ts": "typescript",
+        "tsx": "typescript", "jsx": "javascript",
+        "java": "java", "go": "go", "rs": "rust",
+        "rb": "ruby", "cs": "csharp", "php": "php",
+    }
+    return lang_map.get(ext, "")
+
+
+def _extract_owner_repo(repo_url: str) -> str:
+    """Extract 'owner/repo' from a GitHub URL."""
+    url = repo_url.rstrip("/").rstrip(".git")
+    parts = url.split("/")
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return ""
+
+
+def _extract_entities_from_structured(structured: dict, file_path: str) -> tuple:
+    """
+    Extract ontology entities and relationships from a structured_analysis result.
+    Returns (entities_list, relationships_list) for branch preview storage.
+    """
+    entities = []
+    relationships = []
+
+    # Extract from components
+    for comp in structured.get("components", []):
+        name = comp.get("name", "")
+        if name:
+            entities.append({
+                "name": name,
+                "type": comp.get("type", "Entity"),
+                "confidence": 0.85,
+                "context": file_path,
+            })
+
+    # Extract from business_rules
+    for rule in structured.get("business_rules", []):
+        name = rule.get("name", "") or rule.get("rule_name", "")
+        if name:
+            entities.append({
+                "name": name,
+                "type": "Process",
+                "confidence": 0.8,
+                "context": file_path,
+            })
+
+    # Extract from api_contracts
+    for api in structured.get("api_contracts", []):
+        endpoint = api.get("endpoint", "") or api.get("path", "")
+        if endpoint:
+            entities.append({
+                "name": endpoint,
+                "type": "Service",
+                "confidence": 0.9,
+                "context": file_path,
+            })
+
+    # Extract from data_models
+    for model in structured.get("data_models", []):
+        name = model.get("name", "") or model.get("model_name", "")
+        if name:
+            entities.append({
+                "name": name,
+                "type": "Entity",
+                "confidence": 0.9,
+                "context": file_path,
+            })
+            # Relationships from model fields referencing other models
+            for field in model.get("fields", []):
+                ref = field.get("references", "") or field.get("foreign_key", "")
+                if ref:
+                    relationships.append({
+                        "source": name,
+                        "target": ref,
+                        "type": "references",
+                        "confidence": 0.85,
+                    })
+
+    # Extract from dependencies
+    for dep in structured.get("dependencies", []):
+        if isinstance(dep, dict):
+            source = dep.get("from", "") or dep.get("source", "")
+            target = dep.get("to", "") or dep.get("target", "") or dep.get("name", "")
+            if source and target:
+                relationships.append({
+                    "source": source,
+                    "target": target,
+                    "type": dep.get("type", "depends_on"),
+                    "confidence": 0.75,
+                })
+
+    return entities, relationships
+
+
+# ============================================================
+# BRANCH PREVIEW EXTRACTION (Sprint 4 Phase 4)
+# Ephemeral analysis for feature branches → Redis, NOT PostgreSQL
+# ============================================================
+
+@celery_app.task(name="branch_preview_extraction", bind=True, max_retries=2)
+def branch_preview_extraction(
+    self, repo_id: int, tenant_id: int, branch: str,
+    commit_hash: str = "", changed_files: list = None
+):
+    """
+    Analyze changed files on a feature branch and store extracted
+    concepts/relationships in Redis as an ephemeral preview.
+    Does NOT write to PostgreSQL — preview auto-expires after 7 days.
+    """
+    changed_files = changed_files or []
+    logger.info(
+        f"BRANCH_PREVIEW started for repo {repo_id}, branch={branch}: "
+        f"{len(changed_files)} files"
+    )
+
+    db = SessionLocal()
+    try:
+        repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+        if not repo:
+            logger.error(f"Branch preview: repo {repo_id} not found")
+            return {"status": "error", "reason": "repo_not_found"}
+
+        entities = []
+        relationships = []
+
+        for file_path in changed_files:
+            try:
+                # Build raw URL for the branch file
+                owner_repo = _extract_owner_repo(repo.url)
+                if owner_repo:
+                    raw_url = f"https://raw.githubusercontent.com/{owner_repo}/{branch}/{file_path}"
+                else:
+                    # Fallback: try to adapt existing component URL
+                    from app.models.code_component import CodeComponent
+                    comp = db.query(CodeComponent).filter(
+                        CodeComponent.repository_id == repo_id,
+                        CodeComponent.tenant_id == tenant_id,
+                        CodeComponent.name == file_path.split("/")[-1],
+                    ).first()
+                    raw_url = comp.location if comp else None
+
+                if not raw_url:
+                    logger.warning(f"Branch preview: cannot build URL for {file_path}")
+                    continue
+
+                code_content = _fetch_file_content(raw_url)
+                if not code_content:
+                    continue
+
+                # Run AI analysis (same as enhanced analysis)
+                from app.services.ai.provider_router import provider_router
+                language = _detect_language(file_path)
+
+                analysis_result = _run_async(
+                    provider_router.analyze_code_enhanced(
+                        code_content,
+                        repo_name=repo.name,
+                        file_path=file_path,
+                        language=language,
+                    )
+                )
+
+                # Extract inline ontology concepts from structured_analysis
+                structured = analysis_result.get("structured_analysis", {})
+                if structured:
+                    file_entities, file_rels = _extract_entities_from_structured(
+                        structured, file_path
+                    )
+                    entities.extend(file_entities)
+                    relationships.extend(file_rels)
+
+                import time
+                time.sleep(4)  # Rate limiting
+
+            except Exception as file_err:
+                logger.warning(f"Branch preview: failed to process {file_path}: {file_err}")
+
+        # Store in Redis (NOT PostgreSQL)
+        from app.services.cache_service import cache_service
+        cache_service.set_branch_preview(
+            tenant_id=tenant_id,
+            repo_id=repo_id,
+            branch=branch,
+            preview_data={
+                "branch": branch,
+                "commit_hash": commit_hash,
+                "extracted_at": datetime.utcnow().isoformat(),
+                "entities": entities,
+                "relationships": relationships,
+                "changed_files": changed_files,
+            },
+        )
+
+        logger.info(
+            f"BRANCH_PREVIEW completed: {repo.name}/{branch} — "
+            f"{len(entities)} entities, {len(relationships)} relationships"
+        )
+        return {
+            "status": "completed",
+            "branch": branch,
+            "entities": len(entities),
+            "relationships": len(relationships),
+        }
+
+    except Exception as e:
+        logger.error(f"BRANCH_PREVIEW failed for repo {repo_id}/{branch}: {e}")
+        try:
+            self.retry(countdown=30 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            logger.error(f"BRANCH_PREVIEW permanently failed for {repo_id}/{branch}")
+        return {"status": "failed", "error": str(e)}
+    finally:
+        db.close()
+
+
+# ============================================================
+# PROMOTE BRANCH PREVIEW (Sprint 4 Phase 4)
+# When a PR is merged, write ephemeral Redis preview → PostgreSQL
+# ============================================================
+
+@celery_app.task(name="promote_branch_preview", bind=True, max_retries=1)
+def promote_branch_preview(
+    self, repo_id: int, tenant_id: int, branch: str
+):
+    """
+    When a PR is merged, take the ephemeral Redis preview and write
+    its concepts/relationships permanently to PostgreSQL.
+    Then clean up the Redis key.
+    """
+    logger.info(f"PROMOTE_PREVIEW started: repo {repo_id}, branch={branch}")
+
+    from app.services.cache_service import cache_service
+    preview = cache_service.get_branch_preview(
+        tenant_id=tenant_id, repo_id=repo_id, branch=branch
+    )
+
+    if not preview:
+        logger.info(f"No preview to promote for {branch}")
+        return {"status": "skipped", "reason": "no_preview"}
+
+    db = SessionLocal()
+    try:
+        from app.services.business_ontology_service import business_ontology_service
+
+        # Resolve initiative_id for this repository
+        initiative_id = business_ontology_service._resolve_initiative_for_repository(
+            db=db, repo_id=repo_id, tenant_id=tenant_id
+        )
+
+        # Ingest entities into PostgreSQL as permanent concepts
+        for entity in preview.get("entities", []):
+            try:
+                business_ontology_service.get_or_create_concept(
+                    db=db,
+                    name=entity.get("name", ""),
+                    concept_type=entity.get("type", "Entity"),
+                    tenant_id=tenant_id,
+                    description=f"From branch merge: {branch}",
+                    confidence_score=entity.get("confidence", 0.8),
+                    source_type="code",
+                    initiative_id=initiative_id,
+                )
+            except Exception as e:
+                logger.warning(f"Promote preview: failed to create concept {entity.get('name')}: {e}")
+
+        # Ingest relationships
+        for rel in preview.get("relationships", []):
+            try:
+                source_name = rel.get("source", "")
+                target_name = rel.get("target", "")
+                if source_name and target_name:
+                    source_concept = crud.ontology_concept.get_by_name(
+                        db=db, name=source_name, tenant_id=tenant_id
+                    )
+                    target_concept = crud.ontology_concept.get_by_name(
+                        db=db, name=target_name, tenant_id=tenant_id
+                    )
+                    if source_concept and target_concept:
+                        crud.ontology_relationship.create_if_not_exists(
+                            db=db,
+                            source_concept_id=source_concept.id,
+                            target_concept_id=target_concept.id,
+                            relationship_type=rel.get("type", "relates_to"),
+                            tenant_id=tenant_id,
+                            confidence_score=rel.get("confidence", 0.75),
+                        )
+            except Exception as e:
+                logger.warning(f"Promote preview: failed to create relationship: {e}")
+
+        db.commit()
+
+        # Clean up Redis
+        cache_service.delete_branch_preview(
+            tenant_id=tenant_id, repo_id=repo_id, branch=branch
+        )
+
+        logger.info(
+            f"PROMOTE_PREVIEW completed: {branch} → "
+            f"{len(preview.get('entities', []))} entities promoted to PostgreSQL"
+        )
+
+        # Trigger cross-graph mapping after promotion
+        try:
+            from app.tasks.ontology_tasks import extract_code_ontology_entities
+            extract_code_ontology_entities.delay(repo_id, tenant_id)
+        except Exception as e:
+            logger.warning(f"Promote preview: ontology task dispatch failed: {e}")
+
+        return {
+            "status": "completed",
+            "branch": branch,
+            "entities_promoted": len(preview.get("entities", [])),
+            "relationships_promoted": len(preview.get("relationships", [])),
+        }
+
+    except Exception as e:
+        logger.error(f"PROMOTE_PREVIEW failed for {branch}: {e}")
+        return {"status": "failed", "error": str(e)}
+    finally:
+        if db.is_active:
+            db.commit()
+        db.close()

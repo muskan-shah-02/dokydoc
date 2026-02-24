@@ -27,6 +27,7 @@ import {
   AlertTriangle,
   FileText,
   Code2,
+  GitBranch,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useProject } from "@/contexts/ProjectContext";
@@ -34,6 +35,7 @@ import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { ConceptDialog } from "@/components/ontology/ConceptDialog";
 import { RelationshipDialog } from "@/components/ontology/RelationshipDialog";
 import { MetaGraphView } from "@/components/ontology/MetaGraphView";
+import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
 
 // --- Types ---
 
@@ -357,8 +359,47 @@ function ConceptEditRow({
 
 // --- Main Page ---
 
-type GraphLayer = "all" | "document" | "code" | "meta";
+type GraphLayer = "all" | "document" | "code" | "meta" | "branch";
 type ViewMode = "table" | "graph";
+
+interface BranchPreviewInfo {
+  branch: string;
+  commit_hash: string;
+  extracted_at: string;
+  entity_count: number;
+  relationship_count: number;
+  changed_files_count: number;
+  changed_files: string[];
+}
+
+interface BranchPreviewData {
+  nodes: Array<{
+    id: number;
+    name: string;
+    concept_type: string;
+    source_type?: string;
+    confidence_score: number;
+    diff_status: string;
+  }>;
+  edges: Array<{
+    id: number;
+    source_concept_id: number;
+    target_concept_id: number;
+    relationship_type: string;
+    confidence_score: number;
+    diff_status: string;
+  }>;
+  total_nodes: number;
+  total_edges: number;
+  branch: string;
+  commit_hash: string;
+  changed_files: string[];
+}
+
+interface RepoInfo {
+  id: number;
+  name: string;
+}
 
 export default function OntologyDashboard() {
   // Project context — scopes all API calls to selected project
@@ -392,6 +433,14 @@ export default function OntologyDashboard() {
   // Meta-graph state (cross-project view)
   const [metaGraph, setMetaGraph] = useState<any>(null);
   const [metaLoading, setMetaLoading] = useState(false);
+
+  // Branch preview state (Sprint 4 Phase 4)
+  const [repos, setRepos] = useState<RepoInfo[]>([]);
+  const [selectedRepoId, setSelectedRepoId] = useState<number | null>(null);
+  const [branchPreviews, setBranchPreviews] = useState<BranchPreviewInfo[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string>("");
+  const [branchPreviewData, setBranchPreviewData] = useState<BranchPreviewData | null>(null);
+  const [branchLoading, setBranchLoading] = useState(false);
 
   // --- Data Fetching ---
 
@@ -442,6 +491,72 @@ export default function OntologyDashboard() {
       fetchMetaGraph();
     }
   }, [graphLayer, fetchMetaGraph]);
+
+  // Fetch repos for branch preview selector
+  const fetchRepos = useCallback(async () => {
+    try {
+      const data = await api.get<RepoInfo[]>("/repositories/", { limit: 100, ...queryParams });
+      setRepos(data);
+      // Auto-select first repo if none selected
+      if (data.length > 0 && !selectedRepoId) {
+        setSelectedRepoId(data[0].id);
+      }
+    } catch (err) {
+      console.error("Failed to fetch repos:", err);
+    }
+  }, [queryParams, selectedRepoId]);
+
+  // Fetch branch previews for selected repo
+  const fetchBranchPreviews = useCallback(async () => {
+    if (!selectedRepoId) return;
+    try {
+      const data = await api.get<BranchPreviewInfo[]>(`/ontology/graph/branches/${selectedRepoId}`);
+      setBranchPreviews(data);
+      // Auto-select first branch if available
+      if (data.length > 0 && !selectedBranch) {
+        setSelectedBranch(data[0].branch);
+      }
+    } catch (err) {
+      console.error("Failed to fetch branch previews:", err);
+      setBranchPreviews([]);
+    }
+  }, [selectedRepoId, selectedBranch]);
+
+  // Fetch branch preview graph data
+  const fetchBranchPreviewGraph = useCallback(async () => {
+    if (!selectedRepoId || !selectedBranch) return;
+    setBranchLoading(true);
+    try {
+      const data = await api.get<BranchPreviewData>(
+        `/ontology/graph/preview/${selectedRepoId}/${selectedBranch}`,
+        queryParams,
+      );
+      setBranchPreviewData(data);
+    } catch (err: any) {
+      console.error("Failed to fetch branch preview graph:", err);
+      setBranchPreviewData(null);
+    } finally {
+      setBranchLoading(false);
+    }
+  }, [selectedRepoId, selectedBranch, queryParams]);
+
+  useEffect(() => {
+    if (graphLayer === "branch") {
+      fetchRepos();
+    }
+  }, [graphLayer, fetchRepos]);
+
+  useEffect(() => {
+    if (graphLayer === "branch" && selectedRepoId) {
+      fetchBranchPreviews();
+    }
+  }, [graphLayer, selectedRepoId, fetchBranchPreviews]);
+
+  useEffect(() => {
+    if (graphLayer === "branch" && selectedRepoId && selectedBranch) {
+      fetchBranchPreviewGraph();
+    }
+  }, [graphLayer, selectedRepoId, selectedBranch, fetchBranchPreviewGraph]);
 
   const fetchConceptDetail = useCallback(async (id: number) => {
     setDetailLoading(true);
@@ -696,6 +811,7 @@ export default function OntologyDashboard() {
             { key: "document" as GraphLayer, label: "Document", icon: FileText },
             { key: "code" as GraphLayer, label: "Code", icon: Code2 },
             { key: "meta" as GraphLayer, label: "Meta-Graph", icon: Share2 },
+            { key: "branch" as GraphLayer, label: "Branch Preview", icon: GitBranch },
           ].map((tab) => (
             <button key={tab.key} onClick={() => setGraphLayer(tab.key)}
               className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
@@ -773,8 +889,94 @@ export default function OntologyDashboard() {
         </div>
       )}
 
+      {/* === BRANCH PREVIEW VIEW === */}
+      {graphLayer === "branch" && (
+        <div>
+          {/* Branch selector bar */}
+          <div className="mb-3 flex items-center gap-3 rounded-lg border bg-white px-4 py-3">
+            <label className="text-xs font-medium text-gray-500">Repository:</label>
+            <select
+              value={selectedRepoId ?? ""}
+              onChange={(e) => {
+                setSelectedRepoId(Number(e.target.value) || null);
+                setSelectedBranch("");
+                setBranchPreviews([]);
+                setBranchPreviewData(null);
+              }}
+              className="rounded-md border bg-white px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="">Select repo...</option>
+              {repos.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+
+            <label className="ml-2 text-xs font-medium text-gray-500">Branch:</label>
+            <select
+              value={selectedBranch}
+              onChange={(e) => {
+                setSelectedBranch(e.target.value);
+                setBranchPreviewData(null);
+              }}
+              className="rounded-md border bg-white px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              disabled={branchPreviews.length === 0}
+            >
+              <option value="">
+                {branchPreviews.length === 0 ? "No previews available" : "Select branch..."}
+              </option>
+              {branchPreviews.map((bp) => (
+                <option key={bp.branch} value={bp.branch}>
+                  {bp.branch} ({bp.entity_count} entities, {bp.changed_files_count} files)
+                </option>
+              ))}
+            </select>
+
+            {selectedBranch && (
+              <button
+                onClick={fetchBranchPreviewGraph}
+                disabled={branchLoading}
+                className="ml-auto flex items-center gap-1.5 rounded-md border bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${branchLoading ? "animate-spin" : ""}`} />
+                Refresh
+              </button>
+            )}
+          </div>
+
+          {/* Preview graph or empty state */}
+          {branchLoading ? (
+            <div className="flex h-64 items-center justify-center rounded-lg border bg-white">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading branch preview...</span>
+            </div>
+          ) : branchPreviewData ? (
+            <BranchPreviewGraph
+              nodes={branchPreviewData.nodes}
+              edges={branchPreviewData.edges}
+              branch={branchPreviewData.branch}
+              commitHash={branchPreviewData.commit_hash}
+              changedFiles={branchPreviewData.changed_files}
+              selectedId={expandedId}
+              onSelectNode={(id) => setExpandedId(id)}
+            />
+          ) : (
+            <div className="flex h-64 flex-col items-center justify-center rounded-lg border bg-white text-center">
+              <GitBranch className="mb-2 h-8 w-8 text-gray-300" />
+              <p className="text-sm text-gray-400">
+                {selectedRepoId
+                  ? "Select a branch to see its preview diff graph"
+                  : "Select a repository to view branch previews"}
+              </p>
+              <p className="mt-1 text-xs text-gray-300">
+                Branch previews are created automatically when feature branches are pushed via webhook
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* === TABLE VIEW === */}
-      {graphLayer !== "meta" && viewMode === "table" && (
+      {graphLayer !== "meta" && graphLayer !== "branch" && viewMode === "table" && (
         <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
           <table className="w-full text-sm">
             <thead>
@@ -877,7 +1079,7 @@ export default function OntologyDashboard() {
       )}
 
       {/* === GRAPH VIEW === */}
-      {graphLayer !== "meta" && viewMode === "graph" && (
+      {graphLayer !== "meta" && graphLayer !== "branch" && viewMode === "graph" && (
         <div>
           {/* Legend */}
           <div className="mb-3 flex flex-wrap items-center gap-4 rounded-lg border bg-white px-4 py-2.5">

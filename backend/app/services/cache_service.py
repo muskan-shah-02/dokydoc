@@ -196,6 +196,139 @@ class CacheService:
             logger.error(f"Cache clear error: {e}")
             return 0
 
+    # ============================================================
+    # BRANCH PREVIEW METHODS (Sprint 4 Phase 4)
+    # ============================================================
+
+    def _build_preview_key(self, tenant_id: int, repo_id: int, branch: str) -> str:
+        """Build Redis key for branch preview graph."""
+        return f"preview_graph:{tenant_id}:{repo_id}:{branch}"
+
+    def set_branch_preview(
+        self,
+        *,
+        tenant_id: int,
+        repo_id: int,
+        branch: str,
+        preview_data: dict,
+        ttl_seconds: int = 604800,  # 7 days
+    ) -> bool:
+        """
+        Store ephemeral branch preview graph in Redis.
+
+        Args:
+            tenant_id: Tenant ID for isolation
+            repo_id: Repository ID
+            branch: Branch name (e.g., "feature/add-payment")
+            preview_data: Extracted entities/relationships from branch
+            ttl_seconds: Time to live (default 7 days)
+
+        Returns:
+            True if stored successfully
+        """
+        if not self.redis_client:
+            return False
+
+        try:
+            key = self._build_preview_key(tenant_id, repo_id, branch)
+            self.redis_client.setex(
+                name=key,
+                time=ttl_seconds,
+                value=json.dumps(preview_data, default=str),
+            )
+            logger.info(
+                f"Branch preview SET: {key} "
+                f"({len(preview_data.get('entities', []))} entities, TTL: {ttl_seconds}s)"
+            )
+            return True
+        except (RedisError, TypeError) as e:
+            logger.error(f"Branch preview storage error: {e}")
+            return False
+
+    def get_branch_preview(
+        self,
+        *,
+        tenant_id: int,
+        repo_id: int,
+        branch: str,
+    ) -> Optional[dict]:
+        """
+        Retrieve branch preview graph from Redis.
+
+        Returns:
+            Preview data dict or None if not found / expired
+        """
+        if not self.redis_client:
+            return None
+
+        try:
+            key = self._build_preview_key(tenant_id, repo_id, branch)
+            data = self.redis_client.get(key)
+            if data:
+                logger.info(f"Branch preview HIT: {key}")
+                return json.loads(data)
+            else:
+                logger.info(f"Branch preview MISS: {key}")
+                return None
+        except (RedisError, json.JSONDecodeError) as e:
+            logger.error(f"Branch preview retrieval error: {e}")
+            return None
+
+    def delete_branch_preview(
+        self,
+        *,
+        tenant_id: int,
+        repo_id: int,
+        branch: str,
+    ) -> bool:
+        """
+        Clean up preview when branch is merged or deleted.
+
+        Returns:
+            True if deleted, False otherwise
+        """
+        if not self.redis_client:
+            return False
+
+        try:
+            key = self._build_preview_key(tenant_id, repo_id, branch)
+            result = self.redis_client.delete(key)
+            if result > 0:
+                logger.info(f"Branch preview DELETED: {key}")
+                return True
+            return False
+        except RedisError as e:
+            logger.error(f"Branch preview deletion error: {e}")
+            return False
+
+    def list_branch_previews(
+        self,
+        *,
+        tenant_id: int,
+        repo_id: int,
+    ) -> list:
+        """
+        List all active branch previews for a repo.
+
+        Returns:
+            List of branch names with active previews
+        """
+        if not self.redis_client:
+            return []
+
+        try:
+            pattern = f"preview_graph:{tenant_id}:{repo_id}:*"
+            keys = self.redis_client.keys(pattern)
+            branches = []
+            prefix = f"preview_graph:{tenant_id}:{repo_id}:"
+            for key in keys:
+                branch_name = key[len(prefix):]
+                branches.append(branch_name)
+            return branches
+        except RedisError as e:
+            logger.error(f"Branch preview listing error: {e}")
+            return []
+
     def get_cache_stats(self) -> dict:
         """
         Get cache statistics.

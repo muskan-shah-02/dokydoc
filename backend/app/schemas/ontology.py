@@ -101,3 +101,23 @@ class OntologyGraphResponse(BaseModel):
     edges: List[OntologyGraphEdge]
     total_nodes: int
     total_edges: int
+
+
+# --- Branch Preview Schemas (Sprint 4 Phase 4) ---
+
+class BranchPreviewNode(OntologyGraphNode):
+    diff_status: str = "unchanged"  # "unchanged", "added", "modified", "removed"
+
+
+class BranchPreviewEdge(OntologyGraphEdge):
+    diff_status: str = "unchanged"  # "unchanged", "added", "modified", "removed"
+
+
+class BranchPreviewGraphResponse(BaseModel):
+    nodes: List[BranchPreviewNode]
+    edges: List[BranchPreviewEdge]
+    total_nodes: int
+    total_edges: int
+    branch: str
+    commit_hash: str
+    changed_files: List[str] = []

@@ -90,6 +90,58 @@ def _extract_gitlab_push(payload: dict) -> Optional[dict]:
     }
 
 
+def _extract_github_pr(payload: dict) -> Optional[dict]:
+    """Extract PR merge data from GitHub pull_request event."""
+    pr = payload.get("pull_request", {})
+    repo_url = payload.get("repository", {}).get("clone_url") or \
+               payload.get("repository", {}).get("html_url")
+    if not repo_url:
+        return None
+
+    return {
+        "repo_url": repo_url.rstrip(".git"),
+        "action": payload.get("action"),           # "closed", "opened", etc.
+        "merged": pr.get("merged", False),          # True if actually merged
+        "head_branch": pr.get("head", {}).get("ref", ""),
+        "base_branch": pr.get("base", {}).get("ref", ""),
+        "pr_number": pr.get("number"),
+    }
+
+
+def _extract_branch_from_delete(payload: dict) -> Optional[dict]:
+    """Extract branch name and repo URL from GitHub delete event."""
+    ref_type = payload.get("ref_type", "")
+    if ref_type != "branch":
+        return None
+
+    repo_url = payload.get("repository", {}).get("clone_url") or \
+               payload.get("repository", {}).get("html_url")
+    if not repo_url:
+        return None
+
+    return {
+        "repo_url": repo_url.rstrip(".git"),
+        "branch": payload.get("ref", ""),
+    }
+
+
+def _find_repo_by_url(db: Session, repo_url: str):
+    """Look up a repo in the database, trying multiple URL variations."""
+    url_variations = [
+        repo_url,
+        repo_url + ".git",
+        repo_url.replace("https://", "http://"),
+        repo_url.replace("http://", "https://"),
+    ]
+    for url in url_variations:
+        repos = db.query(crud.repository.model).filter(
+            crud.repository.model.url == url
+        ).all()
+        if repos:
+            return repos[0]
+    return None
+
+
 @router.post("/git")
 async def handle_git_webhook(
     request: Request,
@@ -99,10 +151,15 @@ async def handle_git_webhook(
     x_gitlab_event: Optional[str] = Header(None),
 ):
     """
-    Receive git push webhook and trigger incremental analysis.
+    Receive git webhook and trigger appropriate action.
+
+    Sprint 4 Phase 4: Now handles three event types:
+      - push → main branch: permanent analysis / feature branch: preview extraction
+      - pull_request → merged: promote preview to permanent SQL
+      - delete → branch deleted: clean up Redis preview
 
     Supports:
-      - GitHub (x-github-event: push)
+      - GitHub (x-github-event: push, pull_request, delete)
       - GitLab (x-gitlab-event: Push Hook)
     """
     raw_body = await request.body()
@@ -127,9 +184,75 @@ async def handle_git_webhook(
         provider = "unknown"
         event_type = "push"
 
-    # Only process push events
+    logger.info(f"Webhook received: provider={provider}, event_type={event_type}")
+
+    # ── PULL REQUEST EVENT (Sprint 4 Phase 4) ──
+    if event_type == "pull_request" and provider == "github":
+        pr_data = _extract_github_pr(payload)
+        if not pr_data:
+            return {"status": "error", "reason": "invalid_pr_payload"}
+
+        repo = _find_repo_by_url(db, pr_data["repo_url"])
+        if not repo:
+            logger.info(f"Webhook PR: repo not onboarded — ignoring")
+            return {"status": "ignored", "reason": "repo_not_onboarded"}
+
+        # Only process merged PRs
+        if pr_data["action"] == "closed" and pr_data["merged"]:
+            try:
+                from app.tasks.code_analysis_tasks import promote_branch_preview
+                promote_branch_preview.delay(
+                    repo_id=repo.id,
+                    tenant_id=repo.tenant_id,
+                    branch=pr_data["head_branch"],
+                )
+                logger.info(
+                    f"Webhook: PR merged — promoting preview for "
+                    f"{repo.name}/{pr_data['head_branch']}"
+                )
+            except Exception as e:
+                logger.error(f"Webhook: failed to dispatch promote task: {e}")
+                return {"status": "error", "reason": str(e)}
+
+            return {
+                "status": "accepted",
+                "action": "promote_preview",
+                "repo": repo.name,
+                "branch": pr_data["head_branch"],
+            }
+
+        return {"status": "ignored", "reason": "pr_not_merged"}
+
+    # ── DELETE EVENT (Sprint 4 Phase 4) ──
+    if event_type == "delete" and provider == "github":
+        delete_data = _extract_branch_from_delete(payload)
+        if not delete_data:
+            return {"status": "ignored", "reason": "not_a_branch_delete"}
+
+        repo = _find_repo_by_url(db, delete_data["repo_url"])
+        if not repo:
+            return {"status": "ignored", "reason": "repo_not_onboarded"}
+
+        from app.services.cache_service import cache_service
+        deleted = cache_service.delete_branch_preview(
+            tenant_id=repo.tenant_id,
+            repo_id=repo.id,
+            branch=delete_data["branch"],
+        )
+        logger.info(
+            f"Webhook: branch '{delete_data['branch']}' deleted — "
+            f"preview cleanup: {'removed' if deleted else 'not found'}"
+        )
+        return {
+            "status": "accepted",
+            "action": "cleanup_preview",
+            "branch": delete_data["branch"],
+            "preview_removed": deleted,
+        }
+
+    # ── PUSH EVENT (existing + branch routing) ──
     if event_type not in ("push", "Push Hook"):
-        logger.info(f"Ignoring non-push webhook event: {event_type}")
+        logger.info(f"Ignoring webhook event: {event_type}")
         return {"status": "ignored", "reason": f"event_type={event_type}"}
 
     # Extract push data
@@ -149,36 +272,17 @@ async def handle_git_webhook(
         f"to {push_data['branch']} ({len(push_data['changed_files'])} files changed)"
     )
 
-    # Look up the repo in our database
-    # Try multiple URL variations (with/without .git, http/https)
-    repo_url = push_data["repo_url"]
-    repo = None
-
-    url_variations = [
-        repo_url,
-        repo_url + ".git",
-        repo_url.replace("https://", "http://"),
-        repo_url.replace("http://", "https://"),
-    ]
-
-    for url in url_variations:
-        # Search across all tenants — the repo's tenant_id will enforce isolation
-        repos = db.query(crud.repository.model).filter(
-            crud.repository.model.url == url
-        ).all()
-        if repos:
-            repo = repos[0]
-            break
+    repo = _find_repo_by_url(db, push_data["repo_url"])
 
     if not repo:
-        logger.info(f"Webhook: repo URL {repo_url} not onboarded — ignoring")
+        logger.info(f"Webhook: repo URL {push_data['repo_url']} not onboarded — ignoring")
         return {"status": "ignored", "reason": "repo_not_onboarded"}
 
     if not push_data["changed_files"]:
         logger.info(f"Webhook: no changed files in push to {repo.name}")
         return {"status": "ignored", "reason": "no_changed_files"}
 
-    # Dispatch incremental analysis task
+    # Dispatch analysis task (branch routing handled inside the task)
     try:
         from app.tasks.code_analysis_tasks import webhook_triggered_analysis
         webhook_triggered_analysis.delay(

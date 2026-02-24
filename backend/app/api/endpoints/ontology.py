@@ -18,7 +18,8 @@ from app.schemas.ontology import (
     OntologyConceptCreate, OntologyConceptUpdate, OntologyConceptResponse,
     OntologyConceptWithRelationships,
     OntologyRelationshipCreate, OntologyRelationshipUpdate, OntologyRelationshipResponse,
-    OntologyGraphResponse, OntologyGraphNode, OntologyGraphEdge
+    OntologyGraphResponse, OntologyGraphNode, OntologyGraphEdge,
+    BranchPreviewNode, BranchPreviewEdge, BranchPreviewGraphResponse,
 )
 from app.schemas.concept_mapping import (
     ConceptMappingCreate, ConceptMappingUpdate, ConceptMappingResponse,
@@ -865,3 +866,173 @@ def get_meta_graph(
             for p in projects
         ],
     }
+
+
+# ============================================================
+# BRANCH PREVIEW ENDPOINTS (SPRINT 4 Phase 4)
+# ============================================================
+
+@router.get("/graph/branches/{repo_id}")
+def list_branch_previews(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """List all active branch previews for a repository."""
+    from app.services.cache_service import cache_service
+
+    branch_names = cache_service.list_branch_previews(
+        tenant_id=tenant_id, repo_id=repo_id
+    )
+
+    branches = []
+    for branch_name in branch_names:
+        data = cache_service.get_branch_preview(
+            tenant_id=tenant_id, repo_id=repo_id, branch=branch_name
+        )
+        if data:
+            branches.append({
+                "branch": branch_name,
+                "commit_hash": data.get("commit_hash", ""),
+                "extracted_at": data.get("extracted_at", ""),
+                "entity_count": len(data.get("entities", [])),
+                "relationship_count": len(data.get("relationships", [])),
+                "changed_files_count": len(data.get("changed_files", [])),
+                "changed_files": data.get("changed_files", []),
+            })
+
+    return branches
+
+
+@router.get("/graph/preview/{repo_id}/{branch:path}", response_model=BranchPreviewGraphResponse)
+def get_branch_preview_graph(
+    repo_id: int,
+    branch: str,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    initiative_id: Optional[int] = Query(None, description="Filter base graph by project"),
+) -> Any:
+    """
+    On-the-fly merge: base graph (PostgreSQL) + branch delta (Redis).
+    Returns nodes annotated with diff_status: unchanged/added/modified/removed.
+    """
+    from app.services.cache_service import cache_service
+
+    # 1. Fetch branch delta from Redis
+    preview = cache_service.get_branch_preview(
+        tenant_id=tenant_id, repo_id=repo_id, branch=branch
+    )
+
+    if not preview:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No preview available for branch '{branch}'"
+        )
+
+    # 2. Fetch base graph from PostgreSQL (main branch ground truth)
+    base_concepts = crud.ontology_concept.get_all_active(
+        db=db, tenant_id=tenant_id, initiative_id=initiative_id
+    )
+    base_relationships = crud.ontology_relationship.get_full_graph(
+        db=db, tenant_id=tenant_id
+    )
+
+    # Filter relationships to visible concepts
+    base_concept_ids = {c.id for c in base_concepts}
+    base_relationships = [
+        r for r in base_relationships
+        if r.source_concept_id in base_concept_ids and r.target_concept_id in base_concept_ids
+    ]
+
+    # 3. Build base concept lookup (lowercase name → concept)
+    base_names = {c.name.lower(): c for c in base_concepts}
+
+    # 4. Track branch entity names for diff detection
+    branch_entity_names = {
+        e["name"].lower() for e in preview.get("entities", []) if e.get("name")
+    }
+
+    # 5. Build merged nodes
+    nodes = []
+
+    # Add base concepts — mark as "unchanged" or "modified" if also in branch
+    for c in base_concepts:
+        diff_status = "modified" if c.name.lower() in branch_entity_names else "unchanged"
+        nodes.append(BranchPreviewNode(
+            id=c.id,
+            name=c.name,
+            concept_type=c.concept_type,
+            source_type=c.source_type,
+            initiative_id=c.initiative_id,
+            confidence_score=c.confidence_score,
+            diff_status=diff_status,
+        ))
+
+    # Add branch-only concepts (marked "added")
+    next_id = max((c.id for c in base_concepts), default=0) + 1000
+    name_to_id = {c.name.lower(): c.id for c in base_concepts}
+
+    for be in preview.get("entities", []):
+        be_name = be.get("name", "")
+        if be_name.lower() not in base_names:
+            name_to_id[be_name.lower()] = next_id
+            nodes.append(BranchPreviewNode(
+                id=next_id,
+                name=be_name,
+                concept_type=be.get("type", "Entity"),
+                source_type="code",
+                confidence_score=be.get("confidence", 0.8),
+                diff_status="added",
+            ))
+            next_id += 1
+
+    # 6. Build merged edges
+    edges = []
+
+    # Base relationships (unchanged)
+    for r in base_relationships:
+        edges.append(BranchPreviewEdge(
+            id=r.id,
+            source_concept_id=r.source_concept_id,
+            target_concept_id=r.target_concept_id,
+            relationship_type=r.relationship_type,
+            confidence_score=r.confidence_score,
+            diff_status="unchanged",
+        ))
+
+    # Branch-only relationships (resolve by name → id)
+    edge_next_id = max((r.id for r in base_relationships), default=0) + 1000
+    for br in preview.get("relationships", []):
+        source_name = br.get("source", "").lower()
+        target_name = br.get("target", "").lower()
+        source_id = name_to_id.get(source_name)
+        target_id = name_to_id.get(target_name)
+
+        if source_id and target_id:
+            # Check if this edge already exists in base
+            existing = any(
+                e.source_concept_id == source_id and e.target_concept_id == target_id
+                for e in base_relationships
+            )
+            if not existing:
+                edges.append(BranchPreviewEdge(
+                    id=edge_next_id,
+                    source_concept_id=source_id,
+                    target_concept_id=target_id,
+                    relationship_type=br.get("type", "relates_to"),
+                    confidence_score=br.get("confidence", 0.75),
+                    diff_status="added",
+                ))
+                edge_next_id += 1
+
+    return BranchPreviewGraphResponse(
+        nodes=nodes,
+        edges=edges,
+        total_nodes=len(nodes),
+        total_edges=len(edges),
+        branch=branch,
+        commit_hash=preview.get("commit_hash", ""),
+        changed_files=preview.get("changed_files", []),
+    )
