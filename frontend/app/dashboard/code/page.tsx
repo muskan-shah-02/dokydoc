@@ -247,12 +247,18 @@ export default function CodePage() {
       pollIntervalRef.current = null;
     }
     if (hasActiveAnalysis) {
-      pollIntervalRef.current = setInterval(() => fetchData(), 10000);
+      pollIntervalRef.current = setInterval(() => {
+        fetchData();
+        // Also refresh expanded repos so file-level progress updates live
+        for (const repoId of expandedRepos) {
+          fetchRepoComponents(repoId);
+        }
+      }, 8000);
     }
     return () => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [hasActiveAnalysis, fetchData]);
+  }, [hasActiveAnalysis, fetchData, expandedRepos, fetchRepoComponents]);
 
   useEffect(() => {
     if (!hasActiveAnalysis) return;
@@ -877,6 +883,8 @@ export default function CodePage() {
                                       <TableCell className="text-right font-mono text-sm">
                                         {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
                                           <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
+                                        ) : comp.analysis_status === "completed" ? (
+                                          <span className="text-muted-foreground text-xs">cached</span>
                                         ) : (
                                           <span className="text-muted-foreground">—</span>
                                         )}

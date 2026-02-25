@@ -157,6 +157,8 @@ export default function BillingAnalyticsPage() {
   const [weeklyData, setWeeklyData] = useState<WeeklyUsage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   // Redirect if not CXO or Admin
   useEffect(() => {
@@ -168,6 +170,15 @@ export default function BillingAnalyticsPage() {
   useEffect(() => {
     loadAnalytics();
   }, [timeRange, featureFilter]);
+
+  // Auto-refresh every 30 seconds when enabled
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      loadAnalytics();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, timeRange, featureFilter]);
 
   const loadAnalytics = async () => {
     setIsLoading(true);
@@ -184,6 +195,7 @@ export default function BillingAnalyticsPage() {
 
       setAnalyticsData(analytics);
       setWeeklyData(weekly);
+      setLastUpdated(new Date());
     } catch (error) {
       console.error("Failed to load analytics:", error);
     } finally {
@@ -227,6 +239,22 @@ export default function BillingAnalyticsPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            {lastUpdated && (
+              <span className="text-xs text-muted-foreground">
+                Updated {lastUpdated.toLocaleTimeString()}
+              </span>
+            )}
+            <button
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                autoRefresh
+                  ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+                  : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${autoRefresh ? "bg-green-500 animate-pulse" : "bg-gray-400"}`} />
+              {autoRefresh ? "Live" : "Paused"}
+            </button>
             <Button
               onClick={handleRefresh}
               variant="outline"

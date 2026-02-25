@@ -56,6 +56,7 @@ class RepositoryResponse(BaseModel):
     last_analyzed_commit: Optional[str] = None
     total_files: int
     analyzed_files: int
+    total_ai_cost_inr: Optional[float] = None
     error_message: Optional[str] = None
     synthesis_data: Optional[Dict[str, Any]] = None
     synthesis_status: Optional[str] = None

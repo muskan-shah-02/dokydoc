@@ -188,7 +188,12 @@ class CRUDUsageLog:
         end: datetime,
         feature_type: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get aggregate summary for a tenant."""
+        """Get aggregate summary for a tenant.
+
+        If recorded cost_inr is 0 but tokens exist, recalculates cost from
+        token counts using cost_service. This handles legacy usage_log entries
+        that were created before centralized billing was enabled.
+        """
         query = db.query(
             func.count(UsageLog.id).label("total_calls"),
             func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
@@ -207,13 +212,32 @@ class CRUDUsageLog:
 
         result = query.first()
 
+        total_cost_inr = float(result.total_cost_inr or 0)
+        total_cost_usd = float(result.total_cost_usd or 0)
+        total_input = int(result.total_input_tokens or 0)
+        total_output = int(result.total_output_tokens or 0)
+
+        # Backfill: if we have tokens but 0 cost, calculate from token pricing
+        if total_cost_inr == 0 and (total_input > 0 or total_output > 0):
+            try:
+                from app.services.cost_service import cost_service
+                computed = cost_service.calculate_cost_from_actual_tokens(
+                    input_tokens=total_input,
+                    output_tokens=total_output,
+                    thinking_tokens=0,
+                )
+                total_cost_inr = computed.get("cost_inr", 0)
+                total_cost_usd = computed.get("cost_usd", 0)
+            except Exception:
+                pass
+
         return {
             "total_calls": result.total_calls or 0,
-            "total_input_tokens": int(result.total_input_tokens or 0),
-            "total_output_tokens": int(result.total_output_tokens or 0),
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
             "total_cached_tokens": int(result.total_cached_tokens or 0),
-            "total_cost_usd": float(result.total_cost_usd or 0),
-            "total_cost_inr": float(result.total_cost_inr or 0),
+            "total_cost_usd": total_cost_usd,
+            "total_cost_inr": total_cost_inr,
         }
 
     def get_by_feature(
@@ -224,18 +248,10 @@ class CRUDUsageLog:
         start: datetime,
         end: datetime,
     ) -> List[FeatureUsageSummary]:
-        """Get usage breakdown by feature type."""
-        # First get total cost for percentage calculation
-        total_result = db.query(
-            func.coalesce(func.sum(UsageLog.cost_inr), 0).label("total")
-        ).filter(
-            UsageLog.tenant_id == tenant_id,
-            UsageLog.created_at >= start,
-            UsageLog.created_at <= end,
-        ).first()
+        """Get usage breakdown by feature type.
 
-        total_cost = float(total_result.total or 0)
-
+        Recalculates cost from tokens for legacy records that have cost_inr=0.
+        """
         # Get breakdown by feature
         results = db.query(
             UsageLog.feature_type,
@@ -251,22 +267,43 @@ class CRUDUsageLog:
         ).group_by(UsageLog.feature_type).all()
 
         summaries = []
+        grand_total_cost = 0.0
         for r in results:
-            total_tokens = int(r.total_input_tokens or 0) + int(r.total_output_tokens or 0)
+            input_t = int(r.total_input_tokens or 0)
+            output_t = int(r.total_output_tokens or 0)
+            total_tokens = input_t + output_t
             cost_inr = float(r.total_cost_inr or 0)
+            cost_usd = float(r.total_cost_usd or 0)
+
+            # Backfill: recalculate cost from tokens if recorded cost is 0
+            if cost_inr == 0 and (input_t > 0 or output_t > 0):
+                try:
+                    from app.services.cost_service import cost_service
+                    computed = cost_service.calculate_cost_from_actual_tokens(
+                        input_tokens=input_t, output_tokens=output_t, thinking_tokens=0,
+                    )
+                    cost_inr = computed.get("cost_inr", 0)
+                    cost_usd = computed.get("cost_usd", 0)
+                except Exception:
+                    pass
+
+            grand_total_cost += cost_inr
             calls = r.total_calls or 1
 
             summaries.append(FeatureUsageSummary(
                 feature_type=r.feature_type,
                 total_calls=r.total_calls or 0,
-                total_input_tokens=int(r.total_input_tokens or 0),
-                total_output_tokens=int(r.total_output_tokens or 0),
+                total_input_tokens=input_t,
+                total_output_tokens=output_t,
                 total_tokens=total_tokens,
-                total_cost_usd=float(r.total_cost_usd or 0),
+                total_cost_usd=cost_usd,
                 total_cost_inr=cost_inr,
                 avg_cost_per_call_inr=cost_inr / calls if calls > 0 else 0,
-                percentage_of_total=(cost_inr / total_cost * 100) if total_cost > 0 else 0,
+                percentage_of_total=0,
             ))
+
+        for s in summaries:
+            s.percentage_of_total = (s.total_cost_inr / grand_total_cost * 100) if grand_total_cost > 0 else 0
 
         return sorted(summaries, key=lambda x: x.total_cost_inr, reverse=True)
 

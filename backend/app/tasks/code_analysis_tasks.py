@@ -190,9 +190,9 @@ def static_analysis_worker(
             "analysis_status": "completed",
             "previous_analysis_hash": previous_hash if previous_analysis else None,
             "analysis_completed_at": analysis_end,
-            "ai_cost_inr": total_cost_inr if total_cost_inr > 0 else None,
-            "token_count_input": token_usage_final.get("input_tokens") if token_usage_final else None,
-            "token_count_output": token_usage_final.get("output_tokens") if token_usage_final else None,
+            "ai_cost_inr": total_cost_inr,  # Always save (0 for cached, >0 for API calls)
+            "token_count_input": token_usage_final.get("input_tokens", 0) if token_usage_final else 0,
+            "token_count_output": token_usage_final.get("output_tokens", 0) if token_usage_final else 0,
         }
         if delta_result:
             update_data["analysis_delta"] = delta_result

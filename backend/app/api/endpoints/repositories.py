@@ -43,18 +43,47 @@ def list_repositories(
 ) -> Any:
     """List all repositories for the current tenant, optionally filtered by initiative."""
     if initiative_id:
-        return crud.repository.get_by_initiative(
+        repos = crud.repository.get_by_initiative(
             db=db, initiative_id=initiative_id, tenant_id=tenant_id,
             skip=skip, limit=limit
         )
-    if analysis_status:
-        return crud.repository.get_by_status(
+    elif analysis_status:
+        repos = crud.repository.get_by_status(
             db=db, analysis_status=analysis_status, tenant_id=tenant_id,
             skip=skip, limit=limit
         )
-    return crud.repository.get_multi(
-        db=db, tenant_id=tenant_id, skip=skip, limit=limit
-    )
+    else:
+        repos = crud.repository.get_multi(
+            db=db, tenant_id=tenant_id, skip=skip, limit=limit
+        )
+
+    # Dynamically compute file counts from actual CodeComponent records
+    # This prevents stale 54/282 counters — always reflects real DB state
+    from app.models.code_component import CodeComponent
+    from sqlalchemy import func
+    for repo in repos:
+        stats = db.query(
+            func.count(CodeComponent.id).label("total"),
+            func.count(CodeComponent.id).filter(
+                CodeComponent.analysis_status.in_(["completed", "failed"])
+            ).label("analyzed"),
+        ).filter(
+            CodeComponent.repository_id == repo.id,
+            CodeComponent.tenant_id == tenant_id,
+        ).first()
+
+        if stats and stats.total > 0:
+            repo.total_files = stats.total
+            repo.analyzed_files = stats.analyzed
+            # Also compute total AI cost from components
+            cost_sum = db.query(func.sum(CodeComponent.ai_cost_inr)).filter(
+                CodeComponent.repository_id == repo.id,
+                CodeComponent.tenant_id == tenant_id,
+                CodeComponent.ai_cost_inr.isnot(None),
+            ).scalar()
+            repo.total_ai_cost_inr = float(cost_sum) if cost_sum else 0
+
+    return repos
 
 
 @router.post("/", response_model=RepositoryResponse, status_code=status.HTTP_201_CREATED)
@@ -242,6 +271,30 @@ def list_repo_components(
         raise HTTPException(status_code=404, detail="Repository not found")
 
     from app.models.code_component import CodeComponent
+    from datetime import datetime, timedelta
+
+    # Auto-fix stuck "processing" files: if stuck for >10 minutes, mark as failed
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=10)
+    stuck_components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.analysis_status == "processing",
+        CodeComponent.analysis_started_at < stale_cutoff,
+    ).all()
+
+    if stuck_components:
+        for comp in stuck_components:
+            crud.code_component.update(
+                db, db_obj=comp,
+                obj_in={
+                    "analysis_status": "failed",
+                    "summary": "Analysis timed out (processing exceeded 10 minutes). Click Retry to re-analyze.",
+                }
+            )
+        logger.info(
+            f"Auto-marked {len(stuck_components)} stuck components as failed in repo {repo_id}"
+        )
+
     components = db.query(CodeComponent).filter(
         CodeComponent.repository_id == repo_id,
         CodeComponent.tenant_id == tenant_id,
