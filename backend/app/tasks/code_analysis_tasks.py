@@ -556,6 +556,101 @@ def repo_analysis_task(
 
 
 # ============================================================
+# BATCH RETRY FAILED COMPONENTS (RATE-LIMITED)
+# ============================================================
+
+@celery_app.task(name="batch_retry_failed_components", bind=True, max_retries=0)
+def batch_retry_failed_components(self, repo_id: int, tenant_id: int, component_ids: list):
+    """
+    Sequential retry of failed components with 4s rate-limiting between calls.
+    This prevents flooding Gemini's 15 RPM limit when retrying many files at once.
+    """
+    import time
+    logger.info(
+        f"BATCH_RETRY started for repo {repo_id}: {len(component_ids)} components"
+    )
+
+    db = SessionLocal()
+    try:
+        repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+        repo_name = repo.name if repo else ""
+        completed = 0
+        failed = 0
+
+        for comp_id in component_ids:
+            try:
+                component = crud.code_component.get(db=db, id=comp_id, tenant_id=tenant_id)
+                if not component:
+                    failed += 1
+                    continue
+
+                # Fetch file content
+                code_content = ""
+                try:
+                    import httpx
+                    resp = httpx.get(component.location, timeout=30, follow_redirects=True)
+                    code_content = resp.text if resp.status_code == 200 else ""
+                except Exception:
+                    pass
+
+                if not code_content:
+                    crud.code_component.update(
+                        db, db_obj=component,
+                        obj_in={
+                            "analysis_status": "failed",
+                            "summary": "Could not fetch file content from URL.",
+                        }
+                    )
+                    failed += 1
+                    continue
+
+                # Detect language
+                ext = component.name.rsplit(".", 1)[-1].lower() if "." in component.name else ""
+                lang_map = {
+                    "py": "python", "js": "javascript", "ts": "typescript",
+                    "tsx": "typescript", "jsx": "javascript", "java": "java",
+                    "go": "go", "rs": "rust", "rb": "ruby",
+                }
+                language = lang_map.get(ext, ext)
+
+                # Run analysis synchronously (same as repo_analysis_task does)
+                result = static_analysis_worker(
+                    comp_id, tenant_id, code_content,
+                    repo_name=repo_name,
+                    file_path=component.name,
+                    language=language,
+                )
+
+                if result.get("status") == "completed":
+                    completed += 1
+                else:
+                    failed += 1
+
+                # Rate limit: 4s between analyses
+                time.sleep(4)
+
+            except Exception as e:
+                logger.error(f"Batch retry failed for component {comp_id}: {e}")
+                failed += 1
+
+        logger.info(
+            f"BATCH_RETRY completed for repo {repo_id}: "
+            f"{completed} succeeded, {failed} failed out of {len(component_ids)}"
+        )
+        return {
+            "status": "completed",
+            "repo_id": repo_id,
+            "completed": completed,
+            "failed": failed,
+            "total": len(component_ids),
+        }
+    finally:
+        if db.is_active:
+            db.commit()
+        db.close()
+
+
+# ============================================================
 # REPOSITORY SYNTHESIS — "REDUCE PHASE" (SPRINT 4)
 # Combines per-file analyses into a System Architecture document
 # ============================================================

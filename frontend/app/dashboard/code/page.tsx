@@ -192,7 +192,7 @@ export default function CodePage() {
     setLoadingRepoComponents((prev) => new Set(prev).add(repoId));
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/repositories/${repoId}/components`,
+        `http://localhost:8000/api/v1/repositories/${repoId}/components?limit=500`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {
@@ -391,6 +391,40 @@ export default function CodePage() {
         next.delete(compId);
         return next;
       });
+    }
+  };
+
+  // --- Retry All Failed ---
+
+  const [retryingAllRepo, setRetryingAllRepo] = useState<number | null>(null);
+
+  const handleRetryAllFailed = async (repoId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setRetryingAllRepo(repoId);
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/retry-failed`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSuccessMessage(`Retrying ${data.failed_count} failed files sequentially (rate-limited).`);
+        setTimeout(() => setSuccessMessage(null), 6000);
+        fetchData(true);
+        if (expandedRepos.has(repoId)) {
+          fetchRepoComponents(repoId);
+        }
+      } else {
+        const err = await res.json();
+        setSubmissionError(err.detail || "Retry all failed");
+        setTimeout(() => setSubmissionError(null), 5000);
+      }
+    } catch (error) {
+      console.error("Failed to retry all:", error);
+    } finally {
+      setRetryingAllRepo(null);
     }
   };
 
@@ -725,7 +759,7 @@ export default function CodePage() {
 
                     {/* Expanded: File Components */}
                     <CollapsibleContent>
-                      <div className="ml-8 mr-2 border-l-2 border-muted pl-4 py-2 space-y-1">
+                      <div className="ml-8 mr-2 border-l-2 border-muted pl-4 py-2 space-y-2">
                         {isLoadingComponents ? (
                           <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -735,91 +769,143 @@ export default function CodePage() {
                           <div className="py-3 text-sm text-muted-foreground">
                             No analyzed files yet
                           </div>
-                        ) : (
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>File</TableHead>
-                                <TableHead>Status</TableHead>
-                                <TableHead className="text-right">Duration</TableHead>
-                                <TableHead className="text-right">Cost</TableHead>
-                                <TableHead className="text-right w-20">Actions</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {components.map((comp) => (
-                                <TableRow
-                                  key={comp.id}
-                                  className={`hover:bg-muted/30 ${comp.analysis_status === "failed" ? "bg-red-50/50" : ""}`}
-                                >
-                                  <TableCell
-                                    className="cursor-pointer"
-                                    onClick={() => router.push(`/dashboard/code/${comp.id}`)}
+                        ) : (() => {
+                          const completedCount = components.filter((c) => c.analysis_status === "completed").length;
+                          const failedCount = components.filter((c) => c.analysis_status === "failed").length;
+                          const processingCount = components.filter((c) => c.analysis_status === "processing").length;
+                          const pendingCount = components.filter((c) => c.analysis_status === "pending").length;
+                          const totalCost = components.reduce((sum, c) => sum + (c.ai_cost_inr || 0), 0);
+
+                          return (
+                            <>
+                              {/* Summary stats bar */}
+                              <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-1.5 text-xs">
+                                <div className="flex items-center gap-3">
+                                  <span className="font-medium text-foreground">{components.length} files total</span>
+                                  {completedCount > 0 && (
+                                    <span className="text-green-600">{completedCount} completed</span>
+                                  )}
+                                  {processingCount > 0 && (
+                                    <span className="text-blue-600">{processingCount} analyzing</span>
+                                  )}
+                                  {failedCount > 0 && (
+                                    <span className="text-red-600">{failedCount} failed</span>
+                                  )}
+                                  {pendingCount > 0 && (
+                                    <span className="text-gray-500">{pendingCount} pending</span>
+                                  )}
+                                  {totalCost > 0 && (
+                                    <span className="font-mono text-green-700">Total: &#8377;{totalCost.toFixed(2)}</span>
+                                  )}
+                                </div>
+                                {failedCount > 0 && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-6 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50"
+                                    disabled={retryingAllRepo === repo.id}
+                                    onClick={(e) => handleRetryAllFailed(repo.id, e)}
                                   >
-                                    <div className="flex items-center gap-2">
-                                      <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
-                                      <div className="min-w-0">
-                                        <span className="truncate text-sm block">{comp.name}</span>
-                                        {comp.analysis_status === "failed" && comp.summary && (
-                                          <span className="text-xs text-red-500 block truncate" title={comp.summary}>
-                                            {comp.summary.length > 80 ? comp.summary.slice(0, 78) + "..." : comp.summary}
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </TableCell>
-                                  <TableCell>
-                                    <div className="flex items-center gap-1.5">
-                                      {getStatusIcon(comp.analysis_status)}
-                                      {getStatusBadge(comp.analysis_status)}
-                                    </div>
-                                  </TableCell>
-                                  <TableCell className="text-right text-sm text-muted-foreground">
-                                    {comp.analysis_started_at && comp.analysis_completed_at ? (
-                                      formatElapsed(
-                                        Math.round(
-                                          (new Date(comp.analysis_completed_at).getTime() -
-                                            new Date(comp.analysis_started_at).getTime()) / 1000
-                                        )
-                                      )
-                                    ) : comp.analysis_status === "processing" && comp.analysis_started_at ? (
-                                      <span className="font-mono text-blue-600">
-                                        {formatElapsed(elapsedSince(comp.analysis_started_at))}
-                                      </span>
+                                    {retryingAllRepo === repo.id ? (
+                                      <Loader2 className="w-3 h-3 animate-spin mr-1" />
                                     ) : (
-                                      "—"
+                                      <RefreshCw className="w-3 h-3 mr-1" />
                                     )}
-                                  </TableCell>
-                                  <TableCell className="text-right font-mono text-sm">
-                                    {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
-                                      <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
-                                    ) : (
-                                      <span className="text-muted-foreground">—</span>
-                                    )}
-                                  </TableCell>
-                                  <TableCell className="text-right">
-                                    {comp.analysis_status === "failed" && (
-                                      <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="h-7 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                                        disabled={retryingIds.has(comp.id)}
-                                        onClick={(e) => handleRetryComponent(comp.id, e)}
+                                    Retry All Failed ({failedCount})
+                                  </Button>
+                                )}
+                              </div>
+
+                              <Table>
+                                <TableHeader>
+                                  <TableRow>
+                                    <TableHead className="w-12 text-center">#</TableHead>
+                                    <TableHead>File</TableHead>
+                                    <TableHead>Status</TableHead>
+                                    <TableHead className="text-right">Duration</TableHead>
+                                    <TableHead className="text-right">Cost</TableHead>
+                                    <TableHead className="text-right w-20">Actions</TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {components.map((comp, idx) => (
+                                    <TableRow
+                                      key={comp.id}
+                                      className={`hover:bg-muted/30 ${comp.analysis_status === "failed" ? "bg-red-50/50" : ""}`}
+                                    >
+                                      <TableCell className="text-center text-xs text-muted-foreground font-mono">
+                                        {idx + 1}
+                                      </TableCell>
+                                      <TableCell
+                                        className="cursor-pointer"
+                                        onClick={() => router.push(`/dashboard/code/${comp.id}`)}
                                       >
-                                        {retryingIds.has(comp.id) ? (
-                                          <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                        <div className="flex items-center gap-2">
+                                          <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
+                                          <div className="min-w-0">
+                                            <span className="truncate text-sm block">{comp.name}</span>
+                                            {comp.analysis_status === "failed" && comp.summary && (
+                                              <span className="text-xs text-red-500 block truncate" title={comp.summary}>
+                                                {comp.summary.length > 80 ? comp.summary.slice(0, 78) + "..." : comp.summary}
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </TableCell>
+                                      <TableCell>
+                                        <div className="flex items-center gap-1.5">
+                                          {getStatusIcon(comp.analysis_status)}
+                                          {getStatusBadge(comp.analysis_status)}
+                                        </div>
+                                      </TableCell>
+                                      <TableCell className="text-right text-sm text-muted-foreground">
+                                        {comp.analysis_started_at && comp.analysis_completed_at ? (
+                                          formatElapsed(
+                                            Math.round(
+                                              (new Date(comp.analysis_completed_at).getTime() -
+                                                new Date(comp.analysis_started_at).getTime()) / 1000
+                                            )
+                                          )
+                                        ) : comp.analysis_status === "processing" && comp.analysis_started_at ? (
+                                          <span className="font-mono text-blue-600">
+                                            {formatElapsed(elapsedSince(comp.analysis_started_at))}
+                                          </span>
                                         ) : (
-                                          <RefreshCw className="w-3 h-3 mr-1" />
+                                          "—"
                                         )}
-                                        Retry
-                                      </Button>
-                                    )}
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        )}
+                                      </TableCell>
+                                      <TableCell className="text-right font-mono text-sm">
+                                        {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
+                                          <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
+                                        ) : (
+                                          <span className="text-muted-foreground">—</span>
+                                        )}
+                                      </TableCell>
+                                      <TableCell className="text-right">
+                                        {comp.analysis_status === "failed" && (
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                            disabled={retryingIds.has(comp.id)}
+                                            onClick={(e) => handleRetryComponent(comp.id, e)}
+                                          >
+                                            {retryingIds.has(comp.id) ? (
+                                              <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                            ) : (
+                                              <RefreshCw className="w-3 h-3 mr-1" />
+                                            )}
+                                            Retry
+                                          </Button>
+                                        )}
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </>
+                          );
+                        })()}
                       </div>
                     </CollapsibleContent>
                   </Collapsible>
