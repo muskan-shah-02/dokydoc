@@ -73,7 +73,9 @@ class ProviderRouter(LoggerMixin):
     # CODE ANALYSIS ROUTING
     # ================================================================
 
-    async def analyze_code(self, code_content: str) -> dict:
+    async def analyze_code(
+        self, code_content: str, tenant_id: int = None, user_id: int = None,
+    ) -> dict:
         """
         Route basic code analysis to the appropriate provider.
         Dual mode: Claude. Single mode: Gemini. Fallback: Gemini.
@@ -86,10 +88,13 @@ class ProviderRouter(LoggerMixin):
                 self.logger.warning(f"Claude code analysis failed, falling back to Gemini: {e}")
 
         self.logger.info("Routing code analysis → Gemini")
-        return await self.gemini.call_gemini_for_code_analysis(code_content)
+        return await self.gemini.call_gemini_for_code_analysis(
+            code_content, tenant_id=tenant_id, user_id=user_id,
+        )
 
     async def analyze_code_enhanced(
-        self, code_content: str, repo_name: str = "", file_path: str = "", language: str = ""
+        self, code_content: str, repo_name: str = "", file_path: str = "", language: str = "",
+        tenant_id: int = None, user_id: int = None,
     ) -> dict:
         """
         Route enhanced semantic code analysis to the appropriate provider.
@@ -106,11 +111,13 @@ class ProviderRouter(LoggerMixin):
 
         self.logger.info(f"Routing enhanced analysis → Gemini ({file_path})")
         return await self.gemini.call_gemini_for_enhanced_analysis(
-            code_content, repo_name, file_path, language
+            code_content, repo_name, file_path, language,
+            tenant_id=tenant_id, user_id=user_id,
         )
 
     async def analyze_delta(
-        self, file_path: str, previous_analysis: dict, current_analysis: dict
+        self, file_path: str, previous_analysis: dict, current_analysis: dict,
+        tenant_id: int = None, user_id: int = None,
     ) -> dict:
         """
         Route delta analysis to the appropriate provider.
@@ -127,7 +134,8 @@ class ProviderRouter(LoggerMixin):
 
         self.logger.info(f"Routing delta analysis → Gemini ({file_path})")
         return await self.gemini.call_gemini_for_delta_analysis(
-            file_path, previous_analysis, current_analysis
+            file_path, previous_analysis, current_analysis,
+            tenant_id=tenant_id, user_id=user_id,
         )
 
     # ================================================================

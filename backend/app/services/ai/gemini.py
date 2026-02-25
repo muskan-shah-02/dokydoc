@@ -63,10 +63,25 @@ class GeminiService(LoggerMixin):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10)
     )
-    async def generate_content(self, prompt: str, **kwargs) -> genai.types.GenerateContentResponse:
+    async def generate_content(
+        self, prompt: str,
+        *,
+        tenant_id: int = None,
+        user_id: int = None,
+        operation: str = None,
+        **kwargs
+    ) -> genai.types.GenerateContentResponse:
         """
-        Generate content with retry logic and error handling.
+        Generate content with retry logic, error handling, and CENTRALIZED BILLING.
+
         Returns the full response object including usage_metadata for token tracking.
+
+        When tenant_id is provided, automatically:
+        1. Calculates cost from actual token usage
+        2. Deducts cost from tenant billing balance
+        3. Logs usage to usage_logs table for the billing portal
+
+        This ensures EVERY Gemini API call is tracked — no more billing gaps.
         """
         try:
             # Enhanced logging for API call tracking
@@ -86,10 +101,91 @@ class GeminiService(LoggerMixin):
                 f"{tokens['thinking_tokens']} thinking = {tokens['total_tokens']} total"
             )
 
+            # CENTRALIZED BILLING: auto-log cost when tenant context is provided
+            if tenant_id and (tokens['input_tokens'] > 0 or tokens['output_tokens'] > 0):
+                self._auto_log_cost(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    operation=operation or "gemini_api_call",
+                    tokens=tokens,
+                )
+
             return response
         except Exception as e:
             self.logger.error(f"❌ GEMINI API ERROR: {e}")
             raise
+
+    def _auto_log_cost(
+        self,
+        tenant_id: int,
+        user_id: int = None,
+        operation: str = "gemini_api_call",
+        tokens: dict = None,
+    ):
+        """
+        Centralized cost logging — called after EVERY Gemini API call.
+        Calculates cost, deducts from tenant billing, and logs to usage_logs.
+
+        Uses a dedicated DB session so it never interferes with the caller's transaction.
+        """
+        if not tokens:
+            return
+
+        try:
+            from app.services.cost_service import cost_service
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens.get("input_tokens", 0),
+                output_tokens=tokens.get("output_tokens", 0),
+                thinking_tokens=tokens.get("thinking_tokens", 0),
+            )
+            cost_inr = cost_data.get("cost_inr", 0)
+            cost_usd = cost_data.get("cost_usd", 0)
+
+            if cost_inr <= 0:
+                return
+
+            # Use a dedicated DB session for billing (isolated from caller's transaction)
+            from app.db.session import SessionLocal
+            from app import crud
+            billing_db = SessionLocal()
+            try:
+                # 1. Deduct from tenant billing balance
+                from app.services.billing_enforcement_service import billing_enforcement_service
+                billing_enforcement_service.deduct_cost(
+                    db=billing_db,
+                    tenant_id=tenant_id,
+                    cost_inr=cost_inr,
+                    description=f"Auto: {operation}",
+                )
+
+                # 2. Log to usage_logs for the billing portal
+                crud.usage_log.log_usage(
+                    db=billing_db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    feature_type="code_analysis" if "code" in operation or "analysis" in operation else "document_analysis",
+                    operation=operation,
+                    model_used="gemini-2.5-flash",
+                    input_tokens=tokens.get("input_tokens", 0),
+                    output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
+                    cost_usd=cost_usd,
+                    cost_inr=cost_inr,
+                    extra_data={"thinking_tokens": tokens.get("thinking_tokens", 0), "auto_logged": True},
+                )
+
+                billing_db.commit()
+                self.logger.info(
+                    f"💰 AUTO-BILLED: ₹{cost_inr:.4f} for {operation} (tenant={tenant_id})"
+                )
+
+            except Exception as billing_err:
+                billing_db.rollback()
+                self.logger.warning(f"Auto-billing failed (non-critical): {billing_err}")
+            finally:
+                billing_db.close()
+
+        except Exception as e:
+            self.logger.warning(f"Auto-cost-logging failed (non-critical): {e}")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -109,7 +205,8 @@ class GeminiService(LoggerMixin):
             raise
 
     async def call_gemini_for_enhanced_analysis(
-        self, code_content: str, repo_name: str = "", file_path: str = "", language: str = ""
+        self, code_content: str, repo_name: str = "", file_path: str = "", language: str = "",
+        tenant_id: int = None, user_id: int = None,
     ) -> dict:
         """
         SPRINT 3 Day 5 (AI-02): Enhanced semantic analysis with business rules,
@@ -131,7 +228,12 @@ class GeminiService(LoggerMixin):
 
             full_prompt = f"{prompt}\n{code_content}"
 
-            response = await self.generate_content(full_prompt)
+            response = await self.generate_content(
+                full_prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation=f"enhanced_analysis:{file_path}",
+            )
             response_text = response.text
 
             # Extract ALL token counts including thinking tokens
@@ -186,7 +288,8 @@ class GeminiService(LoggerMixin):
             raise
 
     async def call_gemini_for_delta_analysis(
-        self, file_path: str, previous_analysis: dict, current_analysis: dict
+        self, file_path: str, previous_analysis: dict, current_analysis: dict,
+        tenant_id: int = None, user_id: int = None,
     ) -> dict:
         """
         SPRINT 3 Day 5 (AI-02): Compares new analysis with previous analysis
@@ -202,7 +305,12 @@ class GeminiService(LoggerMixin):
                 current_analysis=json.dumps(current_analysis, indent=2)
             )
 
-            response = await self.generate_content(prompt)
+            response = await self.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation=f"delta_analysis:{file_path}",
+            )
             response_text = response.text
 
             # Extract ALL token counts including thinking tokens
@@ -247,7 +355,10 @@ class GeminiService(LoggerMixin):
             self.logger.error(f"Error in delta analysis for {file_path}: {e}")
             raise
 
-    async def call_gemini_for_code_analysis(self, code_content: str) -> dict:
+    async def call_gemini_for_code_analysis(
+        self, code_content: str,
+        tenant_id: int = None, user_id: int = None,
+    ) -> dict:
         """
         Analyzes ANY file's content using a universal, adaptive prompt.
         Works with any programming language, framework, or architectural pattern.
@@ -263,7 +374,12 @@ class GeminiService(LoggerMixin):
             full_prompt = f"{prompt}\n\nCODE TO ANALYZE:\n{code_content}"
 
             # Call Gemini API
-            response = await self.generate_content(full_prompt)
+            response = await self.generate_content(
+                full_prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation="code_analysis",
+            )
             response_text = response.text
 
             # Extract ALL token counts including thinking tokens
@@ -370,14 +486,17 @@ def _build_validation_instructions(focus_area: ValidationType) -> str:
         return "BUSINESS LOGIC: Compare the high-level business requirements from the document analysis against the code's overall summary and component purposes. Identify any core business concepts or rules that are not mentioned or implemented in the code."
     return "GENERAL CONSISTENCY: Perform a general consistency check. Look for any other clear contradictions between the document's stated goals and the code's implementation details as presented in their respective analyses."
 
-async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
+async def call_gemini_for_validation(
+    context: ValidationContext, tenant_id: int = None, user_id: int = None,
+) -> List[dict]:
     """
     **This is the upgraded validation function.**
     It sends structured data to the AI with a focused, role-based prompt.
+    Now uses centralized generate_content() for automatic billing.
     """
-    if not model:
-        raise RuntimeError("Gemini model not available")
-        
+    if not gemini_service:
+        raise RuntimeError("GeminiService not available")
+
     logger.info(f"Starting focused Gemini validation for: {context.focus_area.value}")
     
     validation_instructions = _build_validation_instructions(context.focus_area)
@@ -423,9 +542,15 @@ async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
     ```
     """
     try:
-        response = await model.generate_content_async(prompt)
+        # Use centralized generate_content() for automatic billing tracking
+        response = await gemini_service.generate_content(
+            prompt,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation=f"validation:{context.focus_area.value}",
+        )
 
-        # Track validation cost (was previously untracked!)
+        # Extract token counts for cost reporting
         tokens = GeminiService.extract_token_usage(response)
         from app.services.cost_service import cost_service
         cost_data = cost_service.calculate_cost_from_actual_tokens(
@@ -441,7 +566,7 @@ async def call_gemini_for_validation(context: ValidationContext) -> List[dict]:
         cleaned_text = response.text.strip().replace('```json', '').replace('```', '').strip()
         result = json.loads(cleaned_text)
         logger.info(f"Validation for {context.focus_area.value} complete: {len(result)} mismatches found.")
-        # Attach cost data for callers to log
+        # Cost is now auto-logged by generate_content(), but still attach for callers
         return {"mismatches": result if isinstance(result, list) else [], "_cost": cost_data, "_tokens": tokens}
     except Exception as e:
         logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)

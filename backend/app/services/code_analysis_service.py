@@ -24,24 +24,70 @@ class CodeAnalysisService(LoggerMixin):
     # ================================================================
 
     # File extensions to include for code analysis
+    # Expanded to capture web, config, data, infra, and documentation files
     CODE_EXTENSIONS = {
+        # Programming languages
         '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs',
-        '.rb', '.php', '.cs', '.cpp', '.c', '.h', '.swift', '.kt',
-        '.vue', '.svelte',
+        '.rb', '.php', '.cs', '.cpp', '.c', '.h', '.hpp', '.swift', '.kt',
+        '.scala', '.lua', '.dart', '.r', '.m', '.mm',
+        '.ex', '.exs',        # Elixir
+        '.clj', '.cljs',      # Clojure
+        '.hs',                 # Haskell
+        '.ml', '.mli',        # OCaml
+        '.zig',                # Zig
+        # Web frontend
+        '.vue', '.svelte', '.html', '.htm', '.css', '.scss', '.sass', '.less',
+        # Data & config
+        '.json', '.yaml', '.yml', '.toml', '.xml', '.ini', '.cfg', '.conf',
+        '.env.example', '.env.sample',
+        # Database & queries
+        '.sql', '.prisma', '.graphql', '.gql',
+        # Shell & scripting
+        '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+        # Infrastructure & CI/CD
+        '.tf', '.hcl',        # Terraform
+        '.dockerfile',
+        # Protocol & serialization
+        '.proto',              # Protobuf
+        # Documentation (code-adjacent)
+        '.md', '.rst', '.txt',
+        # Build & project files
+        '.gradle', '.cmake', '.makefile',
     }
     # Directories to skip
     SKIP_DIRS = {
         'node_modules', '.git', '__pycache__', '.next', 'dist', 'build',
         '.venv', 'venv', 'env', '.env', 'vendor', '.idea', '.vscode',
         'coverage', '.pytest_cache', '.mypy_cache', '.tox',
+        '.gradle', '.cache', 'target', 'bin', 'obj',
+        '.terraform', '.serverless', '.vercel',
     }
     # Language detection by extension
     EXT_TO_LANG = {
         '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
         '.tsx': 'typescript', '.jsx': 'javascript', '.java': 'java',
         '.go': 'go', '.rs': 'rust', '.rb': 'ruby', '.php': 'php',
-        '.cs': 'csharp', '.cpp': 'cpp', '.c': 'c', '.swift': 'swift',
-        '.kt': 'kotlin', '.vue': 'javascript', '.svelte': 'javascript',
+        '.cs': 'csharp', '.cpp': 'cpp', '.c': 'c', '.h': 'c',
+        '.hpp': 'cpp', '.swift': 'swift',
+        '.kt': 'kotlin', '.scala': 'scala', '.lua': 'lua',
+        '.dart': 'dart', '.r': 'r', '.m': 'objective-c', '.mm': 'objective-cpp',
+        '.ex': 'elixir', '.exs': 'elixir',
+        '.clj': 'clojure', '.cljs': 'clojurescript',
+        '.hs': 'haskell', '.ml': 'ocaml', '.mli': 'ocaml', '.zig': 'zig',
+        '.vue': 'javascript', '.svelte': 'javascript',
+        '.html': 'html', '.htm': 'html',
+        '.css': 'css', '.scss': 'scss', '.sass': 'sass', '.less': 'less',
+        '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml',
+        '.toml': 'toml', '.xml': 'xml', '.ini': 'ini',
+        '.sql': 'sql', '.prisma': 'prisma',
+        '.graphql': 'graphql', '.gql': 'graphql',
+        '.sh': 'shell', '.bash': 'shell', '.zsh': 'shell', '.fish': 'shell',
+        '.ps1': 'powershell', '.bat': 'batch', '.cmd': 'batch',
+        '.tf': 'terraform', '.hcl': 'hcl',
+        '.dockerfile': 'dockerfile',
+        '.proto': 'protobuf',
+        '.md': 'markdown', '.rst': 'restructuredtext',
+        '.gradle': 'gradle', '.cmake': 'cmake',
     }
 
     def _detect_github_url_type(self, url: str) -> tuple:
@@ -124,6 +170,28 @@ class CodeAnalysisService(LoggerMixin):
                 if item["type"] == "blob"
             ]
 
+            # Special filenames (no extension) that should be included
+            SPECIAL_FILENAMES = {
+                'Dockerfile': 'dockerfile',
+                'Makefile': 'makefile',
+                'Jenkinsfile': 'groovy',
+                'Vagrantfile': 'ruby',
+                'Procfile': 'procfile',
+                'Gemfile': 'ruby',
+                'Rakefile': 'ruby',
+                'docker-compose.yml': 'yaml',
+                'docker-compose.yaml': 'yaml',
+                '.gitignore': 'gitignore',
+                '.dockerignore': 'dockerignore',
+                '.eslintrc': 'json',
+                '.prettierrc': 'json',
+                'requirements.txt': 'pip',
+                'Pipfile': 'toml',
+                'pyproject.toml': 'toml',
+                'package.json': 'json',
+                'tsconfig.json': 'json',
+            }
+
             # Filter to relevant code files
             file_list = []
             for item in all_files:
@@ -135,9 +203,19 @@ class CodeAnalysisService(LoggerMixin):
                 ext = ''
                 if '.' in filename:
                     ext = '.' + filename.rsplit('.', 1)[-1]
+
+                # Match by extension OR by special filename
                 if ext in self.CODE_EXTENSIONS:
                     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
                     language = self.EXT_TO_LANG.get(ext, "")
+                    file_list.append({
+                        "path": path,
+                        "url": raw_url,
+                        "language": language,
+                    })
+                elif filename in SPECIAL_FILENAMES:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+                    language = SPECIAL_FILENAMES[filename]
                     file_list.append({
                         "path": path,
                         "url": raw_url,

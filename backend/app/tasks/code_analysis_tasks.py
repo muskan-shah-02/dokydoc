@@ -121,13 +121,14 @@ def static_analysis_worker(
                         code_content,
                         repo_name=repo_name,
                         file_path=file_path,
-                        language=language
+                        language=language,
+                        tenant_id=tenant_id,
                     )
                 )
             else:
                 # Fallback to basic analysis for standalone components
                 analysis_result = _run_async(
-                    provider_router.analyze_code(code_content)
+                    provider_router.analyze_code(code_content, tenant_id=tenant_id)
                 )
 
             # Cache the result
@@ -138,35 +139,10 @@ def static_analysis_worker(
                 ttl_seconds=2592000  # 30 days
             )
 
-            # Cost tracking for enhanced/basic analysis
-            token_usage = analysis_result.get("_token_usage", {})
-            if token_usage and token_usage.get("input_tokens", 0) > 0:
-                try:
-                    from app.services.cost_service import cost_service
-                    cost_data = cost_service.calculate_cost_from_actual_tokens(
-                        input_tokens=token_usage.get("input_tokens", 0),
-                        output_tokens=token_usage.get("output_tokens", 0),
-                        thinking_tokens=token_usage.get("thinking_tokens", 0),
-                    )
-                    analysis_cost_inr = cost_data.get("cost_inr", 0)
-                    if analysis_cost_inr > 0:
-                        billing_enforcement_service.deduct_cost(
-                            db=db, tenant_id=tenant_id, cost_inr=analysis_cost_inr,
-                            description=f"Code analysis: {file_path or component_id}"
-                        )
-                        crud.usage_log.log_usage(
-                            db=db, tenant_id=tenant_id, user_id=None,
-                            feature_type="code_analysis",
-                            operation="enhanced_analysis" if repo_name else "basic_analysis",
-                            model_used="gemini-2.5-flash",
-                            input_tokens=token_usage.get("input_tokens", 0),
-                            output_tokens=token_usage.get("output_tokens", 0) + token_usage.get("thinking_tokens", 0),
-                            cost_usd=cost_data.get("cost_usd", 0),
-                            cost_inr=analysis_cost_inr,
-                        )
-                        logger.info(f"Billed ₹{analysis_cost_inr:.4f} for analysis of {file_path}")
-                except Exception as cost_err:
-                    logger.warning(f"Cost tracking failed for analysis (non-critical): {cost_err}")
+            # Cost tracking: NOW HANDLED CENTRALLY by generate_content() in gemini.py
+            # The auto-billing in generate_content() deducts cost + logs to usage_logs
+            # automatically when tenant_id is passed through provider_router.
+            # We only need to calculate cost here for the component's own ai_cost_inr field.
 
         # Delta analysis: compare with previous analysis if it exists
         new_analysis = analysis_result.get("structured_analysis")
@@ -180,42 +156,15 @@ def static_analysis_worker(
                     provider_router.analyze_delta(
                         file_path=file_path or component.name,
                         previous_analysis=previous_analysis,
-                        current_analysis=new_analysis
+                        current_analysis=new_analysis,
+                        tenant_id=tenant_id,
                     )
                 )
                 logger.info(
                     f"Delta analysis complete: has_changes={delta_result.get('has_changes')}, "
                     f"risk={delta_result.get('risk_assessment', {}).get('overall_risk', 'unknown')}"
                 )
-                # Cost tracking for delta analysis
-                delta_tokens = delta_result.get("_token_usage", {})
-                if delta_tokens and delta_tokens.get("input_tokens", 0) > 0:
-                    try:
-                        from app.services.cost_service import cost_service
-                        delta_cost_data = cost_service.calculate_cost_from_actual_tokens(
-                            input_tokens=delta_tokens.get("input_tokens", 0),
-                            output_tokens=delta_tokens.get("output_tokens", 0),
-                            thinking_tokens=delta_tokens.get("thinking_tokens", 0),
-                        )
-                        delta_cost_inr = delta_cost_data.get("cost_inr", 0)
-                        if delta_cost_inr > 0:
-                            billing_enforcement_service.deduct_cost(
-                                db=db, tenant_id=tenant_id, cost_inr=delta_cost_inr,
-                                description=f"Delta analysis: {file_path or component_id}"
-                            )
-                            crud.usage_log.log_usage(
-                                db=db, tenant_id=tenant_id, user_id=None,
-                                feature_type="code_analysis",
-                                operation="delta_analysis",
-                                model_used="gemini-2.5-flash",
-                                input_tokens=delta_tokens.get("input_tokens", 0),
-                                output_tokens=delta_tokens.get("output_tokens", 0) + delta_tokens.get("thinking_tokens", 0),
-                                cost_usd=delta_cost_data.get("cost_usd", 0),
-                                cost_inr=delta_cost_inr,
-                            )
-                            logger.info(f"Billed ₹{delta_cost_inr:.4f} for delta analysis of {file_path}")
-                    except Exception as cost_err:
-                        logger.warning(f"Cost tracking failed for delta analysis (non-critical): {cost_err}")
+                # Delta cost tracking: NOW HANDLED CENTRALLY by generate_content() auto-billing
             except Exception as delta_err:
                 logger.warning(f"Delta analysis failed (non-critical): {delta_err}")
 
@@ -626,12 +575,63 @@ def batch_retry_failed_components(self, repo_id: int, tenant_id: int, component_
                 else:
                     failed += 1
 
+                # Update repo progress in real-time so the UI reflects progress
+                try:
+                    from app.models.code_component import CodeComponent as CC
+                    all_comps = (
+                        db.query(CC)
+                        .filter(CC.repository_id == repo_id, CC.tenant_id == tenant_id)
+                        .all()
+                    )
+                    done = sum(1 for c in all_comps if c.analysis_status in ("completed", "failed"))
+                    crud.repository.update_analysis_progress(
+                        db, repo_id=repo_id, tenant_id=tenant_id,
+                        analyzed_files=done, status="analyzing",
+                    )
+                except Exception:
+                    pass
+
                 # Rate limit: 4s between analyses
                 time.sleep(4)
 
             except Exception as e:
                 logger.error(f"Batch retry failed for component {comp_id}: {e}")
                 failed += 1
+
+        # UPDATE REPO PROGRESS COUNTER — fixes the stale 28/248 issue
+        # After batch retry, recount ALL components (not just retried ones)
+        if repo:
+            try:
+                from app.models.code_component import CodeComponent as CC
+                all_components = (
+                    db.query(CC)
+                    .filter(CC.repository_id == repo_id, CC.tenant_id == tenant_id)
+                    .all()
+                )
+                total_count = len(all_components)
+                completed_count = sum(
+                    1 for c in all_components if c.analysis_status == "completed"
+                )
+                failed_count = sum(
+                    1 for c in all_components if c.analysis_status == "failed"
+                )
+                analyzed_count = completed_count + failed_count
+
+                new_status = "completed" if analyzed_count >= total_count else "analyzing"
+                crud.repository.update_analysis_progress(
+                    db,
+                    repo_id=repo_id,
+                    tenant_id=tenant_id,
+                    analyzed_files=analyzed_count,
+                    total_files=total_count,
+                    status=new_status,
+                )
+                logger.info(
+                    f"BATCH_RETRY progress update: {analyzed_count}/{total_count} "
+                    f"(completed={completed_count}, failed={failed_count})"
+                )
+            except Exception as progress_err:
+                logger.warning(f"Failed to update repo progress after batch retry: {progress_err}")
 
         logger.info(
             f"BATCH_RETRY completed for repo {repo_id}: "
@@ -751,10 +751,12 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
             layer_summaries=layer_summaries_text,
         )
 
-        response = _run_async(provider_router.generate_content(prompt))
+        response = _run_async(provider_router.generate_content(
+            prompt, tenant_id=tenant_id, operation="repository_synthesis",
+        ))
         response_text = response.text if hasattr(response, 'text') else str(response)
 
-        # Extract token usage for cost tracking
+        # Extract token usage for metadata (billing auto-handled by generate_content)
         from app.services.ai.gemini import gemini_service
         tokens = gemini_service.extract_token_usage(response)
 
@@ -796,40 +798,9 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
             "synthesis_status": "completed",
         })
 
-        # Cost tracking (using actual token counts, NOT text-based counting)
-        from app.services.cost_service import cost_service
-        cost_data = cost_service.calculate_cost_from_actual_tokens(
-            input_tokens=tokens.get("input_tokens", 0),
-            output_tokens=tokens.get("output_tokens", 0),
-            thinking_tokens=tokens.get("thinking_tokens", 0),
-        )
-        cost_inr = cost_data.get("cost_inr", 0)
-
-        if cost_inr > 0:
-            try:
-                from app.services.billing_enforcement_service import billing_enforcement_service
-                billing_enforcement_service.deduct_cost(
-                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
-                    description=f"Repository synthesis: {repo.name}"
-                )
-            except Exception as billing_err:
-                logger.warning(f"Synthesis billing deduction failed (non-critical): {billing_err}")
-
-            try:
-                crud.usage_log.log_usage(
-                    db=db,
-                    tenant_id=tenant_id,
-                    user_id=None,
-                    feature_type="code_analysis",
-                    operation="repository_synthesis",
-                    model_used="gemini-2.5-flash",
-                    input_tokens=tokens.get("input_tokens", 0),
-                    output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
-                    cost_usd=cost_data.get("cost_usd", 0),
-                    cost_inr=cost_inr,
-                )
-            except Exception as log_err:
-                logger.warning(f"Synthesis usage logging failed (non-critical): {log_err}")
+        # Cost tracking: NOW HANDLED CENTRALLY by generate_content() auto-billing.
+        # No manual deduction/logging needed — generate_content() already deducted
+        # and logged to usage_logs when tenant_id was passed through provider_router.
 
         logger.info(
             f"REPO_SYNTHESIS completed for repo {repo_id}: "
