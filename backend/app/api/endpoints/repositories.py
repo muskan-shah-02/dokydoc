@@ -234,9 +234,9 @@ def list_repo_components(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(deps.get_current_user),
     skip: int = 0,
-    limit: int = 100,
+    limit: int = 500,
 ) -> Any:
-    """List all code components belonging to a repository."""
+    """List all code components belonging to a repository (default limit 500 to support large repos)."""
     repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -245,9 +245,67 @@ def list_repo_components(
     components = db.query(CodeComponent).filter(
         CodeComponent.repository_id == repo_id,
         CodeComponent.tenant_id == tenant_id,
-    ).offset(skip).limit(limit).all()
+    ).order_by(CodeComponent.id.asc()).offset(skip).limit(limit).all()
 
     return components
+
+
+@router.post("/{repo_id}/retry-failed", status_code=status.HTTP_202_ACCEPTED)
+def retry_all_failed_components(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Retry ALL failed components in a repository via a single Celery task
+    that processes them sequentially with rate-limiting (4s between calls)
+    to respect Gemini's 15 RPM limit.
+    """
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    from app.models.code_component import CodeComponent
+    failed_components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.analysis_status == "failed",
+    ).all()
+
+    if not failed_components:
+        raise HTTPException(status_code=400, detail="No failed components to retry")
+
+    # Reset all failed components to pending
+    failed_ids = []
+    for comp in failed_components:
+        crud.code_component.update(
+            db, db_obj=comp,
+            obj_in={
+                "analysis_status": "pending",
+                "summary": None,
+                "analysis_started_at": None,
+                "analysis_completed_at": None,
+                "ai_cost_inr": 0,
+            }
+        )
+        failed_ids.append(comp.id)
+
+    # Dispatch a single Celery task that processes them sequentially
+    from app.tasks.code_analysis_tasks import batch_retry_failed_components
+    task = batch_retry_failed_components.delay(repo_id, tenant_id, failed_ids)
+
+    logger.info(
+        f"Batch retry dispatched for {len(failed_ids)} failed components in repo {repo_id}, "
+        f"celery_task_id={task.id}"
+    )
+
+    return {
+        "message": f"Retrying {len(failed_ids)} failed files sequentially (rate-limited)",
+        "repo_id": repo_id,
+        "task_id": task.id,
+        "failed_count": len(failed_ids),
+    }
 
 
 # ============================================================
