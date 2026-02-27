@@ -574,9 +574,10 @@ class CodeAnalysisService(LoggerMixin):
         self, db, structured_analysis: dict, component_name: str, tenant_id: int
     ) -> None:
         """
-        Extract ontology concepts from code analysis results.
+        Extract ontology concepts AND relationships from code analysis results.
         Creates concepts with source_type="code" — no additional AI calls.
-        Only extracts significant elements (Classes, Services, Models, Components).
+        Also creates relationships from data_model_relationships, dependencies,
+        and API contracts found in the structured analysis.
         """
         if not structured_analysis or not tenant_id:
             return
@@ -588,6 +589,8 @@ class CodeAnalysisService(LoggerMixin):
             .get("key_concepts", [])
         )
         created_count = 0
+        relationship_count = 0
+        concept_map = {}  # name -> OntologyConcept object (for relationship linking)
 
         # Extract significant code components as concepts
         # Only extract Classes, Services, Models, Interfaces, Components (skip functions/variables)
@@ -604,7 +607,7 @@ class CodeAnalysisService(LoggerMixin):
             concept_type = self._TYPE_MAPPING.get(comp_type, "Entity")
             description = comp.get("purpose", "") or comp.get("details", "")
 
-            crud.ontology_concept.get_or_create(
+            concept = crud.ontology_concept.get_or_create(
                 db,
                 name=name,
                 concept_type=concept_type,
@@ -613,13 +616,14 @@ class CodeAnalysisService(LoggerMixin):
                 confidence_score=0.75,
                 source_type="code",
             )
+            concept_map[name] = concept
             created_count += 1
 
         # Extract key architectural concepts
         for concept_name in key_concepts:
             if not concept_name or len(concept_name.strip()) < 2:
                 continue
-            crud.ontology_concept.get_or_create(
+            concept = crud.ontology_concept.get_or_create(
                 db,
                 name=concept_name.strip(),
                 concept_type="Process",
@@ -628,12 +632,110 @@ class CodeAnalysisService(LoggerMixin):
                 confidence_score=0.65,
                 source_type="code",
             )
+            concept_map[concept_name.strip()] = concept
             created_count += 1
 
-        if created_count > 0:
+        # ── Phase 2: Extract RELATIONSHIPS from structured analysis ──
+
+        # 2a. data_model_relationships → "has_many", "belongs_to", etc.
+        data_rels = structured_analysis.get("data_model_relationships", [])
+        for rel in data_rels:
+            source_name = rel.get("source_entity", "").strip()
+            target_name = rel.get("target_entity", "").strip()
+            rel_type = rel.get("relationship_type", "related_to").strip()
+            if not source_name or not target_name:
+                continue
+
+            # Ensure both concepts exist
+            source_concept = concept_map.get(source_name)
+            if not source_concept:
+                source_concept = crud.ontology_concept.get_or_create(
+                    db, name=source_name, concept_type="Entity",
+                    tenant_id=tenant_id, source_type="code",
+                    description=rel.get("description", "")[:500] if rel.get("description") else None,
+                    confidence_score=0.7,
+                )
+                concept_map[source_name] = source_concept
+
+            target_concept = concept_map.get(target_name)
+            if not target_concept:
+                target_concept = crud.ontology_concept.get_or_create(
+                    db, name=target_name, concept_type="Entity",
+                    tenant_id=tenant_id, source_type="code",
+                    description=None, confidence_score=0.7,
+                )
+                concept_map[target_name] = target_concept
+
+            if source_concept.id != target_concept.id:
+                crud.ontology_relationship.create_if_not_exists(
+                    db, source_concept_id=source_concept.id,
+                    target_concept_id=target_concept.id,
+                    relationship_type=rel_type, tenant_id=tenant_id,
+                    description=rel.get("description", ""),
+                    confidence_score=0.8,
+                )
+                relationship_count += 1
+
+        # 2b. API contracts → create "exposes_endpoint" relationships
+        api_contracts = structured_analysis.get("api_contracts", [])
+        if api_contracts:
+            # Create a concept for the file/module itself
+            file_short = component_name.rsplit("/", 1)[-1] if "/" in component_name else component_name
+            file_concept = concept_map.get(file_short)
+            if not file_concept:
+                file_concept = crud.ontology_concept.get_or_create(
+                    db, name=file_short, concept_type="Service",
+                    tenant_id=tenant_id, source_type="code",
+                    description=f"API module: {component_name}",
+                    confidence_score=0.7,
+                )
+                concept_map[file_short] = file_concept
+
+            for api in api_contracts:
+                method = api.get("method", "")
+                path = api.get("path", "")
+                if not path:
+                    continue
+                endpoint_name = f"{method} {path}" if method else path
+                endpoint_concept = crud.ontology_concept.get_or_create(
+                    db, name=endpoint_name, concept_type="Process",
+                    tenant_id=tenant_id, source_type="code",
+                    description=api.get("description", "")[:500] if api.get("description") else None,
+                    confidence_score=0.8,
+                )
+                if file_concept.id != endpoint_concept.id:
+                    crud.ontology_relationship.create_if_not_exists(
+                        db, source_concept_id=file_concept.id,
+                        target_concept_id=endpoint_concept.id,
+                        relationship_type="exposes_endpoint", tenant_id=tenant_id,
+                        confidence_score=0.85,
+                    )
+                    relationship_count += 1
+
+        # 2c. Component-level dependencies within the same file
+        # If file has multiple significant components, create "contains" relationships
+        if len(concept_map) >= 2 and api_contracts:
+            for comp in components:
+                comp_type = comp.get("type", "")
+                comp_name = comp.get("name", "").strip()
+                if comp_type in significant_types and comp_name in concept_map:
+                    file_short = component_name.rsplit("/", 1)[-1] if "/" in component_name else component_name
+                    if file_short in concept_map and comp_name != file_short:
+                        fc = concept_map[file_short]
+                        cc = concept_map[comp_name]
+                        if fc.id != cc.id:
+                            crud.ontology_relationship.create_if_not_exists(
+                                db, source_concept_id=fc.id,
+                                target_concept_id=cc.id,
+                                relationship_type="contains", tenant_id=tenant_id,
+                                confidence_score=0.75,
+                            )
+                            relationship_count += 1
+
+        if created_count > 0 or relationship_count > 0:
             self.logger.info(
-                f"📊 Extracted {created_count} ontology concepts from code analysis "
-                f"of {component_name}"
+                f"📊 Extracted {created_count} concepts + {relationship_count} relationships "
+                f"from code analysis of {component_name}"
             )
 
 

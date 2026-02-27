@@ -40,6 +40,91 @@ def _hash_analysis(analysis: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _build_error_with_solution(error_str: str, file_path: str) -> str:
+    """
+    Build a user-friendly error message with actionable solution steps.
+    Classifies errors and provides resolution guidance.
+    """
+    err_lower = error_str.lower()
+
+    # Rate limiting / quota errors
+    if any(k in err_lower for k in ["429", "rate limit", "quota", "resource exhausted", "too many requests"]):
+        return (
+            f"Analysis failed: AI rate limit exceeded.\n"
+            f"Solution: Click 'Retry' — the system will automatically space out requests. "
+            f"If this persists, wait 1-2 minutes before retrying."
+        )
+
+    # Timeout errors
+    if any(k in err_lower for k in ["timeout", "timed out", "deadline exceeded"]):
+        return (
+            f"Analysis failed: Request timed out.\n"
+            f"Solution: This file may be too large for single-pass analysis. "
+            f"Click 'Retry' to try again. If it persists, the file may need to be split."
+        )
+
+    # Content too large
+    if any(k in err_lower for k in ["too large", "max_tokens", "content_length", "payload too large"]):
+        return (
+            f"Analysis failed: File content exceeds AI model limits.\n"
+            f"Solution: This file ({file_path}) is very large. Consider splitting it into "
+            f"smaller modules. Click 'Retry' to attempt with truncated content."
+        )
+
+    # Network / connection errors
+    if any(k in err_lower for k in ["connection", "network", "dns", "ssl", "refused", "unreachable"]):
+        return (
+            f"Analysis failed: Network connection error.\n"
+            f"Solution: Check your internet connection and API key configuration. "
+            f"Click 'Retry' to try again."
+        )
+
+    # Authentication / API key errors
+    if any(k in err_lower for k in ["401", "403", "unauthorized", "forbidden", "api key", "invalid key"]):
+        return (
+            f"Analysis failed: Authentication error with AI provider.\n"
+            f"Solution: Check that your Gemini API key is valid and has sufficient permissions. "
+            f"Contact admin if the issue persists."
+        )
+
+    # JSON parsing errors (AI returned invalid response)
+    if any(k in err_lower for k in ["json", "parse", "decode", "unexpected token", "invalid json"]):
+        return (
+            f"Analysis failed: AI returned an invalid response format.\n"
+            f"Solution: Click 'Retry' — this is usually a transient issue. The AI occasionally "
+            f"returns malformed output that resolves on retry."
+        )
+
+    # Billing / balance errors
+    if any(k in err_lower for k in ["billing", "balance", "insufficient", "afford"]):
+        return (
+            f"Analysis failed: Insufficient billing balance.\n"
+            f"Solution: Add credits to your account in Settings > Billing, then retry."
+        )
+
+    # File fetch errors
+    if any(k in err_lower for k in ["404", "not found", "fetch", "download"]):
+        return (
+            f"Analysis failed: Could not fetch file content from repository.\n"
+            f"Solution: Verify the file still exists in the repository and the URL is accessible. "
+            f"Re-upload the repository if files have been moved."
+        )
+
+    # Server errors
+    if any(k in err_lower for k in ["500", "502", "503", "504", "internal server", "bad gateway", "service unavailable"]):
+        return (
+            f"Analysis failed: AI service temporarily unavailable.\n"
+            f"Solution: Click 'Retry' — this is a temporary server issue that usually resolves quickly."
+        )
+
+    # Generic fallback
+    return (
+        f"Analysis failed: {error_str[:300]}\n"
+        f"Solution: Click 'Retry' to re-analyze this file. If the error persists, "
+        f"check the file content for unusual formatting or encoding issues."
+    )
+
+
 # ============================================================
 # ENHANCED ANALYSIS WORKER (SPRINT 3 Day 5 — AI-02)
 # ============================================================
@@ -221,12 +306,14 @@ def static_analysis_worker(
 
     except Exception as e:
         logger.error(f"ANALYSIS_WORKER failed for component {component_id}: {e}")
+        error_str = str(e)
+        error_summary = _build_error_with_solution(error_str, file_path or "unknown")
         try:
             comp = crud.code_component.get(db=db, id=component_id, tenant_id=tenant_id)
             if comp:
                 crud.code_component.update(db, db_obj=comp, obj_in={
                     "analysis_status": "failed",
-                    "summary": f"Analysis failed: {str(e)}"
+                    "summary": error_summary
                 })
         except Exception:
             pass
@@ -236,7 +323,7 @@ def static_analysis_worker(
         except self.MaxRetriesExceededError:
             logger.error(f"ANALYSIS_WORKER permanently failed for component {component_id}")
 
-        return {"status": "failed", "component_id": component_id, "error": str(e)}
+        return {"status": "failed", "component_id": component_id, "error": error_str}
     finally:
         if db.is_active:
             db.commit()

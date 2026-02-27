@@ -274,6 +274,7 @@ def list_repo_components(
     from datetime import datetime, timedelta
 
     # Auto-fix stuck "processing" files: if stuck for >10 minutes, mark as failed
+    # Also detect potential loops (files re-stuck after retry)
     stale_cutoff = datetime.utcnow() - timedelta(minutes=10)
     stuck_components = db.query(CodeComponent).filter(
         CodeComponent.repository_id == repo_id,
@@ -284,16 +285,44 @@ def list_repo_components(
 
     if stuck_components:
         for comp in stuck_components:
+            # Detect retry loops: if this file was already stuck before (has a prior failure summary)
+            prev_summary = comp.summary or ""
+            is_loop = "timed out" in prev_summary.lower() or "stuck" in prev_summary.lower()
+
+            if is_loop:
+                solution = (
+                    "Analysis stuck in loop (timed out repeatedly).\n"
+                    "Solution: This file may be too complex for automatic analysis. "
+                    "Try re-uploading the repository or contact support if this persists."
+                )
+            else:
+                solution = (
+                    "Analysis timed out (processing exceeded 10 minutes).\n"
+                    "Solution: Click 'Retry' to re-analyze. If it keeps timing out, "
+                    "the file may be too large or the AI service may be experiencing delays."
+                )
+
             crud.code_component.update(
                 db, db_obj=comp,
                 obj_in={
                     "analysis_status": "failed",
-                    "summary": "Analysis timed out (processing exceeded 10 minutes). Click Retry to re-analyze.",
+                    "summary": solution,
                 }
             )
         logger.info(
             f"Auto-marked {len(stuck_components)} stuck components as failed in repo {repo_id}"
         )
+
+    # Also fix "pending" files that belong to repos marked as "completed"
+    # This catches orphaned files from interrupted analysis runs
+    if repo.analysis_status == "completed":
+        orphaned = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "pending",
+        ).count()
+        if orphaned > 0:
+            logger.info(f"Found {orphaned} orphaned pending files in completed repo {repo_id}")
 
     components = db.query(CodeComponent).filter(
         CodeComponent.repository_id == repo_id,
@@ -459,4 +488,96 @@ def get_repo_stats(
         "analyzing": analyzing,
         "failed": failed,
         "pending": total - completed - analyzing - failed,
+    }
+
+
+@router.get("/{repo_id}/stats")
+def get_single_repo_stats(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Detailed stats for a single repository:
+    - File extension breakdown (.py: 45, .ts: 120, ...)
+    - Component type counts (Class: 30, Service: 12, Function: 200, ...)
+    - Analysis status breakdown (completed, failed, pending, processing)
+    - Extracted entities: services, endpoints, models from structured_analysis
+    - Total AI cost for this repo
+    """
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    from app.models.code_component import CodeComponent
+    from sqlalchemy import func
+    import os
+
+    components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    # Extension breakdown
+    ext_counts = {}
+    for comp in components:
+        name = comp.name or ""
+        _, ext = os.path.splitext(name)
+        ext = ext.lower() if ext else "(no ext)"
+        ext_counts[ext] = ext_counts.get(ext, 0) + 1
+    ext_breakdown = sorted(ext_counts.items(), key=lambda x: -x[1])
+
+    # Analysis status breakdown
+    status_counts = {"completed": 0, "failed": 0, "pending": 0, "processing": 0}
+    for comp in components:
+        s = comp.analysis_status or "pending"
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    # Component type counts + key entities from structured_analysis
+    type_counts = {}
+    services_found = []
+    endpoints_found = []
+    models_found = []
+    for comp in components:
+        sa = comp.structured_analysis
+        if not sa:
+            continue
+        for c in sa.get("components", []):
+            ctype = c.get("type", "Other")
+            type_counts[ctype] = type_counts.get(ctype, 0) + 1
+            cname = c.get("name", "")
+            if ctype in ("Service", "Class") and ("service" in cname.lower() or "controller" in cname.lower()):
+                services_found.append(cname)
+            if ctype == "Model" or (ctype == "Class" and "model" in cname.lower()):
+                models_found.append(cname)
+        for api in sa.get("api_contracts", []):
+            method = api.get("method", "")
+            path = api.get("path", "")
+            if path:
+                endpoints_found.append(f"{method} {path}" if method else path)
+
+    type_breakdown = sorted(type_counts.items(), key=lambda x: -x[1])
+
+    # Total AI cost
+    cost_sum = db.query(func.sum(CodeComponent.ai_cost_inr)).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.ai_cost_inr.isnot(None),
+    ).scalar()
+
+    return {
+        "repo_id": repo_id,
+        "repo_name": repo.name,
+        "total_files": len(components),
+        "analysis_status_breakdown": status_counts,
+        "extension_breakdown": [{"ext": e, "count": c} for e, c in ext_breakdown],
+        "component_type_breakdown": [{"type": t, "count": c} for t, c in type_breakdown],
+        "services": list(set(services_found))[:50],
+        "endpoints": list(set(endpoints_found))[:100],
+        "models": list(set(models_found))[:50],
+        "services_count": len(set(services_found)),
+        "endpoints_count": len(set(endpoints_found)),
+        "models_count": len(set(models_found)),
+        "total_ai_cost_inr": float(cost_sum) if cost_sum else 0,
     }

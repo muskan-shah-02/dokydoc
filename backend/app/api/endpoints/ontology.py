@@ -32,6 +32,31 @@ logger = get_logger("api.ontology")
 router = APIRouter()
 
 
+def _get_mapping_edges(db: Session, tenant_id: int, concept_ids: set, edge_id_offset: int = 0):
+    """
+    Convert confirmed ConceptMapping records into OntologyGraphEdge objects
+    so they appear as cross-graph bridge edges in the visualization.
+    Uses negative IDs (offset from -1000000) to distinguish from real relationship IDs.
+    """
+    from app.models.concept_mapping import ConceptMapping
+    mappings = db.query(ConceptMapping).filter(
+        ConceptMapping.tenant_id == tenant_id,
+        ConceptMapping.status.in_(["confirmed", "candidate"]),
+    ).all()
+
+    edges = []
+    for m in mappings:
+        if m.document_concept_id in concept_ids and m.code_concept_id in concept_ids:
+            edges.append(OntologyGraphEdge(
+                id=-(1000000 + m.id),  # Negative ID to distinguish from OntologyRelationship
+                source_concept_id=m.document_concept_id,
+                target_concept_id=m.code_concept_id,
+                relationship_type=f"mapping:{m.relationship_type}",
+                confidence_score=m.confidence_score,
+            ))
+    return edges
+
+
 # ============================================================
 # CONCEPT ENDPOINTS
 # ============================================================
@@ -235,7 +260,7 @@ def get_graph(
 ) -> Any:
     """
     Get the ontology graph for the tenant, optionally scoped to a project.
-    Returns nodes (concepts) and edges (relationships) for frontend visualization.
+    Returns nodes (concepts) and edges (relationships + cross-graph mappings) for frontend visualization.
     """
     concepts = crud.ontology_concept.get_all_active(
         db=db, tenant_id=tenant_id, initiative_id=initiative_id
@@ -264,6 +289,11 @@ def get_graph(
             confidence_score=r.confidence_score
         ) for r in filtered_rels
     ]
+
+    # Include confirmed ConceptMapping records as cross-graph bridge edges
+    # These connect document-layer concepts to code-layer concepts
+    mappings = _get_mapping_edges(db, tenant_id, concept_ids, edge_id_offset=len(edges))
+    edges.extend(mappings)
 
     return OntologyGraphResponse(
         nodes=nodes, edges=edges,
@@ -302,9 +332,14 @@ def get_ontology_stats(
         total_rels = crud.ontology_relationship.count_by_tenant(db=db, tenant_id=tenant_id)
         concept_types = crud.ontology_concept.get_concept_types(db=db, tenant_id=tenant_id)
 
+    # Count cross-graph mappings
+    total_mappings = crud.concept_mapping.count_by_tenant(db=db, tenant_id=tenant_id)
+
     return {
         "total_concepts": total_concepts,
         "total_relationships": total_rels,
+        "total_mappings": total_mappings,
+        "total_edges": total_rels + total_mappings,
         "concept_types": concept_types,
     }
 
@@ -435,6 +470,10 @@ def get_code_graph(
             confidence_score=r.confidence_score
         ) for r in code_relationships
     ]
+
+    # Include cross-graph mappings where code concepts are involved
+    mappings = _get_mapping_edges(db, tenant_id, code_ids, edge_id_offset=len(edges))
+    edges.extend(mappings)
 
     return OntologyGraphResponse(nodes=nodes, edges=edges, total_nodes=len(nodes), total_edges=len(edges))
 

@@ -850,11 +850,23 @@ export default function CodePage() {
                                           <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
                                           <div className="min-w-0">
                                             <span className="truncate text-sm block">{comp.name}</span>
-                                            {comp.analysis_status === "failed" && comp.summary && (
-                                              <span className="text-xs text-red-500 block truncate" title={comp.summary}>
-                                                {comp.summary.length > 80 ? comp.summary.slice(0, 78) + "..." : comp.summary}
-                                              </span>
-                                            )}
+                                            {comp.analysis_status === "failed" && comp.summary && (() => {
+                                              const parts = comp.summary.split("\nSolution: ");
+                                              const errorMsg = parts[0] || comp.summary;
+                                              const solution = parts[1] || null;
+                                              return (
+                                                <div className="mt-0.5">
+                                                  <span className="text-xs text-red-500 block truncate" title={errorMsg}>
+                                                    {errorMsg.length > 80 ? errorMsg.slice(0, 78) + "..." : errorMsg}
+                                                  </span>
+                                                  {solution && (
+                                                    <span className="text-xs text-amber-600 block truncate" title={solution}>
+                                                      Fix: {solution.length > 90 ? solution.slice(0, 88) + "..." : solution}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                              );
+                                            })()}
                                           </div>
                                         </div>
                                       </TableCell>
