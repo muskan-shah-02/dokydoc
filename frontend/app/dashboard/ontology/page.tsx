@@ -36,6 +36,7 @@ import { ConceptDialog } from "@/components/ontology/ConceptDialog";
 import { RelationshipDialog } from "@/components/ontology/RelationshipDialog";
 import { MetaGraphView } from "@/components/ontology/MetaGraphView";
 import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
+import { CrossGraphView } from "@/components/ontology/CrossGraphView";
 
 // --- Types ---
 
@@ -85,6 +86,8 @@ interface GraphEdge {
 interface OntologyStats {
   total_concepts: number;
   total_relationships: number;
+  total_mappings?: number;
+  total_edges?: number;
   concept_types: string[];
 }
 
@@ -359,7 +362,7 @@ function ConceptEditRow({
 
 // --- Main Page ---
 
-type GraphLayer = "all" | "document" | "code" | "meta" | "branch";
+type GraphLayer = "all" | "document" | "code" | "cross" | "meta" | "branch";
 type ViewMode = "table" | "graph";
 
 interface BranchPreviewInfo {
@@ -434,6 +437,11 @@ export default function OntologyDashboard() {
   const [metaGraph, setMetaGraph] = useState<any>(null);
   const [metaLoading, setMetaLoading] = useState(false);
 
+  // Cross-graph state (document ↔ code mappings)
+  const [crossMappings, setCrossMappings] = useState<any[]>([]);
+  const [crossLoading, setCrossLoading] = useState(false);
+  const [selectedMappingId, setSelectedMappingId] = useState<number | null>(null);
+
   // Branch preview state (Sprint 4 Phase 4)
   const [repos, setRepos] = useState<RepoInfo[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState<number | null>(null);
@@ -486,11 +494,27 @@ export default function OntologyDashboard() {
     }
   }, []);
 
+  // Fetch cross-graph mappings when "cross" tab is active
+  const fetchCrossMappings = useCallback(async () => {
+    setCrossLoading(true);
+    try {
+      const data = await api.get<any[]>("/ontology/mappings", { limit: 500 });
+      setCrossMappings(data);
+    } catch (err: any) {
+      console.error("Failed to fetch cross-graph mappings:", err);
+    } finally {
+      setCrossLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (graphLayer === "meta") {
       fetchMetaGraph();
     }
-  }, [graphLayer, fetchMetaGraph]);
+    if (graphLayer === "cross") {
+      fetchCrossMappings();
+    }
+  }, [graphLayer, fetchMetaGraph, fetchCrossMappings]);
 
   // Fetch repos for branch preview selector — no initiative filter (repos are global)
   const fetchRepos = useCallback(async () => {
@@ -795,9 +819,10 @@ export default function OntologyDashboard() {
       )}
 
       {/* Stats Row */}
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatCard title="Total Concepts" value={stats.total_concepts} icon={Network} color="bg-blue-50 text-blue-600" />
         <StatCard title="Relationships" value={stats.total_relationships} icon={GitFork} color="bg-green-50 text-green-600" />
+        <StatCard title="Cross-Mappings" value={stats.total_mappings ?? 0} icon={ArrowRight} color="bg-indigo-50 text-indigo-600" />
         <StatCard title="Concept Types" value={stats.concept_types.length} icon={Layers} color="bg-amber-50 text-amber-600" />
         <StatCard title="Graph Density" value={`${density}%`} icon={Activity} color="bg-purple-50 text-purple-600" />
       </div>
@@ -810,6 +835,7 @@ export default function OntologyDashboard() {
             { key: "all" as GraphLayer, label: "All", icon: Layers },
             { key: "document" as GraphLayer, label: "Document", icon: FileText },
             { key: "code" as GraphLayer, label: "Code", icon: Code2 },
+            { key: "cross" as GraphLayer, label: "Cross-Graph", icon: ArrowRight },
             { key: "meta" as GraphLayer, label: "Meta-Graph", icon: Share2 },
             { key: "branch" as GraphLayer, label: "Branch Preview", icon: GitBranch },
           ].map((tab) => (
@@ -870,6 +896,48 @@ export default function OntologyDashboard() {
           {filteredConcepts.length} concept{filteredConcepts.length !== 1 ? "s" : ""}
         </span>
       </div>
+
+      {/* === CROSS-GRAPH VIEW (Document ↔ Code Mappings) === */}
+      {graphLayer === "cross" && (
+        <div>
+          {crossLoading ? (
+            <div className="flex h-64 items-center justify-center rounded-lg border bg-white">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading cross-graph mappings...</span>
+            </div>
+          ) : (() => {
+            // Separate document and code concepts from the loaded graph
+            const docNodes = graph.nodes.filter(n => n.source_type === "document").map(n => ({
+              id: n.id, name: n.name, concept_type: n.concept_type,
+              source_type: n.source_type || "document", confidence_score: n.confidence_score,
+            }));
+            const codeNodes = graph.nodes.filter(n => n.source_type === "code").map(n => ({
+              id: n.id, name: n.name, concept_type: n.concept_type,
+              source_type: n.source_type || "code", confidence_score: n.confidence_score,
+            }));
+            const mappingEdges = crossMappings.map((m: any) => ({
+              id: m.id,
+              document_concept_id: m.document_concept_id,
+              code_concept_id: m.code_concept_id,
+              document_concept_name: m.document_concept_name || "",
+              code_concept_name: m.code_concept_name || "",
+              mapping_method: m.mapping_method || "unknown",
+              confidence_score: m.confidence_score || 0,
+              status: m.status || "candidate",
+              relationship_type: m.relationship_type || "maps_to",
+            }));
+            return (
+              <CrossGraphView
+                documentNodes={docNodes}
+                codeNodes={codeNodes}
+                mappings={mappingEdges}
+                selectedMappingId={selectedMappingId}
+                onSelectMapping={setSelectedMappingId}
+              />
+            );
+          })()}
+        </div>
+      )}
 
       {/* === META-GRAPH VIEW === */}
       {graphLayer === "meta" && (
@@ -976,7 +1044,7 @@ export default function OntologyDashboard() {
       )}
 
       {/* === TABLE VIEW === */}
-      {graphLayer !== "meta" && graphLayer !== "branch" && viewMode === "table" && (
+      {graphLayer !== "meta" && graphLayer !== "branch" && graphLayer !== "cross" && viewMode === "table" && (
         <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
           <table className="w-full text-sm">
             <thead>
@@ -1079,7 +1147,7 @@ export default function OntologyDashboard() {
       )}
 
       {/* === GRAPH VIEW === */}
-      {graphLayer !== "meta" && graphLayer !== "branch" && viewMode === "graph" && (
+      {graphLayer !== "meta" && graphLayer !== "branch" && graphLayer !== "cross" && viewMode === "graph" && (
         <div>
           {/* Legend */}
           <div className="mb-3 flex flex-wrap items-center gap-4 rounded-lg border bg-white px-4 py-2.5">

@@ -591,6 +591,15 @@ export default function CodePage() {
         </Alert>
       )}
 
+      {submissionError && (
+        <Alert className="border-red-200 bg-red-50 dark:bg-red-950 dark:border-red-800">
+          <AlertCircle className="h-4 w-4 text-red-600" />
+          <AlertDescription className="text-red-800 dark:text-red-200">
+            {submissionError}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Stats Cards — Repo-level */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Card>
@@ -636,6 +645,60 @@ export default function CodePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Component-Level Aggregate Stats */}
+      {(() => {
+        const allComponents = Object.values(repoComponents).flat();
+        if (allComponents.length === 0) return null;
+        const totalFiles = allComponents.length;
+        const completedFiles = allComponents.filter(c => c.analysis_status === "completed").length;
+        const failedFiles = allComponents.filter(c => c.analysis_status === "failed").length;
+        const processingFiles = allComponents.filter(c => c.analysis_status === "processing").length;
+        const totalCostAll = allComponents.reduce((sum, c) => sum + (c.ai_cost_inr || 0), 0);
+        const successRate = totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0;
+        const avgCost = completedFiles > 0 ? totalCostAll / completedFiles : 0;
+
+        return (
+          <div className="rounded-lg border bg-gradient-to-r from-slate-50 to-gray-50 dark:from-slate-950 dark:to-gray-950 p-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <FileCode className="w-4 h-4" />
+                File Analysis Overview
+              </div>
+              <div className="flex items-center gap-4 flex-wrap text-xs">
+                <span className="font-mono">{totalFiles} files loaded</span>
+                <span className="text-green-600 font-medium">{completedFiles} done ({successRate}%)</span>
+                {processingFiles > 0 && (
+                  <span className="text-blue-600 font-medium">{processingFiles} in progress</span>
+                )}
+                {failedFiles > 0 && (
+                  <span className="text-red-600 font-semibold">{failedFiles} failed</span>
+                )}
+                {totalCostAll > 0 && (
+                  <span className="font-mono text-green-700">&#8377;{totalCostAll.toFixed(2)} total</span>
+                )}
+                {avgCost > 0 && (
+                  <span className="font-mono text-muted-foreground">~&#8377;{avgCost.toFixed(2)}/file</span>
+                )}
+              </div>
+            </div>
+            {/* Progress bar */}
+            {totalFiles > 0 && (
+              <div className="mt-2 h-2 w-full rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden flex">
+                {completedFiles > 0 && (
+                  <div className="h-full bg-green-500" style={{ width: `${(completedFiles / totalFiles) * 100}%` }} />
+                )}
+                {processingFiles > 0 && (
+                  <div className="h-full bg-blue-500 animate-pulse" style={{ width: `${(processingFiles / totalFiles) * 100}%` }} />
+                )}
+                {failedFiles > 0 && (
+                  <div className="h-full bg-red-500" style={{ width: `${(failedFiles / totalFiles) * 100}%` }} />
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Search & Filter */}
       <Card>
@@ -851,18 +914,34 @@ export default function CodePage() {
                                           <div className="min-w-0">
                                             <span className="truncate text-sm block">{comp.name}</span>
                                             {comp.analysis_status === "failed" && comp.summary && (() => {
-                                              const parts = comp.summary.split("\nSolution: ");
-                                              const errorMsg = parts[0] || comp.summary;
-                                              const solution = parts[1] || null;
+                                              // Robust parsing: try "\nSolution: " first, then "Solution:" anywhere, then fallback
+                                              let errorMsg = comp.summary;
+                                              let solution: string | null = null;
+                                              const nlSplit = comp.summary.split("\nSolution: ");
+                                              if (nlSplit.length >= 2) {
+                                                errorMsg = nlSplit[0];
+                                                solution = nlSplit.slice(1).join("\nSolution: ");
+                                              } else {
+                                                const solIdx = comp.summary.indexOf("Solution:");
+                                                if (solIdx > 0) {
+                                                  errorMsg = comp.summary.slice(0, solIdx).trim();
+                                                  solution = comp.summary.slice(solIdx + 9).trim();
+                                                }
+                                              }
                                               return (
-                                                <div className="mt-0.5">
-                                                  <span className="text-xs text-red-500 block truncate" title={errorMsg}>
-                                                    {errorMsg.length > 80 ? errorMsg.slice(0, 78) + "..." : errorMsg}
-                                                  </span>
-                                                  {solution && (
-                                                    <span className="text-xs text-amber-600 block truncate" title={solution}>
-                                                      Fix: {solution.length > 90 ? solution.slice(0, 88) + "..." : solution}
+                                                <div className="mt-1 space-y-0.5">
+                                                  <div className="flex items-start gap-1">
+                                                    <AlertCircle className="w-3 h-3 text-red-500 mt-0.5 flex-shrink-0" />
+                                                    <span className="text-xs text-red-600 font-medium block" title={errorMsg}>
+                                                      {errorMsg.length > 90 ? errorMsg.slice(0, 88) + "..." : errorMsg}
                                                     </span>
+                                                  </div>
+                                                  {solution && (
+                                                    <div className="flex items-start gap-1 ml-4">
+                                                      <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950 rounded px-1.5 py-0.5 block" title={solution}>
+                                                        {solution.length > 100 ? solution.slice(0, 98) + "..." : solution}
+                                                      </span>
+                                                    </div>
                                                   )}
                                                 </div>
                                               );

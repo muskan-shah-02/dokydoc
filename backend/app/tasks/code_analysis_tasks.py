@@ -892,7 +892,7 @@ def repo_synthesis_task(self, repo_id: int, tenant_id: int):
         logger.info(
             f"REPO_SYNTHESIS completed for repo {repo_id}: "
             f"{len(components)} files across {len(layers)} layers synthesized. "
-            f"Cost: INR {cost_inr:.2f}"
+            f"Tokens: {tokens.get('input_tokens', 0)} in / {tokens.get('output_tokens', 0)} out"
         )
 
         return {
