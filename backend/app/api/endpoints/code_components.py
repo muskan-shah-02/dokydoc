@@ -144,6 +144,32 @@ def create_code_component(
             db=db, obj_in=code_component_in, owner_id=current_user.id, tenant_id=tenant_id
         )
 
+        # Auto-link standalone file to matching repository for context enrichment
+        if not code_component.repository_id and code_component.location:
+            try:
+                from app.models.repository import Repository
+                repos = db.query(Repository).filter(
+                    Repository.tenant_id == tenant_id,
+                ).all()
+                loc = code_component.location.lower()
+                for repo in repos:
+                    # Match if the file URL contains the repo URL domain/path
+                    repo_url = repo.url.lower().rstrip("/")
+                    # Extract repo identifier (e.g., "owner/repo" from github.com/owner/repo)
+                    parts = repo_url.replace("https://", "").replace("http://", "").split("/")
+                    if len(parts) >= 3:
+                        repo_slug = "/".join(parts[1:3])  # "owner/repo"
+                        if repo_slug in loc:
+                            code_component.repository_id = repo.id
+                            db.commit()
+                            logger.info(
+                                f"Auto-linked standalone component {code_component.id} "
+                                f"to repository {repo.id} ({repo.name}) via URL match"
+                            )
+                            break
+            except Exception as link_err:
+                logger.warning(f"Auto-link check failed (non-fatal): {link_err}")
+
         # Add the new analysis service to the background queue
         # This triggers our new pipeline without making the user wait
         # SPRINT 2 Phase 6: Pass tenant_id to background task for isolation

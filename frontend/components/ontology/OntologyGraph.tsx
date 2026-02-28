@@ -26,6 +26,8 @@ interface SimNode extends GraphNode {
   vx: number;
   vy: number;
   cluster?: string;
+  degree: number;
+  w: number; // computed width
 }
 
 interface Cluster {
@@ -35,7 +37,7 @@ interface Cluster {
   cx: number;
   cy: number;
   radius: number;
-  color: { bg: string; border: string; text: string };
+  color: { bg: string; border: string; text: string; gradient: string };
 }
 
 interface OntologyGraphProps {
@@ -46,26 +48,253 @@ interface OntologyGraphProps {
   onSelectEdge?: (edge: GraphEdge | null) => void;
 }
 
-// --- Color Map ---
+// --- Aesthetic Color Palette ---
 
-const TYPE_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  Entity:    { bg: "#dbeafe", border: "#3b82f6", text: "#1e40af" },
-  Process:   { bg: "#dcfce7", border: "#22c55e", text: "#166534" },
-  Attribute: { bg: "#fef3c7", border: "#f59e0b", text: "#92400e" },
-  Value:     { bg: "#f3e8ff", border: "#a855f7", text: "#6b21a8" },
-  Event:     { bg: "#fee2e2", border: "#ef4444", text: "#991b1b" },
-  Role:      { bg: "#ccfbf1", border: "#14b8a6", text: "#115e59" },
-  Service:   { bg: "#e0e7ff", border: "#6366f1", text: "#3730a3" },
-  Default:   { bg: "#f3f4f6", border: "#9ca3af", text: "#374151" },
+const TYPE_COLORS: Record<
+  string,
+  { bg: string; border: string; text: string; gradient: string }
+> = {
+  Entity: {
+    bg: "#eff6ff",
+    border: "#60a5fa",
+    text: "#1e40af",
+    gradient: "#dbeafe",
+  },
+  Process: {
+    bg: "#f0fdf4",
+    border: "#4ade80",
+    text: "#166534",
+    gradient: "#dcfce7",
+  },
+  Attribute: {
+    bg: "#fffbeb",
+    border: "#fbbf24",
+    text: "#92400e",
+    gradient: "#fef3c7",
+  },
+  Value: {
+    bg: "#faf5ff",
+    border: "#c084fc",
+    text: "#6b21a8",
+    gradient: "#f3e8ff",
+  },
+  Event: {
+    bg: "#fef2f2",
+    border: "#f87171",
+    text: "#991b1b",
+    gradient: "#fee2e2",
+  },
+  Role: {
+    bg: "#f0fdfa",
+    border: "#2dd4bf",
+    text: "#115e59",
+    gradient: "#ccfbf1",
+  },
+  Service: {
+    bg: "#eef2ff",
+    border: "#818cf8",
+    text: "#3730a3",
+    gradient: "#e0e7ff",
+  },
+  Default: {
+    bg: "#f9fafb",
+    border: "#9ca3af",
+    text: "#374151",
+    gradient: "#f3f4f6",
+  },
 };
 
 function getTypeColor(type: string) {
   return TYPE_COLORS[type] || TYPE_COLORS.Default;
 }
 
-// --- Clustered Force Simulation ---
-// Groups nodes by concept_type, positions clusters in a circle,
-// then runs a lighter force simulation WITHIN each cluster.
+// --- Relationship edge color ---
+
+const REL_COLORS: Record<string, string> = {
+  contains: "#60a5fa",
+  uses: "#4ade80",
+  depends_on: "#fbbf24",
+  implements: "#818cf8",
+  extends: "#c084fc",
+  relates_to: "#9ca3af",
+  produces: "#f87171",
+  consumes: "#2dd4bf",
+};
+
+function getRelColor(rel: string): string {
+  const key = rel.toLowerCase().replace(/\s+/g, "_");
+  return REL_COLORS[key] || "#94a3b8";
+}
+
+// --- Node width calculation ---
+
+function nodeWidth(name: string): number {
+  return Math.max(120, Math.min(240, name.length * 8.5 + 48));
+}
+
+const NODE_HEIGHT = 52;
+const NODE_RX = 16;
+
+// --- Mind-Map Layout ---
+// Places the most-connected node at center, arranges connected nodes
+// in concentric rings with even angular spacing per ring.
+
+function mindMapLayout(
+  nodes: SimNode[],
+  edges: GraphEdge[],
+  canvasW: number,
+  canvasH: number
+): SimNode[] {
+  if (nodes.length === 0) return nodes;
+  if (nodes.length === 1) {
+    nodes[0].x = canvasW / 2;
+    nodes[0].y = canvasH / 2;
+    return nodes;
+  }
+
+  // Build adjacency for degree
+  const adj = new Map<number, Set<number>>();
+  nodes.forEach((n) => adj.set(n.id, new Set()));
+  edges.forEach((e) => {
+    adj.get(e.source_concept_id)?.add(e.target_concept_id);
+    adj.get(e.target_concept_id)?.add(e.source_concept_id);
+  });
+
+  // Assign degree
+  nodes.forEach((n) => {
+    n.degree = adj.get(n.id)?.size ?? 0;
+    n.w = nodeWidth(n.name);
+  });
+
+  // Find root = highest degree node
+  const sorted = [...nodes].sort((a, b) => b.degree - a.degree);
+  const root = sorted[0];
+
+  // BFS from root to assign levels
+  const visited = new Set<number>();
+  const levels = new Map<number, number>();
+  const queue: number[] = [root.id];
+  visited.add(root.id);
+  levels.set(root.id, 0);
+
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    const currLevel = levels.get(curr)!;
+    for (const neighbor of adj.get(curr) || []) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        levels.set(neighbor, currLevel + 1);
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  // Orphan nodes (not reachable from root) — assign level based on type grouping
+  let maxLevel = 0;
+  levels.forEach((l) => {
+    if (l > maxLevel) maxLevel = l;
+  });
+  nodes.forEach((n) => {
+    if (!levels.has(n.id)) {
+      levels.set(n.id, maxLevel + 1);
+    }
+  });
+
+  // Group by level
+  const byLevel = new Map<number, SimNode[]>();
+  nodes.forEach((n) => {
+    const lv = levels.get(n.id) ?? 0;
+    if (!byLevel.has(lv)) byLevel.set(lv, []);
+    byLevel.get(lv)!.push(n);
+  });
+
+  const centerX = canvasW / 2;
+  const centerY = canvasH / 2;
+
+  // Ring radii — generous spacing
+  const ringGap = Math.max(
+    180,
+    Math.min(300, canvasW / ((maxLevel + 2) * 2))
+  );
+
+  const allLevels = Array.from(byLevel.keys()).sort((a, b) => a - b);
+
+  for (const lv of allLevels) {
+    const ring = byLevel.get(lv)!;
+    if (lv === 0) {
+      // Center node
+      ring.forEach((n) => {
+        n.x = centerX;
+        n.y = centerY;
+      });
+      continue;
+    }
+
+    const radius = ringGap * lv;
+    // Sort ring nodes by their parent's angle for natural branching
+    ring.sort((a, b) => {
+      const aParents = Array.from(adj.get(a.id) || []).filter(
+        (id) => (levels.get(id) ?? 999) < lv
+      );
+      const bParents = Array.from(adj.get(b.id) || []).filter(
+        (id) => (levels.get(id) ?? 999) < lv
+      );
+      const aAngle = aParents.length > 0
+        ? Math.atan2(
+            (nodes.find((n) => n.id === aParents[0])?.y ?? centerY) - centerY,
+            (nodes.find((n) => n.id === aParents[0])?.x ?? centerX) - centerX
+          )
+        : 0;
+      const bAngle = bParents.length > 0
+        ? Math.atan2(
+            (nodes.find((n) => n.id === bParents[0])?.y ?? centerY) - centerY,
+            (nodes.find((n) => n.id === bParents[0])?.x ?? centerX) - centerX
+          )
+        : 0;
+      return aAngle - bAngle;
+    });
+
+    const count = ring.length;
+    const angleStep = (2 * Math.PI) / Math.max(count, 1);
+    const startAngle = -Math.PI / 2; // start from top
+
+    ring.forEach((n, i) => {
+      const angle = startAngle + angleStep * i;
+      n.x = centerX + Math.cos(angle) * radius;
+      n.y = centerY + Math.sin(angle) * radius;
+    });
+  }
+
+  // Light force repulsion pass to remove overlaps (20 iterations)
+  for (let iter = 0; iter < 20; iter++) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x;
+        const dy = nodes[i].y - nodes[j].y;
+        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+        const minDist = (nodes[i].w + nodes[j].w) / 2 + 30;
+        if (dist < minDist) {
+          const push = (minDist - dist) * 0.3;
+          const px = (dx / dist) * push;
+          const py = (dy / dist) * push;
+          // Don't push root
+          if (levels.get(nodes[i].id) !== 0) {
+            nodes[i].x += px;
+            nodes[i].y += py;
+          }
+          if (levels.get(nodes[j].id) !== 0) {
+            nodes[j].x -= px;
+            nodes[j].y -= py;
+          }
+        }
+      }
+    }
+  }
+
+  return nodes;
+}
+
+// --- Clustered Layout for Large Graphs ---
 
 function buildClusters(
   nodes: SimNode[],
@@ -73,10 +302,10 @@ function buildClusters(
   canvasWidth: number,
   canvasHeight: number
 ): Cluster[] {
-  // Group nodes by concept_type
   const groups = new Map<string, SimNode[]>();
   nodes.forEach((n) => {
     const key = n.concept_type || "Default";
+    n.w = nodeWidth(n.name);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push({ ...n, cluster: key });
   });
@@ -85,8 +314,6 @@ function buildClusters(
   const centerX = canvasWidth / 2;
   const centerY = canvasHeight / 2;
   const clusterCount = clusterKeys.length;
-
-  // Position clusters in a circle around center
   const clusterRadius = Math.min(canvasWidth, canvasHeight) * 0.35;
   const clusters: Cluster[] = [];
 
@@ -96,11 +323,8 @@ function buildClusters(
     const cx = centerX + Math.cos(angle) * clusterRadius;
     const cy = centerY + Math.sin(angle) * clusterRadius;
 
-    // Arrange nodes within cluster in a compact circle
     const nodeCount = clusterNodes.length;
-    const innerRadius = Math.max(60, Math.min(200, nodeCount * 15));
-
-    // Build edge lookup for this cluster's nodes
+    const innerRadius = Math.max(80, Math.min(280, nodeCount * 20));
     const clusterNodeIds = new Set(clusterNodes.map((n) => n.id));
 
     clusterNodes.forEach((n, j) => {
@@ -116,19 +340,19 @@ function buildClusters(
       n.vy = 0;
     });
 
-    // Light intra-cluster force simulation (only 40 iterations, only within-cluster pairs)
     const intraEdges = edges.filter(
-      (e) => clusterNodeIds.has(e.source_concept_id) && clusterNodeIds.has(e.target_concept_id)
+      (e) =>
+        clusterNodeIds.has(e.source_concept_id) &&
+        clusterNodeIds.has(e.target_concept_id)
     );
 
     for (let iter = 0; iter < 40; iter++) {
-      // Repulsion within cluster (limited)
       for (let a = 0; a < clusterNodes.length; a++) {
         for (let b = a + 1; b < clusterNodes.length; b++) {
           const dx = clusterNodes[a].x - clusterNodes[b].x;
           const dy = clusterNodes[a].y - clusterNodes[b].y;
           const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-          const force = 3000 / (dist * dist);
+          const force = 5000 / (dist * dist);
           const fx = (dx / dist) * force;
           const fy = (dy / dist) * force;
           clusterNodes[a].vx += fx;
@@ -138,7 +362,6 @@ function buildClusters(
         }
       }
 
-      // Attraction along intra-cluster edges
       const nodeMap = new Map(clusterNodes.map((n) => [n.id, n]));
       intraEdges.forEach((e) => {
         const src = nodeMap.get(e.source_concept_id);
@@ -147,14 +370,13 @@ function buildClusters(
         const dx = tgt.x - src.x;
         const dy = tgt.y - src.y;
         const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const force = 0.01 * (dist - 100);
+        const force = 0.01 * (dist - 120);
         src.vx += (dx / dist) * force;
         src.vy += (dy / dist) * force;
         tgt.vx -= (dx / dist) * force;
         tgt.vy -= (dy / dist) * force;
       });
 
-      // Pull toward cluster center
       clusterNodes.forEach((n) => {
         n.vx += (cx - n.x) * 0.02;
         n.vy += (cy - n.y) * 0.02;
@@ -171,7 +393,7 @@ function buildClusters(
       nodes: clusterNodes,
       cx,
       cy,
-      radius: innerRadius + 40,
+      radius: innerRadius + 50,
       color: getTypeColor(key),
     });
   });
@@ -179,22 +401,25 @@ function buildClusters(
   return clusters;
 }
 
-// --- Arrow Marker ---
+// --- Curved edge path (bezier) ---
 
-function ArrowMarker({ id, color }: { id: string; color: string }) {
-  return (
-    <marker
-      id={id}
-      viewBox="0 0 10 6"
-      refX="10"
-      refY="3"
-      markerWidth="8"
-      markerHeight="6"
-      orient="auto-start-reverse"
-    >
-      <path d="M 0 0 L 10 3 L 0 6 z" fill={color} />
-    </marker>
-  );
+function curvedEdgePath(
+  sx: number,
+  sy: number,
+  tx: number,
+  ty: number
+): string {
+  const dx = tx - sx;
+  const dy = ty - sy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  // Curvature proportional to distance, perpendicular offset
+  const curvature = Math.min(40, dist * 0.15);
+  // Perpendicular vector
+  const nx = -dy / (dist || 1);
+  const ny = dx / (dist || 1);
+  const mx = (sx + tx) / 2 + nx * curvature;
+  const my = (sy + ty) / 2 + ny * curvature;
+  return `M ${sx} ${sy} Q ${mx} ${my} ${tx} ${ty}`;
 }
 
 // --- Main Component ---
@@ -213,86 +438,47 @@ export function OntologyGraph({
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const [expandedCluster, setExpandedCluster] = useState<string | null>(null);
-  const [isSimulating, setIsSimulating] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null);
 
-  // Determine if we're in large-graph mode (>200 nodes = cluster view)
   const isLargeGraph = nodes.length > 200;
 
-  // Canvas sizing
+  // Canvas sizing — generous for readability
   const canvasWidth = isLargeGraph
-    ? Math.max(1400, Math.min(4000, nodes.length * 4))
-    : Math.max(900, Math.min(2400, nodes.length * 120));
+    ? Math.max(1600, Math.min(5000, nodes.length * 5))
+    : Math.max(1200, Math.min(3200, nodes.length * 160));
   const canvasHeight = isLargeGraph
-    ? Math.max(1000, Math.min(3000, nodes.length * 3))
-    : Math.max(600, Math.min(1600, nodes.length * 80));
+    ? Math.max(1200, Math.min(4000, nodes.length * 4))
+    : Math.max(800, Math.min(2400, nodes.length * 100));
 
-  // Build clusters or simple simulation
+  // Build layout
   const { clusters, simNodes } = useMemo(() => {
     if (nodes.length === 0) return { clusters: [], simNodes: [] };
 
     if (isLargeGraph) {
-      // Cluster mode for large graphs
       const initial: SimNode[] = nodes.map((n) => ({
-        ...n, x: 0, y: 0, vx: 0, vy: 0,
+        ...n,
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        degree: 0,
+        w: nodeWidth(n.name),
       }));
       const cls = buildClusters(initial, edges, canvasWidth, canvasHeight);
       const allNodes = cls.flatMap((c) => c.nodes);
       return { clusters: cls, simNodes: allNodes };
     } else {
-      // Standard force simulation for small graphs
-      const initial: SimNode[] = nodes.map((n, i) => {
-        const angle = (2 * Math.PI * i) / nodes.length;
-        const radius = Math.min(canvasWidth, canvasHeight) * 0.3;
-        return {
-          ...n,
-          x: canvasWidth / 2 + Math.cos(angle) * radius + (Math.random() - 0.5) * 40,
-          y: canvasHeight / 2 + Math.sin(angle) * radius + (Math.random() - 0.5) * 40,
-          vx: 0, vy: 0,
-        };
-      });
-
-      // Run standard simulation with fewer iterations
-      const iterations = Math.min(100, Math.max(30, 3000 / nodes.length));
-      const centerX = canvasWidth / 2;
-      const centerY = canvasHeight / 2;
-
-      for (let iter = 0; iter < iterations; iter++) {
-        for (let i = 0; i < initial.length; i++) {
-          for (let j = i + 1; j < initial.length; j++) {
-            const dx = initial[i].x - initial[j].x;
-            const dy = initial[i].y - initial[j].y;
-            const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-            const force = 8000 / (dist * dist);
-            const fx = (dx / dist) * force;
-            const fy = (dy / dist) * force;
-            initial[i].vx += fx; initial[i].vy += fy;
-            initial[j].vx -= fx; initial[j].vy -= fy;
-          }
-        }
-
-        const nodeMap = new Map(initial.map((n) => [n.id, n]));
-        edges.forEach((e) => {
-          const src = nodeMap.get(e.source_concept_id);
-          const tgt = nodeMap.get(e.target_concept_id);
-          if (!src || !tgt) return;
-          const dx = tgt.x - src.x;
-          const dy = tgt.y - src.y;
-          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-          const force = 0.005 * (dist - 180);
-          src.vx += (dx / dist) * force; src.vy += (dy / dist) * force;
-          tgt.vx -= (dx / dist) * force; tgt.vy -= (dy / dist) * force;
-        });
-
-        initial.forEach((n) => {
-          n.vx += (centerX - n.x) * 0.01;
-          n.vy += (centerY - n.y) * 0.01;
-          n.vx *= 0.85; n.vy *= 0.85;
-          n.x += n.vx; n.y += n.vy;
-          n.x = Math.max(80, Math.min(canvasWidth - 80, n.x));
-          n.y = Math.max(50, Math.min(canvasHeight - 50, n.y));
-        });
-      }
-
+      // Mind-map radial layout
+      const initial: SimNode[] = nodes.map((n) => ({
+        ...n,
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        degree: 0,
+        w: nodeWidth(n.name),
+      }));
+      mindMapLayout(initial, edges, canvasWidth, canvasHeight);
       return { clusters: [], simNodes: initial };
     }
   }, [nodes, edges, canvasWidth, canvasHeight, isLargeGraph]);
@@ -302,143 +488,179 @@ export function OntologyGraph({
     [simNodes]
   );
 
-  // Visible nodes (for large graphs, only show expanded cluster or cluster summaries)
   const visibleNodes = useMemo(() => {
     if (!isLargeGraph) return simNodes;
-    if (!expandedCluster) return []; // In cluster overview, individual nodes hidden
+    if (!expandedCluster) return [];
     return simNodes.filter((n) => n.cluster === expandedCluster);
   }, [isLargeGraph, expandedCluster, simNodes]);
 
-  // Visible edges
   const visibleEdges = useMemo(() => {
     if (!isLargeGraph) return edges;
     if (!expandedCluster) return [];
     const visibleIds = new Set(visibleNodes.map((n) => n.id));
     return edges.filter(
-      (e) => visibleIds.has(e.source_concept_id) && visibleIds.has(e.target_concept_id)
+      (e) =>
+        visibleIds.has(e.source_concept_id) &&
+        visibleIds.has(e.target_concept_id)
     );
   }, [isLargeGraph, expandedCluster, edges, visibleNodes]);
 
-  // Inter-cluster edges (for cluster-level view)
   const interClusterEdges = useMemo(() => {
     if (!isLargeGraph || expandedCluster) return [];
     const nodeToCluster = new Map<number, string>();
     simNodes.forEach((n) => {
       if (n.cluster) nodeToCluster.set(n.id, n.cluster);
     });
-    const seen = new Set<string>();
-    const result: { from: string; to: string; count: number }[] = [];
     const countMap = new Map<string, number>();
-
     edges.forEach((e) => {
-      const srcCluster = nodeToCluster.get(e.source_concept_id);
-      const tgtCluster = nodeToCluster.get(e.target_concept_id);
-      if (srcCluster && tgtCluster && srcCluster !== tgtCluster) {
-        const key = [srcCluster, tgtCluster].sort().join("||");
+      const srcC = nodeToCluster.get(e.source_concept_id);
+      const tgtC = nodeToCluster.get(e.target_concept_id);
+      if (srcC && tgtC && srcC !== tgtC) {
+        const key = [srcC, tgtC].sort().join("||");
         countMap.set(key, (countMap.get(key) || 0) + 1);
       }
     });
-
+    const result: { from: string; to: string; count: number }[] = [];
     countMap.forEach((count, key) => {
       const [from, to] = key.split("||");
       result.push({ from, to, count });
     });
-
     return result;
   }, [isLargeGraph, expandedCluster, edges, simNodes]);
 
-  // Zoom/Pan handlers
+  // --- Interaction handlers ---
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom((z) => Math.max(0.2, Math.min(3, z * delta)));
+    const delta = e.deltaY > 0 ? 0.92 : 1.08;
+    setZoom((z) => Math.max(0.15, Math.min(4, z * delta)));
   }, []);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button === 1 || e.button === 0 && e.altKey) {
-      setIsPanning(true);
-      panStartRef.current = { x: e.clientX, y: e.clientY, panX, panY };
-      e.preventDefault();
-    }
-  }, [panX, panY]);
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      // Left-click drag or middle-click to pan
+      if (e.button === 0 || e.button === 1) {
+        setIsPanning(true);
+        panStartRef.current = { x: e.clientX, y: e.clientY, panX, panY };
+        e.preventDefault();
+      }
+    },
+    [panX, panY]
+  );
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isPanning) return;
-    const dx = e.clientX - panStartRef.current.x;
-    const dy = e.clientY - panStartRef.current.y;
-    setPanX(panStartRef.current.panX + dx);
-    setPanY(panStartRef.current.panY + dy);
-  }, [isPanning]);
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (!isPanning) return;
+      const dx = e.clientX - panStartRef.current.x;
+      const dy = e.clientY - panStartRef.current.y;
+      setPanX(panStartRef.current.panX + dx);
+      setPanY(panStartRef.current.panY + dy);
+    },
+    [isPanning]
+  );
 
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
   }, []);
 
-  // Reset view
   const resetView = useCallback(() => {
     setZoom(1);
     setPanX(0);
     setPanY(0);
     setExpandedCluster(null);
+    setHoveredNodeId(null);
   }, []);
 
-  function edgePath(e: GraphEdge) {
+  // --- Edge path with node radius offset ---
+
+  function getEdgePath(e: GraphEdge): string {
     const src = nodeMap.get(e.source_concept_id);
     const tgt = nodeMap.get(e.target_concept_id);
     if (!src || !tgt) return "";
     const dx = tgt.x - src.x;
     const dy = tgt.y - src.y;
     const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-    const nodeRadius = 30;
-    const sx = src.x + (dx / dist) * nodeRadius;
-    const sy = src.y + (dy / dist) * nodeRadius;
-    const tx = tgt.x - (dx / dist) * nodeRadius;
-    const ty = tgt.y - (dy / dist) * nodeRadius;
-    return `M ${sx} ${sy} L ${tx} ${ty}`;
+    const srcR = src.w / 2 + 4;
+    const tgtR = tgt.w / 2 + 4;
+    const sx = src.x + (dx / dist) * srcR;
+    const sy = src.y + (dy / dist) * (NODE_HEIGHT / 2 + 4);
+    const tx = tgt.x - (dx / dist) * tgtR;
+    const ty = tgt.y - (dy / dist) * (NODE_HEIGHT / 2 + 4);
+    return curvedEdgePath(sx, sy, tx, ty);
   }
+
+  // --- Type legend ---
+
+  const typesUsed = useMemo(() => {
+    const types = new Set<string>();
+    nodes.forEach((n) => types.add(n.concept_type || "Default"));
+    return Array.from(types).sort();
+  }, [nodes]);
+
+  // --- Empty state ---
 
   if (nodes.length === 0) {
     return (
       <div className="flex h-64 flex-col items-center justify-center text-gray-400">
-        <svg className="mb-3 h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+        <svg
+          className="mb-3 h-16 w-16"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={1}
+        >
           <circle cx="12" cy="5" r="3" />
           <circle cx="5" cy="19" r="3" />
           <circle cx="19" cy="19" r="3" />
           <path d="M12 8v3m-5.5 5.5L9 14m5.5 2.5L15 14" />
         </svg>
         <p className="text-sm font-medium">No concepts yet</p>
-        <p className="mt-1 text-xs">Upload and analyze documents to build your knowledge graph</p>
+        <p className="mt-1 text-xs">
+          Upload and analyze documents to build your knowledge graph
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="relative rounded-lg border bg-white" style={{ maxHeight: "75vh", overflow: "hidden" }}>
+    <div
+      className="relative rounded-lg border bg-white"
+      style={{ maxHeight: "75vh", overflow: "hidden" }}
+    >
       {/* Controls overlay */}
       <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
-        <div className="flex items-center gap-1 rounded-lg bg-white/90 border shadow-sm px-2 py-1 backdrop-blur-sm">
+        <div className="flex items-center gap-1 rounded-full bg-white/95 border shadow-sm px-3 py-1.5 backdrop-blur-sm">
           <button
-            onClick={() => setZoom((z) => Math.min(3, z * 1.2))}
-            className="px-2 py-0.5 text-sm font-bold text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-          >+</button>
+            onClick={() => setZoom((z) => Math.min(4, z * 1.25))}
+            className="w-7 h-7 flex items-center justify-center text-sm font-bold text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-full"
+          >
+            +
+          </button>
           <span className="text-xs font-mono text-gray-500 min-w-[3rem] text-center">
             {Math.round(zoom * 100)}%
           </span>
           <button
-            onClick={() => setZoom((z) => Math.max(0.2, z * 0.8))}
-            className="px-2 py-0.5 text-sm font-bold text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-          >-</button>
+            onClick={() => setZoom((z) => Math.max(0.15, z * 0.8))}
+            className="w-7 h-7 flex items-center justify-center text-sm font-bold text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-full"
+          >
+            -
+          </button>
         </div>
         <button
           onClick={resetView}
-          className="rounded-lg bg-white/90 border shadow-sm px-2 py-1 text-xs text-gray-600 hover:text-gray-900 hover:bg-gray-100 backdrop-blur-sm"
+          className="rounded-full bg-white/95 border shadow-sm px-3 py-1.5 text-xs text-gray-600 hover:text-gray-900 hover:bg-gray-100 backdrop-blur-sm"
         >
           Reset
         </button>
         {isLargeGraph && expandedCluster && (
           <button
-            onClick={() => setExpandedCluster(null)}
-            className="rounded-lg bg-blue-50 border border-blue-200 shadow-sm px-2 py-1 text-xs text-blue-700 hover:bg-blue-100 backdrop-blur-sm"
+            onClick={() => {
+              setExpandedCluster(null);
+              setZoom(1);
+              setPanX(0);
+              setPanY(0);
+            }}
+            className="rounded-full bg-blue-50 border border-blue-200 shadow-sm px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-100 backdrop-blur-sm"
           >
             ← All Clusters
           </button>
@@ -446,23 +668,113 @@ export function OntologyGraph({
       </div>
 
       {/* Info overlay */}
-      <div className="absolute top-3 left-3 z-20 rounded-lg bg-white/90 border shadow-sm px-3 py-1.5 backdrop-blur-sm">
+      <div className="absolute top-3 left-3 z-20 rounded-full bg-white/95 border shadow-sm px-4 py-1.5 backdrop-blur-sm">
         <div className="flex items-center gap-3 text-xs">
-          <span className="font-medium text-gray-700">{nodes.length} concepts</span>
+          <span className="font-semibold text-gray-700">
+            {nodes.length} concepts
+          </span>
+          <span className="text-gray-400">|</span>
           <span className="text-gray-500">{edges.length} relationships</span>
           {isLargeGraph && (
-            <span className="text-blue-600 font-medium">
-              {expandedCluster ? `Viewing: ${expandedCluster}` : `${clusters.length} clusters`}
-            </span>
+            <>
+              <span className="text-gray-400">|</span>
+              <span className="text-blue-600 font-medium">
+                {expandedCluster
+                  ? `${expandedCluster}`
+                  : `${clusters.length} clusters`}
+              </span>
+            </>
           )}
-          <span className="text-gray-400 text-[10px]">Scroll=zoom · Alt+drag=pan</span>
+          <span className="text-gray-300 text-[10px]">
+            Drag=pan · Scroll=zoom
+          </span>
         </div>
       </div>
+
+      {/* Type legend */}
+      <div className="absolute bottom-3 left-3 z-20 flex flex-wrap gap-1.5 rounded-lg bg-white/95 border shadow-sm px-3 py-2 backdrop-blur-sm max-w-[60%]">
+        {typesUsed.map((type) => {
+          const c = getTypeColor(type);
+          return (
+            <div
+              key={type}
+              className="flex items-center gap-1.5 text-[10px]"
+            >
+              <div
+                className="w-3 h-3 rounded-sm border"
+                style={{ backgroundColor: c.bg, borderColor: c.border }}
+              />
+              <span style={{ color: c.text }} className="font-medium">
+                {type}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Hover tooltip */}
+      {hoveredNodeId !== null && (() => {
+        const n = nodeMap.get(hoveredNodeId);
+        if (!n) return null;
+        const color = getTypeColor(n.concept_type);
+        return (
+          <div
+            className="absolute z-30 rounded-lg border bg-white shadow-lg px-4 py-3 pointer-events-none"
+            style={{
+              bottom: 52,
+              right: 12,
+              maxWidth: 280,
+            }}
+          >
+            <div className="text-sm font-semibold text-gray-900">{n.name}</div>
+            <div className="mt-1 flex items-center gap-2 text-xs">
+              <span
+                className="rounded-full px-2 py-0.5 font-medium"
+                style={{
+                  backgroundColor: color.bg,
+                  color: color.text,
+                  border: `1px solid ${color.border}`,
+                }}
+              >
+                {n.concept_type}
+              </span>
+              {n.source_type && (
+                <span className="text-gray-400">
+                  from {n.source_type}
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex items-center gap-1 text-[10px] text-gray-400">
+              <span>
+                Confidence:{" "}
+                <span
+                  className="font-semibold"
+                  style={{
+                    color:
+                      n.confidence_score >= 0.8
+                        ? "#16a34a"
+                        : n.confidence_score >= 0.5
+                          ? "#d97706"
+                          : "#dc2626",
+                  }}
+                >
+                  {Math.round(n.confidence_score * 100)}%
+                </span>
+              </span>
+              <span>· {n.degree} connections</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* SVG Canvas */}
       <div
         ref={containerRef}
-        style={{ width: "100%", height: "70vh", cursor: isPanning ? "grabbing" : "default" }}
+        style={{
+          width: "100%",
+          height: "70vh",
+          cursor: isPanning ? "grabbing" : "grab",
+        }}
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -472,57 +784,145 @@ export function OntologyGraph({
         <svg
           width="100%"
           height="100%"
-          viewBox={`${-panX / zoom} ${-panY / zoom} ${(containerRef.current?.clientWidth || 900) / zoom} ${(containerRef.current?.clientHeight || 600) / zoom}`}
+          viewBox={`${-panX / zoom} ${-panY / zoom} ${(containerRef.current?.clientWidth || 1200) / zoom} ${(containerRef.current?.clientHeight || 800) / zoom}`}
         >
           <defs>
-            <ArrowMarker id="arrow-default" color="#9ca3af" />
-            <ArrowMarker id="arrow-selected" color="#3b82f6" />
-            <ArrowMarker id="arrow-cluster" color="#94a3b8" />
+            {/* Gradient definitions for each type */}
+            {Object.entries(TYPE_COLORS).map(([type, c]) => (
+              <linearGradient
+                key={`grad-${type}`}
+                id={`grad-${type}`}
+                x1="0%"
+                y1="0%"
+                x2="0%"
+                y2="100%"
+              >
+                <stop offset="0%" stopColor={c.bg} />
+                <stop offset="100%" stopColor={c.gradient} />
+              </linearGradient>
+            ))}
+            {/* Arrow markers */}
+            <marker
+              id="arrow-mind"
+              viewBox="0 0 10 6"
+              refX="9"
+              refY="3"
+              markerWidth="7"
+              markerHeight="5"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 3 L 0 6 z" fill="#94a3b8" opacity={0.6} />
+            </marker>
+            <marker
+              id="arrow-active"
+              viewBox="0 0 10 6"
+              refX="9"
+              refY="3"
+              markerWidth="7"
+              markerHeight="5"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 3 L 0 6 z" fill="#3b82f6" />
+            </marker>
+            {/* Drop shadow filter */}
+            <filter id="node-shadow" x="-10%" y="-10%" width="120%" height="130%">
+              <feDropShadow
+                dx="0"
+                dy="2"
+                stdDeviation="3"
+                floodColor="#00000012"
+              />
+            </filter>
+            <filter id="node-shadow-hover" x="-10%" y="-10%" width="120%" height="130%">
+              <feDropShadow
+                dx="0"
+                dy="4"
+                stdDeviation="6"
+                floodColor="#00000018"
+              />
+            </filter>
+            {/* Glow for selected */}
+            <filter id="selected-glow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="4" result="blur" />
+              <feFlood floodColor="#3b82f6" floodOpacity="0.3" result="color" />
+              <feComposite in="color" in2="blur" operator="in" result="glow" />
+              <feMerge>
+                <feMergeNode in="glow" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
           </defs>
 
-          {/* Background */}
+          {/* Background — clean white with subtle radial gradient */}
           <rect
-            x={-panX / zoom}
-            y={-panY / zoom}
-            width={(containerRef.current?.clientWidth || 2000) / zoom}
-            height={(containerRef.current?.clientHeight || 1500) / zoom}
-            fill="#fafbfc"
-            onClick={() => { onSelectNode(null); setExpandedCluster(null); }}
+            x={-panX / zoom - 500}
+            y={-panY / zoom - 500}
+            width={(containerRef.current?.clientWidth || 2000) / zoom + 1000}
+            height={(containerRef.current?.clientHeight || 1500) / zoom + 1000}
+            fill="#fcfcfd"
+            onClick={() => {
+              onSelectNode(null);
+              setExpandedCluster(null);
+            }}
           />
 
-          {/* Grid */}
-          <g opacity={0.15}>
-            {Array.from({ length: Math.ceil(canvasWidth / 100) + 1 }).map((_, i) => (
-              <line key={`vg-${i}`} x1={i * 100} y1={0} x2={i * 100} y2={canvasHeight} stroke="#cbd5e1" strokeWidth={0.5} />
-            ))}
-            {Array.from({ length: Math.ceil(canvasHeight / 100) + 1 }).map((_, i) => (
-              <line key={`hg-${i}`} x1={0} y1={i * 100} x2={canvasWidth} y2={i * 100} stroke="#cbd5e1" strokeWidth={0.5} />
-            ))}
+          {/* Subtle dot pattern */}
+          <g opacity={0.08}>
+            {Array.from({
+              length: Math.ceil(canvasWidth / 60) + 1,
+            }).map((_, i) =>
+              Array.from({
+                length: Math.ceil(canvasHeight / 60) + 1,
+              }).map((_, j) => (
+                <circle
+                  key={`dot-${i}-${j}`}
+                  cx={i * 60}
+                  cy={j * 60}
+                  r={1}
+                  fill="#94a3b8"
+                />
+              ))
+            )}
           </g>
 
           {/* === CLUSTER VIEW (Large Graphs) === */}
           {isLargeGraph && !expandedCluster && (
             <>
-              {/* Inter-cluster edges */}
               {interClusterEdges.map((ice, idx) => {
-                const srcCluster = clusters.find((c) => c.key === ice.from);
-                const tgtCluster = clusters.find((c) => c.key === ice.to);
-                if (!srcCluster || !tgtCluster) return null;
-                const midX = (srcCluster.cx + tgtCluster.cx) / 2;
-                const midY = (srcCluster.cy + tgtCluster.cy) / 2;
+                const srcC = clusters.find((c) => c.key === ice.from);
+                const tgtC = clusters.find((c) => c.key === ice.to);
+                if (!srcC || !tgtC) return null;
                 return (
                   <g key={`ice-${idx}`}>
-                    <line
-                      x1={srcCluster.cx} y1={srcCluster.cy}
-                      x2={tgtCluster.cx} y2={tgtCluster.cy}
+                    <path
+                      d={curvedEdgePath(srcC.cx, srcC.cy, tgtC.cx, tgtC.cy)}
                       stroke="#94a3b8"
-                      strokeWidth={Math.min(4, 1 + ice.count * 0.3)}
-                      strokeDasharray="8,4"
-                      opacity={0.5}
+                      strokeWidth={Math.min(4, 1 + ice.count * 0.4)}
+                      strokeDasharray="6,4"
+                      opacity={0.4}
+                      fill="none"
                     />
-                    <g transform={`translate(${midX}, ${midY})`}>
-                      <rect x={-12} y={-9} width={24} height={18} rx={9} fill="white" stroke="#94a3b8" strokeWidth={1} />
-                      <text textAnchor="middle" dy="4" fontSize={9} fontWeight={600} fill="#64748b" className="pointer-events-none">
+                    <g
+                      transform={`translate(${(srcC.cx + tgtC.cx) / 2}, ${(srcC.cy + tgtC.cy) / 2})`}
+                    >
+                      <rect
+                        x={-14}
+                        y={-10}
+                        width={28}
+                        height={20}
+                        rx={10}
+                        fill="white"
+                        stroke="#94a3b8"
+                        strokeWidth={1}
+                      />
+                      <text
+                        textAnchor="middle"
+                        dy="4"
+                        fontSize={10}
+                        fontWeight={600}
+                        fill="#64748b"
+                        className="pointer-events-none"
+                      >
                         {ice.count}
                       </text>
                     </g>
@@ -530,7 +930,6 @@ export function OntologyGraph({
                 );
               })}
 
-              {/* Cluster bubbles */}
               {clusters.map((cluster) => (
                 <g
                   key={`cluster-${cluster.key}`}
@@ -538,47 +937,48 @@ export function OntologyGraph({
                   onClick={(e) => {
                     e.stopPropagation();
                     setExpandedCluster(cluster.key);
-                    // Zoom to fit cluster
-                    setZoom(1.5);
-                    const containerW = containerRef.current?.clientWidth || 900;
-                    const containerH = containerRef.current?.clientHeight || 600;
-                    setPanX((containerW / 2 - cluster.cx) * 1.5);
-                    setPanY((containerH / 2 - cluster.cy) * 1.5);
+                    setZoom(1.3);
+                    const cW = containerRef.current?.clientWidth || 1200;
+                    const cH = containerRef.current?.clientHeight || 800;
+                    setPanX((cW / 2 - cluster.cx) * 1.3);
+                    setPanY((cH / 2 - cluster.cy) * 1.3);
                   }}
                 >
-                  {/* Cluster background circle */}
                   <circle
-                    cx={cluster.cx} cy={cluster.cy}
+                    cx={cluster.cx}
+                    cy={cluster.cy}
                     r={cluster.radius}
                     fill={cluster.color.bg}
                     stroke={cluster.color.border}
                     strokeWidth={2}
-                    opacity={0.6}
+                    opacity={0.5}
                   />
-                  {/* Cluster hover ring */}
                   <circle
-                    cx={cluster.cx} cy={cluster.cy}
+                    cx={cluster.cx}
+                    cy={cluster.cy}
                     r={cluster.radius}
                     fill="transparent"
                     stroke={cluster.color.border}
                     strokeWidth={0}
-                    className="hover:stroke-[3px] transition-all"
+                    opacity={0}
+                    className="hover:opacity-100 hover:stroke-[3px]"
+                    style={{ transition: "all 0.2s" }}
                   />
-                  {/* Mini node dots inside cluster */}
-                  {cluster.nodes.slice(0, 30).map((n, i) => (
+                  {cluster.nodes.slice(0, 30).map((n) => (
                     <circle
                       key={`dot-${n.id}`}
-                      cx={n.x} cy={n.y}
-                      r={3}
+                      cx={n.x}
+                      cy={n.y}
+                      r={4}
                       fill={cluster.color.border}
-                      opacity={0.4}
+                      opacity={0.35}
                     />
                   ))}
-                  {/* Cluster label */}
                   <text
-                    x={cluster.cx} y={cluster.cy - 8}
+                    x={cluster.cx}
+                    y={cluster.cy - 10}
                     textAnchor="middle"
-                    fontSize={14}
+                    fontSize={15}
                     fontWeight={700}
                     fill={cluster.color.text}
                     className="pointer-events-none"
@@ -586,141 +986,237 @@ export function OntologyGraph({
                     {cluster.key}
                   </text>
                   <text
-                    x={cluster.cx} y={cluster.cy + 10}
+                    x={cluster.cx}
+                    y={cluster.cy + 10}
                     textAnchor="middle"
-                    fontSize={11}
+                    fontSize={12}
                     fill={cluster.color.text}
-                    opacity={0.7}
+                    opacity={0.6}
                     className="pointer-events-none"
                   >
                     {cluster.nodes.length} concepts
                   </text>
                   <text
-                    x={cluster.cx} y={cluster.cy + 24}
+                    x={cluster.cx}
+                    y={cluster.cy + 26}
                     textAnchor="middle"
                     fontSize={10}
                     fill={cluster.color.border}
+                    opacity={0.8}
                     className="pointer-events-none"
                   >
-                    Click to expand →
+                    Click to explore
                   </text>
                 </g>
               ))}
             </>
           )}
 
-          {/* === DETAIL VIEW (Expanded cluster or small graph) === */}
-          {((!isLargeGraph) || expandedCluster) && (
+          {/* === DETAIL VIEW (Mind-map or expanded cluster) === */}
+          {(!isLargeGraph || expandedCluster) && (
             <>
-              {/* Edges */}
+              {/* Edges — curved bezier with gradient colors */}
               {visibleEdges.map((e) => {
                 const src = nodeMap.get(e.source_concept_id);
                 const tgt = nodeMap.get(e.target_concept_id);
                 if (!src || !tgt) return null;
-                const isConnected = selectedId === e.source_concept_id || selectedId === e.target_concept_id;
-                const path = edgePath(e);
+                const isConnected =
+                  selectedId === e.source_concept_id ||
+                  selectedId === e.target_concept_id;
+                const isHoverConnected =
+                  hoveredNodeId === e.source_concept_id ||
+                  hoveredNodeId === e.target_concept_id;
+                const path = getEdgePath(e);
                 if (!path) return null;
 
                 const midX = (src.x + tgt.x) / 2;
                 const midY = (src.y + tgt.y) / 2;
+                const relColor = getRelColor(e.relationship_type);
+                const active = isConnected || isHoverConnected;
 
                 return (
                   <g key={`edge-${e.id}`}>
                     <path
                       d={path}
-                      stroke={isConnected ? "#3b82f6" : "#d1d5db"}
-                      strokeWidth={isConnected ? 2.5 : 1.5}
+                      stroke={
+                        isConnected ? "#3b82f6" : active ? relColor : "#e2e8f0"
+                      }
+                      strokeWidth={active ? 2.5 : 1.5}
                       fill="none"
-                      markerEnd={`url(#arrow-${isConnected ? "selected" : "default"})`}
+                      opacity={active ? 1 : 0.6}
+                      markerEnd={`url(#arrow-${isConnected ? "active" : "mind"})`}
                       className="cursor-pointer"
-                      onClick={(ev) => { ev.stopPropagation(); onSelectEdge?.(e); }}
+                      style={{ transition: "all 0.15s" }}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        onSelectEdge?.(e);
+                      }}
                     />
-                    <g transform={`translate(${midX}, ${midY})`}>
-                      <rect
-                        x={-(e.relationship_type.length * 3.2 + 8)}
-                        y={-9}
-                        width={e.relationship_type.length * 6.4 + 16}
-                        height={18}
-                        rx={4}
-                        fill={isConnected ? "#eff6ff" : "#f9fafb"}
-                        stroke={isConnected ? "#93c5fd" : "#e5e7eb"}
-                        strokeWidth={0.5}
-                      />
-                      <text
-                        textAnchor="middle" dy="4"
-                        className="pointer-events-none select-none"
-                        fontSize={10} fontWeight={500}
-                        fill={isConnected ? "#2563eb" : "#6b7280"}
-                      >
-                        {e.relationship_type}
-                      </text>
-                    </g>
+                    {/* Relationship label — only show when connected or hovered */}
+                    {active && (
+                      <g transform={`translate(${midX}, ${midY})`}>
+                        <rect
+                          x={-(e.relationship_type.length * 3.2 + 10)}
+                          y={-10}
+                          width={e.relationship_type.length * 6.4 + 20}
+                          height={20}
+                          rx={10}
+                          fill="white"
+                          stroke={isConnected ? "#93c5fd" : relColor}
+                          strokeWidth={1}
+                          opacity={0.95}
+                        />
+                        <text
+                          textAnchor="middle"
+                          dy="4"
+                          className="pointer-events-none select-none"
+                          fontSize={10}
+                          fontWeight={500}
+                          fill={isConnected ? "#2563eb" : "#475569"}
+                        >
+                          {e.relationship_type}
+                        </text>
+                      </g>
+                    )}
                   </g>
                 );
               })}
 
-              {/* Nodes */}
+              {/* Nodes — Mind-map style pill cards */}
               {visibleNodes.map((n) => {
                 const color = getTypeColor(n.concept_type);
                 const isSelected = n.id === selectedId;
-                const textWidth = n.name.length * 7 + 24;
-                const nodeWidth = Math.max(90, textWidth);
-                const nodeHeight = 40;
+                const isHovered = n.id === hoveredNodeId;
+                const w = n.w;
+                const h = NODE_HEIGHT;
+                const displayName =
+                  n.name.length > 26
+                    ? n.name.substring(0, 24) + "..."
+                    : n.name;
+
                 return (
                   <g
                     key={`node-${n.id}`}
                     transform={`translate(${n.x}, ${n.y})`}
-                    onClick={(e) => { e.stopPropagation(); onSelectNode(n.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectNode(n.id);
+                    }}
+                    onMouseEnter={() => setHoveredNodeId(n.id)}
+                    onMouseLeave={() => setHoveredNodeId(null)}
                     className="cursor-pointer"
+                    style={{ transition: "transform 0.1s" }}
                   >
-                    {isSelected && (
-                      <rect
-                        x={-nodeWidth / 2 - 4} y={-nodeHeight / 2 - 4}
-                        width={nodeWidth + 8} height={nodeHeight + 8}
-                        rx={14} fill="none" stroke="#3b82f6" strokeWidth={2.5} opacity={0.6}
-                      />
-                    )}
+                    {/* Node card */}
                     <rect
-                      x={-nodeWidth / 2 + 2} y={-nodeHeight / 2 + 2}
-                      width={nodeWidth} height={nodeHeight}
-                      rx={10} fill="#00000008"
-                    />
-                    <rect
-                      x={-nodeWidth / 2} y={-nodeHeight / 2}
-                      width={nodeWidth} height={nodeHeight}
-                      rx={10}
-                      fill={color.bg}
+                      x={-w / 2}
+                      y={-h / 2}
+                      width={w}
+                      height={h}
+                      rx={NODE_RX}
+                      fill={`url(#grad-${color === TYPE_COLORS.Default ? "Default" : n.concept_type})`}
                       stroke={isSelected ? "#3b82f6" : color.border}
-                      strokeWidth={isSelected ? 2 : 1.5}
+                      strokeWidth={isSelected ? 2.5 : isHovered ? 2 : 1.2}
+                      filter={
+                        isSelected
+                          ? "url(#selected-glow)"
+                          : isHovered
+                            ? "url(#node-shadow-hover)"
+                            : "url(#node-shadow)"
+                      }
                     />
-                    {n.source_type && n.source_type !== "document" && (
-                      <g transform={`translate(${-nodeWidth / 2 + 10}, ${-nodeHeight / 2 + 11})`}>
-                        <rect x={-7} y={-7} width={14} height={14} rx={3}
-                          fill={n.source_type === "code" ? "#dcfce7" : "#e0e7ff"}
-                          stroke={n.source_type === "code" ? "#22c55e" : "#6366f1"}
+
+                    {/* Left color accent bar */}
+                    <rect
+                      x={-w / 2}
+                      y={-h / 2 + 6}
+                      width={4}
+                      height={h - 12}
+                      rx={2}
+                      fill={color.border}
+                      opacity={0.8}
+                    />
+
+                    {/* Source type badge */}
+                    {n.source_type && (
+                      <g
+                        transform={`translate(${w / 2 - 14}, ${-h / 2 + 12})`}
+                      >
+                        <circle
+                          r={7}
+                          fill={
+                            n.source_type === "code"
+                              ? "#dcfce7"
+                              : n.source_type === "document"
+                                ? "#dbeafe"
+                                : "#e0e7ff"
+                          }
+                          stroke={
+                            n.source_type === "code"
+                              ? "#22c55e"
+                              : n.source_type === "document"
+                                ? "#3b82f6"
+                                : "#6366f1"
+                          }
                           strokeWidth={1}
                         />
-                        <text textAnchor="middle" dy="4" fontSize={8} fontWeight={700}
-                          fill={n.source_type === "code" ? "#166534" : "#3730a3"}
-                          className="pointer-events-none select-none"
+                        <text
+                          textAnchor="middle"
+                          dy="3.5"
+                          fontSize={8}
+                          fontWeight={700}
+                          fill={
+                            n.source_type === "code"
+                              ? "#166534"
+                              : n.source_type === "document"
+                                ? "#1e40af"
+                                : "#3730a3"
+                          }
+                          className="pointer-events-none"
                         >
-                          {n.source_type === "code" ? "C" : "B"}
+                          {n.source_type === "code"
+                            ? "C"
+                            : n.source_type === "document"
+                              ? "D"
+                              : "B"}
                         </text>
                       </g>
                     )}
+
+                    {/* Confidence indicator */}
                     <circle
-                      cx={nodeWidth / 2 - 10} cy={-nodeHeight / 2 + 10} r={4}
-                      fill={n.confidence_score >= 0.8 ? "#22c55e" : n.confidence_score >= 0.5 ? "#f59e0b" : "#ef4444"}
+                      cx={-w / 2 + 14}
+                      cy={-h / 2 + 12}
+                      r={5}
+                      fill={
+                        n.confidence_score >= 0.8
+                          ? "#22c55e"
+                          : n.confidence_score >= 0.5
+                            ? "#fbbf24"
+                            : "#f87171"
+                      }
+                      opacity={0.8}
                     />
+
+                    {/* Name label */}
                     <text
-                      textAnchor="middle" dy="1" fontSize={12} fontWeight={600}
-                      fill={color.text} className="pointer-events-none select-none"
+                      textAnchor="middle"
+                      dy={n.source_type ? "1" : "-1"}
+                      fontSize={13}
+                      fontWeight={600}
+                      fill={color.text}
+                      className="pointer-events-none select-none"
                     >
-                      {n.name.length > 18 ? n.name.substring(0, 16) + "..." : n.name}
+                      {displayName}
                     </text>
+
+                    {/* Type sub-label */}
                     <text
-                      textAnchor="middle" dy="14" fontSize={9}
-                      fill={color.text} opacity={0.6}
+                      textAnchor="middle"
+                      dy={n.source_type ? "15" : "13"}
+                      fontSize={10}
+                      fill={color.text}
+                      opacity={0.55}
                       className="pointer-events-none select-none"
                     >
                       {n.concept_type}

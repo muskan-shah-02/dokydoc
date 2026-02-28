@@ -100,13 +100,23 @@ def onboard_repository(
     Does NOT trigger analysis — use POST /{id}/analyze for that.
     SPRINT 4: Optional initiative_id to auto-link repo to a project.
     """
-    # Dedup: prevent duplicate repos by URL
+    # Dedup: if repo with same URL exists, update its branch & return it (upsert)
     existing = crud.repository.get_by_url(db=db, url=obj_in.url, tenant_id=tenant_id)
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Repository with URL '{obj_in.url}' already exists (id={existing.id})"
-        )
+        update_fields = {}
+        if obj_in.default_branch and obj_in.default_branch != existing.default_branch:
+            update_fields["default_branch"] = obj_in.default_branch
+            logger.info(
+                f"Repository '{existing.name}' branch updated: "
+                f"{existing.default_branch} → {obj_in.default_branch}"
+            )
+        if obj_in.name and obj_in.name != existing.name:
+            update_fields["name"] = obj_in.name
+        if obj_in.description and obj_in.description != existing.description:
+            update_fields["description"] = obj_in.description
+        if update_fields:
+            crud.repository.update(db=db, db_obj=existing, obj_in=update_fields)
+        return existing
 
     repo = crud.repository.create_with_owner(
         db=db, obj_in=obj_in, owner_id=current_user.id, tenant_id=tenant_id

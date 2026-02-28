@@ -143,6 +143,10 @@ export default function CodePage() {
   const router = useRouter();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Scroll position preservation — prevent auto-scroll to top on polling re-renders
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const savedScrollRef = useRef<number>(0);
+
   // --- Data Fetching ---
 
   const fetchData = useCallback(async (showRefreshing = false) => {
@@ -186,11 +190,14 @@ export default function CodePage() {
     }
   }, []);
 
-  const fetchRepoComponents = useCallback(async (repoId: number) => {
+  const fetchRepoComponents = useCallback(async (repoId: number, isPolling = false) => {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
 
-    setLoadingRepoComponents((prev) => new Set(prev).add(repoId));
+    // Only show loading spinner on first load, not polling updates
+    if (!isPolling) {
+      setLoadingRepoComponents((prev) => new Set(prev).add(repoId));
+    }
     try {
       const res = await fetch(
         `http://localhost:8000/api/v1/repositories/${repoId}/components?limit=500`,
@@ -198,16 +205,30 @@ export default function CodePage() {
       );
       if (res.ok) {
         const data = await res.json();
+        // Preserve scroll position during polling updates
+        if (isPolling && scrollContainerRef.current) {
+          savedScrollRef.current = scrollContainerRef.current.scrollTop;
+        }
         setRepoComponents((prev) => ({ ...prev, [repoId]: data }));
+        // Restore scroll after React re-render
+        if (isPolling) {
+          requestAnimationFrame(() => {
+            if (scrollContainerRef.current) {
+              scrollContainerRef.current.scrollTop = savedScrollRef.current;
+            }
+          });
+        }
       }
     } catch (error) {
       console.error(`Failed to fetch components for repo ${repoId}:`, error);
     } finally {
-      setLoadingRepoComponents((prev) => {
-        const next = new Set(prev);
-        next.delete(repoId);
-        return next;
-      });
+      if (!isPolling) {
+        setLoadingRepoComponents((prev) => {
+          const next = new Set(prev);
+          next.delete(repoId);
+          return next;
+        });
+      }
     }
   }, []);
 
@@ -271,11 +292,21 @@ export default function CodePage() {
     }
     if (hasActiveAnalysis) {
       pollIntervalRef.current = setInterval(() => {
+        // Save scroll position before polling re-renders
+        if (scrollContainerRef.current) {
+          savedScrollRef.current = scrollContainerRef.current.scrollTop;
+        }
         fetchData();
         // Also refresh expanded repos so file-level progress updates live
         for (const repoId of expandedRepos) {
-          fetchRepoComponents(repoId);
+          fetchRepoComponents(repoId, true);
         }
+        // Restore scroll after data update
+        requestAnimationFrame(() => {
+          if (scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTop = savedScrollRef.current;
+          }
+        });
       }, 8000);
     }
     return () => {
@@ -427,6 +458,12 @@ export default function CodePage() {
 
   const [retryingAllRepo, setRetryingAllRepo] = useState<number | null>(null);
 
+  // --- Re-Analyze with File Selection ---
+  const [reanalyzeRepoId, setReanalyzeRepoId] = useState<number | null>(null);
+  const [reanalyzeSearch, setReanalyzeSearch] = useState("");
+  const [reanalyzeSelected, setReanalyzeSelected] = useState<Set<number>>(new Set());
+  const [reanalyzeSubmitting, setReanalyzeSubmitting] = useState(false);
+
   const handleRetryAllFailed = async (repoId: number, e: React.MouseEvent) => {
     e.stopPropagation();
     const token = localStorage.getItem("accessToken");
@@ -454,6 +491,55 @@ export default function CodePage() {
       console.error("Failed to retry all:", error);
     } finally {
       setRetryingAllRepo(null);
+    }
+  };
+
+  // --- Re-Analyze Selected Files ---
+
+  const openReanalyzeDialog = (repoId: number) => {
+    const comps = repoComponents[repoId] || [];
+    setReanalyzeRepoId(repoId);
+    setReanalyzeSearch("");
+    // Select all files by default
+    setReanalyzeSelected(new Set(comps.map((c) => c.id)));
+  };
+
+  const handleReanalyze = async () => {
+    if (!reanalyzeRepoId || reanalyzeSelected.size === 0) return;
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setReanalyzeSubmitting(true);
+    try {
+      // Get the selected component IDs and build file_list for the analyze endpoint
+      const comps = repoComponents[reanalyzeRepoId] || [];
+      const selectedComps = comps.filter((c) => reanalyzeSelected.has(c.id));
+      const fileList = selectedComps.map((c) => ({
+        path: c.location || c.name,
+        url: c.location || "",
+        language: "",
+      }));
+
+      // Reset selected components to pending first
+      for (const comp of selectedComps) {
+        await fetch(`http://localhost:8000/api/v1/code-components/${comp.id}/retry`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+
+      setSuccessMessage(`Re-analyzing ${selectedComps.length} files. Progress will update live.`);
+      setTimeout(() => setSuccessMessage(null), 6000);
+      setReanalyzeRepoId(null);
+      fetchData(true);
+      if (expandedRepos.has(reanalyzeRepoId)) {
+        fetchRepoComponents(reanalyzeRepoId);
+      }
+    } catch (error) {
+      console.error("Failed to trigger re-analysis:", error);
+      setSubmissionError("Failed to trigger re-analysis");
+      setTimeout(() => setSubmissionError(null), 5000);
+    } finally {
+      setReanalyzeSubmitting(false);
     }
   };
 
@@ -508,7 +594,7 @@ export default function CodePage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div ref={scrollContainerRef} className="p-6 space-y-6 h-full overflow-y-auto">
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div className="flex items-center space-x-3">
@@ -896,22 +982,33 @@ export default function CodePage() {
                                     <span className="font-mono text-green-700">Total: &#8377;{totalCost.toFixed(2)}</span>
                                   )}
                                 </div>
-                                {failedCount > 0 && (
+                                <div className="flex items-center gap-2">
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    className="h-6 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50"
-                                    disabled={retryingAllRepo === repo.id}
-                                    onClick={(e) => handleRetryAllFailed(repo.id, e)}
+                                    className="h-6 px-2 text-xs border-blue-200 text-blue-600 hover:bg-blue-50"
+                                    onClick={(e) => { e.stopPropagation(); openReanalyzeDialog(repo.id); }}
                                   >
-                                    {retryingAllRepo === repo.id ? (
-                                      <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                                    ) : (
-                                      <RefreshCw className="w-3 h-3 mr-1" />
-                                    )}
-                                    Retry All Failed ({failedCount})
+                                    <Filter className="w-3 h-3 mr-1" />
+                                    Re-Analyze
                                   </Button>
-                                )}
+                                  {failedCount > 0 && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50"
+                                      disabled={retryingAllRepo === repo.id}
+                                      onClick={(e) => handleRetryAllFailed(repo.id, e)}
+                                    >
+                                      {retryingAllRepo === repo.id ? (
+                                        <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                      ) : (
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                      )}
+                                      Retry All Failed ({failedCount})
+                                    </Button>
+                                  )}
+                                </div>
                               </div>
 
                               {/* Detailed Stats Panel (from backend) */}
@@ -963,10 +1060,22 @@ export default function CodePage() {
                                   </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                  {components.map((comp, idx) => (
+                                  {/* Sort: processing → pending → failed → completed for visibility */}
+                                  {[...components].sort((a, b) => {
+                                    const order: Record<string, number> = { processing: 0, pending: 1, failed: 2, completed: 3, redirected: 3 };
+                                    return (order[a.analysis_status] ?? 2) - (order[b.analysis_status] ?? 2);
+                                  }).map((comp, idx) => (
                                     <TableRow
                                       key={comp.id}
-                                      className={`hover:bg-muted/30 ${comp.analysis_status === "failed" ? "bg-red-50/50" : ""}`}
+                                      className={`hover:bg-muted/30 ${
+                                        comp.analysis_status === "processing"
+                                          ? "bg-blue-50/70 dark:bg-blue-950/30 border-l-2 border-l-blue-500"
+                                          : comp.analysis_status === "pending"
+                                            ? "bg-amber-50/50 dark:bg-amber-950/20 border-l-2 border-l-amber-400"
+                                            : comp.analysis_status === "failed"
+                                              ? "bg-red-50/50 dark:bg-red-950/20 border-l-2 border-l-red-400"
+                                              : ""
+                                      }`}
                                     >
                                       <TableCell className="text-center text-xs text-muted-foreground font-mono">
                                         {idx + 1}
@@ -1091,6 +1200,127 @@ export default function CodePage() {
       </Card>
 
       {/* Standalone Components (no repository) */}
+      {/* Re-Analyze Dialog — Excel-style file selection */}
+      {reanalyzeRepoId !== null && (() => {
+        const comps = repoComponents[reanalyzeRepoId] || [];
+        const filtered = comps.filter(
+          (c) => !reanalyzeSearch || c.name.toLowerCase().includes(reanalyzeSearch.toLowerCase())
+        );
+        const allFilteredSelected = filtered.length > 0 && filtered.every((c) => reanalyzeSelected.has(c.id));
+        return (
+          <Dialog open={true} onOpenChange={(open) => { if (!open) setReanalyzeRepoId(null); }}>
+            <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Filter className="w-4 h-4" />
+                  Select Files to Re-Analyze
+                </DialogTitle>
+              </DialogHeader>
+              <div className="flex items-center gap-2 px-1">
+                <div className="relative flex-1">
+                  <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
+                  <Input
+                    placeholder="Search files..."
+                    value={reanalyzeSearch}
+                    onChange={(e) => setReanalyzeSearch(e.target.value)}
+                    className="pl-8 h-8 text-sm"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs whitespace-nowrap"
+                  onClick={() => {
+                    if (allFilteredSelected) {
+                      // Deselect all filtered
+                      setReanalyzeSelected((prev) => {
+                        const next = new Set(prev);
+                        filtered.forEach((c) => next.delete(c.id));
+                        return next;
+                      });
+                    } else {
+                      // Select all filtered
+                      setReanalyzeSelected((prev) => {
+                        const next = new Set(prev);
+                        filtered.forEach((c) => next.add(c.id));
+                        return next;
+                      });
+                    }
+                  }}
+                >
+                  {allFilteredSelected ? "Deselect All" : "Select All"}
+                </Button>
+              </div>
+              <div className="text-xs text-muted-foreground px-1">
+                {reanalyzeSelected.size} of {comps.length} files selected
+              </div>
+              <div className="flex-1 overflow-y-auto border rounded-md max-h-[50vh]">
+                {filtered.length === 0 ? (
+                  <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                    No files match your search
+                  </div>
+                ) : (
+                  <div className="divide-y">
+                    {filtered.map((comp) => {
+                      const isChecked = reanalyzeSelected.has(comp.id);
+                      return (
+                        <label
+                          key={comp.id}
+                          className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors ${
+                            isChecked ? "bg-blue-50/50 dark:bg-blue-950/20" : ""
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              setReanalyzeSelected((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(comp.id)) next.delete(comp.id);
+                                else next.add(comp.id);
+                                return next;
+                              });
+                            }}
+                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm truncate">{comp.name}</div>
+                            <div className="text-[10px] text-muted-foreground truncate">
+                              {comp.location}
+                            </div>
+                          </div>
+                          <div className="flex-shrink-0">
+                            {getStatusBadge(comp.analysis_status)}
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" size="sm" onClick={() => setReanalyzeRepoId(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  className="bg-blue-600 hover:bg-blue-700"
+                  disabled={reanalyzeSelected.size === 0 || reanalyzeSubmitting}
+                  onClick={handleReanalyze}
+                >
+                  {reanalyzeSubmitting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                  )}
+                  Re-Analyze {reanalyzeSelected.size} Files
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
+
       {filteredStandalone.length > 0 && (
         <Card>
           <CardHeader>
