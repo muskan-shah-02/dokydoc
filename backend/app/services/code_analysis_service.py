@@ -522,6 +522,7 @@ class CodeAnalysisService(LoggerMixin):
                     structured_analysis=analysis_result.get("structured_analysis", {}),
                     component_name=component.name,
                     tenant_id=tenant_id,
+                    source_component_id=component.id,
                 )
             except Exception as e:
                 self.logger.warning(f"Ontology extraction failed (non-fatal): {e}")
@@ -571,7 +572,8 @@ class CodeAnalysisService(LoggerMixin):
     }
 
     def _extract_ontology_from_analysis(
-        self, db, structured_analysis: dict, component_name: str, tenant_id: int
+        self, db, structured_analysis: dict, component_name: str, tenant_id: int,
+        source_component_id: int = None,
     ) -> None:
         """
         Extract ontology concepts AND relationships from code analysis results.
@@ -615,6 +617,7 @@ class CodeAnalysisService(LoggerMixin):
                 description=description[:500] if description else None,
                 confidence_score=0.75,
                 source_type="code",
+                source_component_id=source_component_id,
             )
             concept_map[name] = concept
             created_count += 1
@@ -631,6 +634,7 @@ class CodeAnalysisService(LoggerMixin):
                 description=f"Architectural concept from code: {component_name}",
                 confidence_score=0.65,
                 source_type="code",
+                source_component_id=source_component_id,
             )
             concept_map[concept_name.strip()] = concept
             created_count += 1

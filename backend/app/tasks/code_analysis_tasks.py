@@ -293,6 +293,7 @@ def static_analysis_worker(
                     db, structured_analysis=new_analysis,
                     component_name=file_path or component.name,
                     tenant_id=tenant_id,
+                    source_component_id=component.id,
                 )
             except Exception as onto_err:
                 logger.warning(f"Inline ontology extraction failed (non-critical): {onto_err}")

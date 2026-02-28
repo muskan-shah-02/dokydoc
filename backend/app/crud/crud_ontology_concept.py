@@ -12,7 +12,8 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
     def get_or_create(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
         description: str = None, confidence_score: float = None,
-        source_type: str = "document", initiative_id: int = None
+        source_type: str = "document", initiative_id: int = None,
+        source_component_id: int = None,
     ) -> OntologyConcept:
         """
         Idempotent concept creation within a SINGLE source layer.
@@ -58,6 +59,11 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
                 existing.confidence_score = confidence_score
                 db.commit()
                 db.refresh(existing)
+            # Backfill source_component_id if not set
+            if source_component_id and not existing.source_component_id:
+                existing.source_component_id = source_component_id
+                db.commit()
+                db.refresh(existing)
             return existing
 
         db_obj = self.model(
@@ -67,7 +73,8 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             confidence_score=confidence_score,
             source_type=source_type,
             tenant_id=tenant_id,
-            initiative_id=initiative_id
+            initiative_id=initiative_id,
+            source_component_id=source_component_id,
         )
         db.add(db_obj)
         db.commit()
@@ -225,6 +232,17 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
                 )
             )
         return query.count()
+
+
+    def get_by_component(
+        self, db: Session, *, component_id: int, tenant_id: int
+    ) -> List[OntologyConcept]:
+        """Get all concepts linked to a specific code component (file-level subgraph)."""
+        return db.query(self.model).filter(
+            self.model.source_component_id == component_id,
+            self.model.tenant_id == tenant_id,
+            self.model.is_active == True,
+        ).all()
 
 
 ontology_concept = CRUDOntologyConcept(OntologyConcept)

@@ -479,6 +479,71 @@ def get_code_graph(
 
 
 # ============================================================
+# PER-FILE SUBGRAPH ENDPOINT
+# ============================================================
+
+@router.get("/graph/component/{component_id}")
+def get_component_subgraph(
+    component_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get the subgraph for a specific code component (file).
+    Returns concepts created from this file and their inter-relationships.
+    """
+    concepts = crud.ontology_concept.get_by_component(
+        db=db, component_id=component_id, tenant_id=tenant_id
+    )
+    if not concepts:
+        return {"nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0}
+
+    concept_ids = {c.id for c in concepts}
+    nodes = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "concept_type": c.concept_type,
+            "source_type": c.source_type,
+            "confidence_score": c.confidence_score or 0,
+        }
+        for c in concepts
+    ]
+
+    # Get relationships between these concepts
+    from app.models.ontology_relationship import OntologyRelationship
+    from sqlalchemy import or_
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all()
+
+    edges = [
+        {
+            "id": r.id,
+            "source_concept_id": r.source_concept_id,
+            "target_concept_id": r.target_concept_id,
+            "relationship_type": r.relationship_type,
+            "confidence_score": r.confidence_score or 0,
+        }
+        for r in rels
+        if r.source_concept_id in concept_ids or r.target_concept_id in concept_ids
+    ]
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "component_id": component_id,
+    }
+
+
+# ============================================================
 # CONCEPT MAPPING ENDPOINTS (SPRINT 4 — Cross-Graph)
 # ============================================================
 

@@ -121,6 +121,7 @@ export default function CodePage() {
   const [expandedRepos, setExpandedRepos] = useState<Set<number>>(new Set());
   const [repoComponents, setRepoComponents] = useState<Record<number, CodeComponent[]>>({});
   const [loadingRepoComponents, setLoadingRepoComponents] = useState<Set<number>>(new Set());
+  const [repoStats, setRepoStats] = useState<Record<number, any>>({});
 
   // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
@@ -210,6 +211,24 @@ export default function CodePage() {
     }
   }, []);
 
+  // --- Fetch Repo Stats ---
+
+  const fetchRepoStats = useCallback(async (repoId: number) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/stats`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRepoStats((prev) => ({ ...prev, [repoId]: data }));
+      }
+    } catch (error) {
+      console.error(`Failed to fetch stats for repo ${repoId}:`, error);
+    }
+  }, []);
+
   // --- Expand/Collapse ---
 
   const toggleRepo = useCallback(
@@ -224,11 +243,15 @@ export default function CodePage() {
           if (!repoComponents[repoId]) {
             fetchRepoComponents(repoId);
           }
+          // Fetch stats for expanded repo
+          if (!repoStats[repoId]) {
+            fetchRepoStats(repoId);
+          }
         }
         return next;
       });
     },
-    [repoComponents, fetchRepoComponents]
+    [repoComponents, fetchRepoComponents, repoStats, fetchRepoStats]
   );
 
   // Check if any repo is actively being analyzed
@@ -773,7 +796,13 @@ export default function CodePage() {
                           <FolderGit2 className="w-5 h-5 text-blue-500 flex-shrink-0" />
                           <div className="flex-1 min-w-0">
                             <div className="font-medium truncate">{repo.name}</div>
-                            <div className="text-xs text-muted-foreground truncate">{repo.url}</div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span className="truncate">{repo.url}</span>
+                              <span className="inline-flex items-center gap-0.5 bg-slate-100 dark:bg-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] flex-shrink-0">
+                                <GitBranch className="w-2.5 h-2.5" />
+                                {repo.default_branch}
+                              </span>
+                            </div>
                           </div>
                         </button>
                       </CollapsibleTrigger>
@@ -885,11 +914,48 @@ export default function CodePage() {
                                 )}
                               </div>
 
+                              {/* Detailed Stats Panel (from backend) */}
+                              {repoStats[repo.id] && (() => {
+                                const stats = repoStats[repo.id];
+                                return (
+                                  <div className="rounded-md border bg-slate-50/50 dark:bg-slate-950/50 p-3 space-y-2">
+                                    <div className="flex items-center gap-4 flex-wrap text-xs">
+                                      {stats.services_count > 0 && (
+                                        <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 rounded-full px-2 py-0.5 font-medium">
+                                          Services: {stats.services_count}
+                                        </span>
+                                      )}
+                                      {stats.endpoints_count > 0 && (
+                                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 rounded-full px-2 py-0.5 font-medium">
+                                          Endpoints: {stats.endpoints_count}
+                                        </span>
+                                      )}
+                                      {stats.models_count > 0 && (
+                                        <span className="inline-flex items-center gap-1 bg-purple-100 text-purple-800 rounded-full px-2 py-0.5 font-medium">
+                                          Models: {stats.models_count}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {stats.extension_breakdown?.length > 0 && (
+                                      <div className="flex items-center gap-2 flex-wrap text-[11px] text-muted-foreground">
+                                        <span className="font-medium text-foreground">Files:</span>
+                                        {stats.extension_breakdown.slice(0, 8).map((ext: any) => (
+                                          <span key={ext.ext} className="bg-muted rounded px-1.5 py-0.5 font-mono">
+                                            {ext.ext}: {ext.count}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+
                               <Table>
                                 <TableHeader>
                                   <TableRow>
                                     <TableHead className="w-12 text-center">#</TableHead>
                                     <TableHead>File</TableHead>
+                                    <TableHead>Version</TableHead>
                                     <TableHead>Status</TableHead>
                                     <TableHead className="text-right">Duration</TableHead>
                                     <TableHead className="text-right">Cost</TableHead>
@@ -948,6 +1014,15 @@ export default function CodePage() {
                                             })()}
                                           </div>
                                         </div>
+                                      </TableCell>
+                                      <TableCell className="text-xs font-mono text-muted-foreground">
+                                        {comp.version ? (
+                                          <span title={comp.version}>
+                                            {comp.version.length > 8 ? comp.version.slice(0, 7) + "…" : comp.version}
+                                          </span>
+                                        ) : (
+                                          <span className="text-gray-400">—</span>
+                                        )}
                                       </TableCell>
                                       <TableCell>
                                         <div className="flex items-center gap-1.5">
