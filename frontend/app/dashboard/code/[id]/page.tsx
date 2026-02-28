@@ -34,12 +34,16 @@ import {
   Trash2,
   IndianRupee,
   Cpu,
+  Network,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 // --- NEW: Import our specialized analysis view components ---
 import { RepositoryAnalysisView } from "@/components/analysis/RepositoryAnalysisView";
 import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
+import { OntologyGraph } from "@/components/ontology/OntologyGraph";
+import { api } from "@/lib/api";
 
 interface CodeComponentDetail {
   id: number;
@@ -65,6 +69,34 @@ export default function CodeComponentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
+  const [domainData, setDomainData] = useState<any>(null);
+  const [systemData, setSystemData] = useState<any>(null);
+
+  const fetchGraph = async (compId: string) => {
+    setGraphLoading(true);
+    try {
+      const data = await api.get<any>(`/ontology/graph/component/${compId}`);
+      setGraphData(data);
+    } catch { setGraphData(null); }
+    finally { setGraphLoading(false); }
+  };
+
+  const fetchDomainGraph = async (repoId: number) => {
+    try {
+      const data = await api.get<any>(`/ontology/graph/domain/${repoId}`);
+      setDomainData(data);
+    } catch { setDomainData(null); }
+  };
+
+  const fetchSystemGraph = async (repoId: number) => {
+    try {
+      const data = await api.get<any>(`/ontology/graph/system/${repoId}`);
+      setSystemData(data);
+    } catch { setSystemData(null); }
+  };
 
   const getStatusIcon = (status: CodeComponentDetail["analysis_status"]) => {
     switch (status) {
@@ -285,42 +317,175 @@ export default function CodeComponentDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Cost Summary */}
-      {component.ai_cost_inr != null && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center">
-              <IndianRupee className="w-5 h-5 mr-2 text-green-600" />
-              Analysis Cost
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-3 gap-4">
-              <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-center">
-                <p className="text-sm text-muted-foreground">Total Cost</p>
-                <p className="text-2xl font-bold text-green-700 dark:text-green-400">
-                  ₹{component.ai_cost_inr.toFixed(2)}
-                </p>
-              </div>
-              <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-center">
-                <p className="text-sm text-muted-foreground">Input Tokens</p>
-                <p className="text-2xl font-bold text-blue-700 dark:text-blue-400">
-                  {component.token_count_input?.toLocaleString() || "—"}
-                </p>
-              </div>
-              <div className="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-center">
-                <p className="text-sm text-muted-foreground">Output Tokens</p>
-                <p className="text-2xl font-bold text-purple-700 dark:text-purple-400">
-                  {component.token_count_output?.toLocaleString() || "—"}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <Tabs defaultValue="analysis" className="space-y-4" onValueChange={(v) => {
+        if (v === "graph" && !graphData && id) fetchGraph(String(id));
+        if (v === "domains" && !domainData && component?.component_type === "Repository")
+          fetchDomainGraph(Number(id));
+        if (v === "system" && !systemData && component?.component_type === "Repository")
+          fetchSystemGraph(Number(id));
+      }}>
+        <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start">
+          <TabsTrigger value="analysis" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6">
+            <Cpu className="w-4 h-4 mr-2" /> Analysis
+          </TabsTrigger>
+          <TabsTrigger value="graph" className="data-[state=active]:bg-purple-50 data-[state=active]:text-purple-700 h-10 px-6">
+            <Network className="w-4 h-4 mr-2" /> Knowledge Graph
+          </TabsTrigger>
+          {component.component_type === "Repository" && (
+            <>
+              <TabsTrigger value="domains" className="data-[state=active]:bg-green-50 data-[state=active]:text-green-700 h-10 px-6">
+                <Network className="w-4 h-4 mr-2" /> Domain Map
+              </TabsTrigger>
+              <TabsTrigger value="system" className="data-[state=active]:bg-amber-50 data-[state=active]:text-amber-700 h-10 px-6">
+                <Cpu className="w-4 h-4 mr-2" /> System Architecture
+              </TabsTrigger>
+            </>
+          )}
+        </TabsList>
 
-      {/* --- RENDER THE INTELLIGENT ANALYSIS COMPONENT --- */}
-      <AnalysisResult />
+        <TabsContent value="analysis" className="space-y-6">
+          {/* Cost Summary */}
+          {component.ai_cost_inr != null && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center">
+                  <IndianRupee className="w-5 h-5 mr-2 text-green-600" />
+                  Analysis Cost
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-center">
+                    <p className="text-sm text-muted-foreground">Total Cost</p>
+                    <p className="text-2xl font-bold text-green-700 dark:text-green-400">
+                      ₹{component.ai_cost_inr.toFixed(2)}
+                    </p>
+                  </div>
+                  <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-center">
+                    <p className="text-sm text-muted-foreground">Input Tokens</p>
+                    <p className="text-2xl font-bold text-blue-700 dark:text-blue-400">
+                      {component.token_count_input?.toLocaleString() || "—"}
+                    </p>
+                  </div>
+                  <div className="p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg text-center">
+                    <p className="text-sm text-muted-foreground">Output Tokens</p>
+                    <p className="text-2xl font-bold text-purple-700 dark:text-purple-400">
+                      {component.token_count_output?.toLocaleString() || "—"}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          <AnalysisResult />
+        </TabsContent>
+
+        <TabsContent value="graph">
+          {graphLoading ? (
+            <div className="flex items-center justify-center h-64">
+              <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading knowledge graph...</span>
+            </div>
+          ) : graphData && graphData.nodes.length > 0 ? (
+            <OntologyGraph nodes={graphData.nodes} edges={graphData.edges}
+              selectedId={graphSelectedId} onSelectNode={setGraphSelectedId} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+              <Network className="w-12 h-12 mb-3" />
+              <p className="text-sm font-medium">No concepts extracted yet</p>
+              <p className="text-xs mt-1">Concepts appear after analysis + BOE extraction</p>
+            </div>
+          )}
+        </TabsContent>
+
+        {component.component_type === "Repository" && (
+          <>
+            <TabsContent value="domains">
+              {domainData && domainData.nodes.length > 0 ? (
+                <div className="space-y-4">
+                  <div className="flex gap-2 flex-wrap">
+                    {domainData.domains.map((d: any) => (
+                      <span key={d.name} className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200">
+                        {d.name} ({d.concept_count} concepts, {d.file_count} files)
+                      </span>
+                    ))}
+                  </div>
+                  <OntologyGraph
+                    nodes={domainData.nodes.map((n: any) => ({ ...n, concept_type: n.domain || n.concept_type }))}
+                    edges={domainData.edges}
+                    selectedId={graphSelectedId}
+                    onSelectNode={setGraphSelectedId}
+                  />
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                  <Network className="w-12 h-12 mb-3" />
+                  <p className="text-sm font-medium">No domain data available</p>
+                  <p className="text-xs mt-1">Analyze files in this repository first</p>
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="system">
+              {systemData && systemData.system_nodes.length > 0 ? (
+                <div className="space-y-4">
+                  {systemData.synthesis_summary && (
+                    <Card>
+                      <CardHeader><CardTitle className="text-sm">System Summary</CardTitle></CardHeader>
+                      <CardContent><p className="text-sm text-muted-foreground">{systemData.synthesis_summary}</p></CardContent>
+                    </Card>
+                  )}
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {systemData.system_nodes.map((sn: any) => (
+                      <Card key={sn.domain_name} className="hover:shadow-md transition-shadow cursor-pointer">
+                        <CardContent className="p-4">
+                          <h3 className="font-semibold text-sm truncate">{sn.domain_name}</h3>
+                          <div className="flex gap-3 mt-2 text-xs text-muted-foreground">
+                            <span>{sn.file_count} files</span>
+                            <span>{sn.concept_count} concepts</span>
+                          </div>
+                          {sn.key_concepts.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {sn.key_concepts.slice(0, 3).map((kc: string) => (
+                                <span key={kc} className="text-[10px] px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded">
+                                  {kc.length > 20 ? kc.slice(0, 18) + "…" : kc}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                  {systemData.system_edges.length > 0 && (
+                    <Card>
+                      <CardHeader><CardTitle className="text-sm">Cross-Domain Relationships</CardTitle></CardHeader>
+                      <CardContent>
+                        <div className="space-y-1">
+                          {systemData.system_edges.map((e: any, i: number) => (
+                            <div key={i} className="flex items-center gap-2 text-xs">
+                              <span className="font-medium text-blue-700">{e.source_domain}</span>
+                              <span className="text-gray-400">→</span>
+                              <span className="font-medium text-blue-700">{e.target_domain}</span>
+                              <span className="text-gray-500">({e.relationship_count} relationships)</span>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                  <Cpu className="w-12 h-12 mb-3" />
+                  <p className="text-sm font-medium">No system architecture data</p>
+                  <p className="text-xs mt-1">Analyze files in this repository first</p>
+                </div>
+              )}
+            </TabsContent>
+          </>
+        )}
+      </Tabs>
     </div>
   );
 }

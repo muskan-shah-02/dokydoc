@@ -15,9 +15,12 @@ import {
   RefreshCw,
   X,
   ExternalLink,
+  GitCompare,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useProject, Initiative } from "@/contexts/ProjectContext";
+import { CrossGraphView } from "@/components/ontology/CrossGraphView";
+import { GapAnalysis } from "@/components/ontology/GapAnalysis";
 
 interface InitiativeAsset {
   id: number;
@@ -65,6 +68,12 @@ export default function ProjectDetailPage() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  // Alignment (Level 4)
+  const [alignmentData, setAlignmentData] = useState<any>(null);
+  const [alignmentLoading, setAlignmentLoading] = useState(false);
+  const [alignmentOpen, setAlignmentOpen] = useState(false);
+  const [selectedMappingId, setSelectedMappingId] = useState<number | null>(null);
 
   // For linking assets
   const [showLinkDialog, setShowLinkDialog] = useState(false);
@@ -139,6 +148,20 @@ export default function ProjectDetailPage() {
       }
     } catch { /* ignore */ }
   };
+
+  const fetchAlignment = useCallback(async () => {
+    if (alignmentData) return; // already loaded
+    setAlignmentLoading(true);
+    try {
+      const data = await api.get<any>(`/ontology/graph/alignment/${projectId}`);
+      setAlignmentData(data);
+    } catch {
+      // endpoint may return empty — that's ok
+      setAlignmentData({ document_nodes: [], code_nodes: [], mapping_edges: [], gaps: null });
+    } finally {
+      setAlignmentLoading(false);
+    }
+  }, [projectId, alignmentData]);
 
   const handleLinkAsset = async (assetId: number) => {
     setLinking(true);
@@ -372,6 +395,58 @@ export default function ProjectDetailPage() {
             <p className="text-xs text-gray-500">View repositories and code components</p>
           </div>
         </button>
+      </div>
+
+      {/* Doc ↔ Code Alignment (Level 4) */}
+      <div className="mt-6 rounded-lg border bg-white">
+        <button
+          onClick={() => {
+            const next = !alignmentOpen;
+            setAlignmentOpen(next);
+            if (next) fetchAlignment();
+          }}
+          className="flex w-full items-center justify-between border-b px-5 py-3 text-left"
+        >
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+            <GitCompare className="h-4 w-4 text-indigo-500" /> Doc ↔ Code Alignment
+          </h2>
+          <span className="text-xs text-gray-400">{alignmentOpen ? "Collapse" : "Expand"}</span>
+        </button>
+        {alignmentOpen && (
+          <div className="p-5">
+            {alignmentLoading ? (
+              <div className="flex h-40 items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-indigo-600" />
+                <p className="ml-2 text-sm text-gray-500">Loading alignment data...</p>
+              </div>
+            ) : alignmentData && (alignmentData.document_nodes?.length > 0 || alignmentData.code_nodes?.length > 0) ? (
+              <>
+                {/* Gap Analysis Summary */}
+                {alignmentData.gaps && (
+                  <div className="mb-4">
+                    <GapAnalysis data={alignmentData.gaps} loading={false} />
+                  </div>
+                )}
+                {/* Cross Graph View */}
+                <div className="rounded-lg border" style={{ height: "500px" }}>
+                  <CrossGraphView
+                    documentNodes={alignmentData.document_nodes || []}
+                    codeNodes={alignmentData.code_nodes || []}
+                    mappings={alignmentData.mapping_edges || []}
+                    selectedMappingId={selectedMappingId}
+                    onSelectMapping={setSelectedMappingId}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="flex h-40 flex-col items-center justify-center text-gray-400">
+                <GitCompare className="mb-2 h-8 w-8" />
+                <p className="text-sm">No alignment data yet</p>
+                <p className="mt-1 text-xs">Link documents and repositories, then analyze them to see doc ↔ code alignment</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Link Asset Dialog */}

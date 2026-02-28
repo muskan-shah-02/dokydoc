@@ -1,0 +1,528 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  BrainCircuit,
+  Network,
+  FileText,
+  GitBranch,
+  Loader2,
+  AlertCircle,
+  ArrowLeft,
+  Layers,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import { MetaGraphView } from "@/components/ontology/MetaGraphView";
+import { OntologyGraph } from "@/components/ontology/OntologyGraph";
+import {
+  BrainBreadcrumb,
+  BreadcrumbSegment,
+} from "@/components/ontology/BrainBreadcrumb";
+
+// --- Types ---
+
+interface BrainStats {
+  total_projects: number;
+  total_concepts: number;
+  total_mappings: number;
+  coverage_pct: number;
+}
+
+interface MetaGraphData {
+  nodes: any[];
+  intra_edges: any[];
+  cross_edges: any[];
+  total_nodes: number;
+  total_intra_edges: number;
+  total_cross_edges: number;
+  projects: { id: number; name: string }[];
+}
+
+interface DrillState {
+  level: 5 | 3 | 2 | 1;
+  projectId?: number;
+  projectName?: string;
+  repoId?: number;
+  domainName?: string;
+  componentId?: number;
+  componentName?: string;
+}
+
+export default function BrainDashboardPage() {
+  const router = useRouter();
+
+  const [metaData, setMetaData] = useState<MetaGraphData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [stats, setStats] = useState<BrainStats>({
+    total_projects: 0,
+    total_concepts: 0,
+    total_mappings: 0,
+    coverage_pct: 0,
+  });
+
+  // Drill-down state
+  const [drill, setDrill] = useState<DrillState>({ level: 5 });
+  const [drillData, setDrillData] = useState<any>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
+
+  // Fetch top-level meta-graph (Level 5)
+  const fetchMetaGraph = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [meta, brainRes] = await Promise.all([
+        api.get<MetaGraphData>("/ontology/meta-graph"),
+        api.get<any>("/ontology/graph/brain"),
+      ]);
+      setMetaData(meta);
+      setStats({
+        total_projects: meta.projects?.length ?? 0,
+        total_concepts: meta.total_nodes ?? 0,
+        total_mappings:
+          (meta.total_intra_edges ?? 0) + (meta.total_cross_edges ?? 0),
+        coverage_pct: brainRes.coverage_pct ?? 0,
+      });
+      setError("");
+    } catch (err: any) {
+      setError(err.detail || "Failed to load brain data");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMetaGraph();
+  }, [fetchMetaGraph]);
+
+  // Drill into a level
+  const drillInto = useCallback(
+    async (next: DrillState) => {
+      setDrill(next);
+      if (next.level === 5) {
+        setDrillData(null);
+        return;
+      }
+      setDrillLoading(true);
+      try {
+        let data: any;
+        if (next.level === 3 && next.repoId) {
+          data = await api.get<any>(
+            `/ontology/graph/system/${next.repoId}`
+          );
+        } else if (next.level === 2 && next.repoId) {
+          data = await api.get<any>(
+            `/ontology/graph/domain/${next.repoId}`
+          );
+        } else if (next.level === 1 && next.componentId) {
+          data = await api.get<any>(
+            `/ontology/graph/component/${next.componentId}`
+          );
+        }
+        setDrillData(data);
+      } catch {
+        setDrillData(null);
+      } finally {
+        setDrillLoading(false);
+      }
+    },
+    []
+  );
+
+  // Build breadcrumb segments
+  const buildBreadcrumb = (): BreadcrumbSegment[] => {
+    const segs: BreadcrumbSegment[] = [
+      {
+        label: "Brain",
+        level: 5,
+        onClick: () => drillInto({ level: 5 }),
+      },
+    ];
+    if (drill.level <= 3 && drill.projectName) {
+      segs.push({
+        label: drill.projectName,
+        level: 3,
+        onClick: () =>
+          drillInto({
+            level: 3,
+            projectId: drill.projectId,
+            projectName: drill.projectName,
+            repoId: drill.repoId,
+          }),
+      });
+    }
+    if (drill.level <= 2 && drill.domainName) {
+      segs.push({
+        label: drill.domainName,
+        level: 2,
+        onClick: () =>
+          drillInto({
+            level: 2,
+            projectId: drill.projectId,
+            projectName: drill.projectName,
+            repoId: drill.repoId,
+            domainName: drill.domainName,
+          }),
+      });
+    }
+    if (drill.level === 1 && drill.componentName) {
+      segs.push({ label: drill.componentName, level: 1 });
+    }
+    return segs;
+  };
+
+  // --- Render ---
+
+  if (loading) {
+    return (
+      <div className="flex h-96 items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
+        <p className="ml-2 text-sm text-gray-500">
+          Loading organizational brain...
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50/50 p-4 lg:p-6">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-purple-50 p-3">
+              <BrainCircuit className="h-6 w-6 text-purple-600" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                Organizational Brain
+              </h1>
+              <p className="mt-0.5 text-sm text-gray-500">
+                5-level knowledge graph hierarchy — drill from organization
+                down to individual files
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <AlertCircle className="h-4 w-4" /> {error}
+        </div>
+      )}
+
+      {/* Stats Cards */}
+      <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-gray-500">Projects</p>
+              <p className="mt-1 text-2xl font-bold text-gray-900">
+                {stats.total_projects}
+              </p>
+            </div>
+            <div className="rounded-lg bg-blue-50 p-2.5">
+              <Layers className="h-5 w-5 text-blue-600" />
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-gray-500">Concepts</p>
+              <p className="mt-1 text-2xl font-bold text-gray-900">
+                {stats.total_concepts}
+              </p>
+            </div>
+            <div className="rounded-lg bg-purple-50 p-2.5">
+              <Network className="h-5 w-5 text-purple-600" />
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-gray-500">
+                Relationships
+              </p>
+              <p className="mt-1 text-2xl font-bold text-gray-900">
+                {stats.total_mappings}
+              </p>
+            </div>
+            <div className="rounded-lg bg-amber-50 p-2.5">
+              <GitBranch className="h-5 w-5 text-amber-600" />
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-gray-500">Coverage</p>
+              <p className="mt-1 text-2xl font-bold text-gray-900">
+                {stats.coverage_pct}%
+              </p>
+            </div>
+            <div className="rounded-lg bg-green-50 p-2.5">
+              <FileText className="h-5 w-5 text-green-600" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Breadcrumb */}
+      {drill.level < 5 && (
+        <div className="mb-4 rounded-lg border bg-white px-4 py-2.5">
+          <BrainBreadcrumb segments={buildBreadcrumb()} />
+        </div>
+      )}
+
+      {/* Main Graph Area */}
+      <div className="rounded-lg border bg-white">
+        {drill.level === 5 ? (
+          /* Level 5: Meta Graph — all projects */
+          <div>
+            <div className="border-b px-5 py-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                <BrainCircuit className="h-4 w-4 text-purple-500" />
+                Level 5 — Organizational Overview
+              </h2>
+              <p className="mt-0.5 text-xs text-gray-400">
+                Click a project cluster to drill into its system architecture
+              </p>
+            </div>
+            {metaData && metaData.nodes.length > 0 ? (
+              <div style={{ height: "600px" }}>
+                <MetaGraphView
+                  data={metaData}
+                  onSelectMapping={(id) => {
+                    // Find the project for this node and drill into it
+                    const node = metaData.nodes.find((n) => n.id === id);
+                    if (node && node.initiative_id) {
+                      // Find a repo for this project to drill into system view
+                      router.push(
+                        `/dashboard/projects/${node.initiative_id}`
+                      );
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex h-80 flex-col items-center justify-center text-gray-400">
+                <BrainCircuit className="mb-2 h-10 w-10" />
+                <p className="text-sm">No projects analyzed yet</p>
+                <p className="mt-1 text-xs">
+                  Create a project, link documents and repositories, then
+                  analyze them
+                </p>
+                <button
+                  onClick={() => router.push("/dashboard/projects")}
+                  className="mt-3 rounded-md bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-100"
+                >
+                  Go to Projects
+                </button>
+              </div>
+            )}
+          </div>
+        ) : drillLoading ? (
+          <div className="flex h-80 items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-purple-600" />
+            <p className="ml-2 text-sm text-gray-500">Loading level {drill.level} data...</p>
+          </div>
+        ) : drill.level === 3 ? (
+          /* Level 3: System Architecture */
+          <div>
+            <div className="border-b px-5 py-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                <Layers className="h-4 w-4 text-blue-500" />
+                Level 3 — System Architecture: {drill.projectName}
+              </h2>
+              <p className="mt-0.5 text-xs text-gray-400">
+                Domain modules and their relationships. Click a domain to drill
+                into file-level view.
+              </p>
+            </div>
+            {drillData?.system_nodes?.length > 0 ? (
+              <div className="p-5">
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {drillData.system_nodes.map((domain: any, i: number) => (
+                    <button
+                      key={i}
+                      onClick={() =>
+                        drillInto({
+                          ...drill,
+                          level: 2,
+                          domainName: domain.domain_name,
+                        })
+                      }
+                      className="rounded-lg border bg-gradient-to-br from-white to-blue-50/50 p-4 text-left hover:border-blue-300 hover:shadow-sm"
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold text-gray-900">
+                          {domain.domain_name}
+                        </p>
+                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700">
+                          {domain.concept_count} concepts
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {domain.file_count} files
+                      </p>
+                      {domain.key_concepts?.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {domain.key_concepts
+                            .slice(0, 3)
+                            .map((c: string, j: number) => (
+                              <span
+                                key={j}
+                                className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600"
+                              >
+                                {c}
+                              </span>
+                            ))}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex h-60 flex-col items-center justify-center text-gray-400">
+                <Network className="mb-2 h-8 w-8" />
+                <p className="text-sm">No system data available</p>
+              </div>
+            )}
+          </div>
+        ) : drill.level === 2 ? (
+          /* Level 2: Domain Cluster — OntologyGraph view */
+          <div>
+            <div className="border-b px-5 py-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                <Network className="h-4 w-4 text-green-500" />
+                Level 2 — Domain: {drill.domainName}
+              </h2>
+            </div>
+            {drillData?.domains?.length > 0 ? (
+              <div style={{ height: "500px" }}>
+                {(() => {
+                  const domain = drillData.domains.find(
+                    (d: any) => d.name === drill.domainName
+                  );
+                  if (!domain) return null;
+                  return (
+                    <OntologyGraph
+                      nodes={domain.nodes.map((n: any) => ({
+                        id: n.id,
+                        name: n.name,
+                        concept_type: n.concept_type,
+                        confidence_score: n.confidence_score,
+                      }))}
+                      edges={domain.edges.map((e: any) => ({
+                        id: e.id,
+                        source_concept_id: e.source_concept_id,
+                        target_concept_id: e.target_concept_id,
+                        relationship_type: e.relationship_type,
+                        confidence_score: e.confidence_score,
+                      }))}
+                      selectedNodeId={null}
+                      onSelectNode={() => {}}
+                    />
+                  );
+                })()}
+              </div>
+            ) : (
+              <div className="flex h-60 items-center justify-center text-gray-400">
+                <p className="text-sm">No domain data available</p>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Level 1: File subgraph */
+          <div>
+            <div className="border-b px-5 py-3">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                <FileText className="h-4 w-4 text-orange-500" />
+                Level 1 — File: {drill.componentName}
+              </h2>
+            </div>
+            {drillData?.nodes?.length > 0 ? (
+              <div style={{ height: "500px" }}>
+                <OntologyGraph
+                  nodes={drillData.nodes.map((n: any) => ({
+                    id: n.id,
+                    name: n.name,
+                    concept_type: n.concept_type,
+                    confidence_score: n.confidence_score,
+                  }))}
+                  edges={drillData.edges.map((e: any) => ({
+                    id: e.id,
+                    source_concept_id: e.source_concept_id,
+                    target_concept_id: e.target_concept_id,
+                    relationship_type: e.relationship_type,
+                    confidence_score: e.confidence_score,
+                  }))}
+                  selectedNodeId={null}
+                  onSelectNode={() => {}}
+                />
+              </div>
+            ) : (
+              <div className="flex h-60 items-center justify-center text-gray-400">
+                <p className="text-sm">No concepts for this file</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Level guide */}
+      <div className="mt-6 rounded-lg border bg-white p-5">
+        <h3 className="text-sm font-semibold text-gray-900">
+          Brain Hierarchy Levels
+        </h3>
+        <div className="mt-3 grid gap-2 md:grid-cols-5">
+          {[
+            {
+              level: 5,
+              label: "Organization",
+              desc: "All projects as clusters",
+              color: "bg-purple-50 text-purple-700",
+            },
+            {
+              level: 4,
+              label: "Alignment",
+              desc: "Doc ↔ Code mapping",
+              color: "bg-indigo-50 text-indigo-700",
+            },
+            {
+              level: 3,
+              label: "System",
+              desc: "Repo architecture",
+              color: "bg-blue-50 text-blue-700",
+            },
+            {
+              level: 2,
+              label: "Domain",
+              desc: "Module clusters",
+              color: "bg-green-50 text-green-700",
+            },
+            {
+              level: 1,
+              label: "File",
+              desc: "Per-file subgraph",
+              color: "bg-orange-50 text-orange-700",
+            },
+          ].map((l) => (
+            <div
+              key={l.level}
+              className={`rounded-lg p-3 ${l.color}`}
+            >
+              <p className="text-xs font-semibold">L{l.level}</p>
+              <p className="text-sm font-medium">{l.label}</p>
+              <p className="mt-0.5 text-[10px] opacity-70">{l.desc}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

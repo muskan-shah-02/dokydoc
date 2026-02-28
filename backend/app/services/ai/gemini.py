@@ -206,12 +206,13 @@ class GeminiService(LoggerMixin):
 
     async def call_gemini_for_enhanced_analysis(
         self, code_content: str, repo_name: str = "", file_path: str = "", language: str = "",
-        tenant_id: int = None, user_id: int = None,
+        tenant_id: int = None, user_id: int = None, product_context: str = "",
     ) -> dict:
         """
         SPRINT 3 Day 5 (AI-02): Enhanced semantic analysis with business rules,
         API contracts, data models, and security pattern extraction.
         Uses language-specific guidance when available.
+        product_context: BOE context envelope injected for cross-file understanding.
         """
         try:
             self.logger.info(f"Enhanced analysis for {file_path} ({language})")
@@ -226,7 +227,11 @@ class GeminiService(LoggerMixin):
                 language_specific_guidance=language_guidance
             )
 
-            full_prompt = f"{prompt}\n{code_content}"
+            # Inject BOE product context if available
+            if product_context and product_context != "No prior context available for this file.":
+                full_prompt = f"{prompt}\n\nPRODUCT CONTEXT (from previously analyzed files):\n{product_context}\n\nCODE TO ANALYZE:\n{code_content}"
+            else:
+                full_prompt = f"{prompt}\n{code_content}"
 
             response = await self.generate_content(
                 full_prompt,

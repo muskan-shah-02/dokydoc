@@ -39,7 +39,8 @@ class BusinessOntologyService(LoggerMixin):
     def get_or_create_concept(
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
         description: str = None, confidence_score: float = None,
-        source_type: str = "document", initiative_id: int = None
+        source_type: str = "document", initiative_id: int = None,
+        source_document_id: int = None,
     ):
         """
         Idempotent concept creation with name normalization and cross-reference.
@@ -50,7 +51,8 @@ class BusinessOntologyService(LoggerMixin):
             db=db, name=name, concept_type=concept_type,
             tenant_id=tenant_id, description=description,
             confidence_score=confidence_score, source_type=source_type,
-            initiative_id=initiative_id
+            initiative_id=initiative_id,
+            source_document_id=source_document_id,
         )
 
     def link_concepts(
@@ -192,7 +194,8 @@ class BusinessOntologyService(LoggerMixin):
                     db=db, name=name, concept_type=concept_type,
                     tenant_id=tenant_id, description=context,
                     confidence_score=confidence, source_type=source_type,
-                    initiative_id=initiative_id
+                    initiative_id=initiative_id,
+                    source_document_id=document_id if source_type == "document" else None,
                 )
                 concept_map[name] = concept
                 entities_created += 1

@@ -61,6 +61,8 @@ import { useBillingNotification } from "@/components/BillingToast";
 import { api } from "@/lib/api";
 import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
 import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
+import { OntologyGraph } from "@/components/ontology/OntologyGraph";
+import { Network } from "lucide-react";
 
 // --- 1. Types ---
 
@@ -840,6 +842,21 @@ export default function DocumentDetailPage() {
   const notifiedProcessingRef = useRef(false);
   const previousStatusRef = useRef<string | null>(null);
   const billingNotification = useBillingNotification();
+  const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
+
+  const fetchGraphData = useCallback(async (docId: string) => {
+    setGraphLoading(true);
+    try {
+      const data = await api.get<any>(`/ontology/graph/document-source/${docId}`);
+      setGraphData(data);
+    } catch {
+      setGraphData(null);
+    } finally {
+      setGraphLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1039,7 +1056,9 @@ export default function DocumentDetailPage() {
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
 
-      <Tabs defaultValue="insights" className="space-y-6">
+      <Tabs defaultValue="insights" className="space-y-6" onValueChange={(v) => {
+        if (v === "graph" && !graphData && doc) fetchGraphData(String(doc.id));
+      }}>
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
           <TabsTrigger
             value="insights"
@@ -1064,6 +1083,12 @@ export default function DocumentDetailPage() {
             className="data-[state=active]:bg-gray-100 h-10 px-6"
           >
             <FileCode className="w-4 h-4 mr-2" /> Raw Text
+          </TabsTrigger>
+          <TabsTrigger
+            value="graph"
+            className="data-[state=active]:bg-purple-50 data-[state=active]:text-purple-700 h-10 px-6"
+          >
+            <Network className="w-4 h-4 mr-2" /> Knowledge Graph
           </TabsTrigger>
         </TabsList>
 
@@ -1090,6 +1115,34 @@ export default function DocumentDetailPage() {
           <div className="bg-slate-900 text-slate-300 p-6 rounded-xl font-mono text-xs h-96 overflow-y-auto shadow-inner">
             {doc.raw_text || "No text extracted."}
           </div>
+        </TabsContent>
+
+        <TabsContent value="graph">
+          {graphLoading ? (
+            <div className="flex items-center justify-center h-64">
+              <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading knowledge graph...</span>
+            </div>
+          ) : graphData && graphData.nodes.length > 0 ? (
+            <OntologyGraph
+              nodes={graphData.nodes}
+              edges={graphData.edges}
+              selectedId={graphSelectedId}
+              onSelectNode={setGraphSelectedId}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+              <Network className="w-12 h-12 mb-3" />
+              <p className="text-sm font-medium">No concepts extracted yet</p>
+              <p className="text-xs mt-1">Concepts will appear after document analysis completes</p>
+              <button
+                onClick={() => doc && fetchGraphData(String(doc.id))}
+                className="mt-3 text-xs text-purple-600 hover:text-purple-800 underline"
+              >
+                Refresh
+              </button>
+            </div>
+          )}
         </TabsContent>
       </Tabs>
     </div>

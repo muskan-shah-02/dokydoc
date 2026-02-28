@@ -544,6 +544,490 @@ def get_component_subgraph(
 
 
 # ============================================================
+# BRAIN ARCHITECTURE ENDPOINTS (Levels 1-5)
+# ============================================================
+
+
+def _derive_domain_from_path(location: str) -> str:
+    """
+    Derive a domain label from a file path.
+    Strips common roots, then takes the first 1-2 meaningful path segments.
+    """
+    import posixpath
+    loc = location.replace("\\", "/").lstrip("./")
+    for prefix in ("backend/app/", "frontend/src/", "src/app/", "app/", "src/", "lib/"):
+        if loc.startswith(prefix):
+            loc = loc[len(prefix):]
+            break
+    parts = [p for p in loc.split("/") if p]
+    if len(parts) <= 1:
+        return "root"
+    if len(parts) >= 3:
+        return f"{parts[0]}/{parts[1]}"
+    return parts[0]
+
+
+@router.get("/graph/document-source/{document_id}")
+def get_document_source_subgraph(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Level 1 Brain: Per-document subgraph.
+    Returns concepts extracted from a specific document and their relationships.
+    """
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    concepts = crud.ontology_concept.get_by_document(
+        db=db, document_id=document_id, tenant_id=tenant_id
+    )
+    if not concepts:
+        return {"nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0, "document_id": document_id}
+
+    concept_ids = {c.id for c in concepts}
+    nodes = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "concept_type": c.concept_type,
+            "source_type": c.source_type,
+            "confidence_score": c.confidence_score or 0,
+        }
+        for c in concepts
+    ]
+
+    from app.models.ontology_relationship import OntologyRelationship
+    from sqlalchemy import or_
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all()
+
+    edges = [
+        {
+            "id": r.id,
+            "source_concept_id": r.source_concept_id,
+            "target_concept_id": r.target_concept_id,
+            "relationship_type": r.relationship_type,
+            "confidence_score": r.confidence_score or 0,
+        }
+        for r in rels
+        if r.source_concept_id in concept_ids or r.target_concept_id in concept_ids
+    ]
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "document_id": document_id,
+    }
+
+
+@router.get("/graph/domain/{repo_id}")
+def get_domain_cluster_graph(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Level 2 Brain: Domain Cluster Graph for a repository.
+    Groups concepts by file directory domain.
+    """
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_relationship import OntologyRelationship
+    from app.models.ontology_concept import OntologyConcept
+    from sqlalchemy import or_
+    from collections import defaultdict
+
+    components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    if not components:
+        return {"nodes": [], "edges": [], "domains": [],
+                "total_nodes": 0, "total_edges": 0, "repo_id": repo_id}
+
+    component_ids = {c.id for c in components}
+    comp_to_domain = {
+        c.id: _derive_domain_from_path(c.location or c.name)
+        for c in components
+    }
+
+    concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id.in_(component_ids),
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    concept_ids = {c.id for c in concepts}
+    concept_to_domain = {}
+    for c in concepts:
+        concept_to_domain[c.id] = comp_to_domain.get(c.source_component_id, "unknown")
+
+    nodes = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "concept_type": c.concept_type,
+            "source_type": c.source_type,
+            "confidence_score": c.confidence_score or 0,
+            "domain": concept_to_domain.get(c.id, "unknown"),
+        }
+        for c in concepts
+    ]
+
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all() if concept_ids else []
+
+    edges = [
+        {
+            "id": r.id,
+            "source_concept_id": r.source_concept_id,
+            "target_concept_id": r.target_concept_id,
+            "relationship_type": r.relationship_type,
+            "confidence_score": r.confidence_score or 0,
+        }
+        for r in rels
+        if r.source_concept_id in concept_ids and r.target_concept_id in concept_ids
+    ]
+
+    domain_components = defaultdict(list)
+    domain_concepts = defaultdict(list)
+    for c in components:
+        domain_components[comp_to_domain[c.id]].append(c.id)
+    for cid, domain in concept_to_domain.items():
+        domain_concepts[domain].append(cid)
+
+    domains = [
+        {
+            "name": dn,
+            "file_count": len(domain_components.get(dn, [])),
+            "concept_count": len(domain_concepts.get(dn, [])),
+        }
+        for dn in sorted(set(list(domain_components.keys()) + list(domain_concepts.keys())))
+    ]
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "domains": domains,
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "repo_id": repo_id,
+    }
+
+
+@router.get("/graph/system/{repo_id}")
+def get_system_architecture_graph(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Level 3 Brain: System Architecture Graph for a repository.
+    Aggregates domains into system layers with inter-domain edge counts.
+    """
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_relationship import OntologyRelationship
+    from app.models.ontology_concept import OntologyConcept
+    from sqlalchemy import or_
+    from collections import defaultdict
+
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    if not components:
+        return {"system_nodes": [], "system_edges": [], "synthesis_summary": None,
+                "total_domains": 0, "repo_id": repo_id, "repo_name": repo.name}
+
+    component_ids = {c.id for c in components}
+    comp_to_domain = {
+        c.id: _derive_domain_from_path(c.location or c.name)
+        for c in components
+    }
+
+    concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id.in_(component_ids),
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    concept_ids = {c.id for c in concepts}
+    concept_to_domain = {}
+    for c in concepts:
+        concept_to_domain[c.id] = comp_to_domain.get(c.source_component_id, "unknown")
+
+    # Build domain metadata
+    domain_file_count = defaultdict(int)
+    domain_concept_count = defaultdict(int)
+    domain_key_concepts = defaultdict(list)
+
+    for c in components:
+        domain_file_count[comp_to_domain[c.id]] += 1
+    for c in concepts:
+        d = concept_to_domain[c.id]
+        domain_concept_count[d] += 1
+        if len(domain_key_concepts[d]) < 5:
+            domain_key_concepts[d].append(c.name)
+
+    all_domains = sorted(set(list(domain_file_count.keys()) + list(domain_concept_count.keys())))
+
+    system_nodes = [
+        {
+            "domain_name": d,
+            "file_count": domain_file_count.get(d, 0),
+            "concept_count": domain_concept_count.get(d, 0),
+            "key_concepts": domain_key_concepts.get(d, []),
+        }
+        for d in all_domains
+    ]
+
+    # Build cross-domain edges
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all() if concept_ids else []
+
+    cross_domain_counts = defaultdict(lambda: {"count": 0, "types": set()})
+    for r in rels:
+        src_domain = concept_to_domain.get(r.source_concept_id)
+        tgt_domain = concept_to_domain.get(r.target_concept_id)
+        if src_domain and tgt_domain and src_domain != tgt_domain:
+            key = tuple(sorted([src_domain, tgt_domain]))
+            cross_domain_counts[key]["count"] += 1
+            cross_domain_counts[key]["types"].add(r.relationship_type)
+
+    system_edges = [
+        {
+            "source_domain": k[0],
+            "target_domain": k[1],
+            "relationship_count": v["count"],
+            "relationship_types": list(v["types"]),
+        }
+        for k, v in cross_domain_counts.items()
+    ]
+
+    # Extract synthesis summary
+    synthesis_summary = None
+    if repo.synthesis_data and isinstance(repo.synthesis_data, dict):
+        synthesis_summary = repo.synthesis_data.get("executive_summary",
+                            repo.synthesis_data.get("summary", None))
+
+    return {
+        "system_nodes": system_nodes,
+        "system_edges": system_edges,
+        "synthesis_summary": synthesis_summary,
+        "total_domains": len(system_nodes),
+        "repo_id": repo_id,
+        "repo_name": repo.name,
+    }
+
+
+@router.get("/graph/alignment/{initiative_id}")
+def get_alignment_graph(
+    initiative_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    include_unmapped: bool = Query(True, description="Include concepts with no mapping"),
+) -> Any:
+    """
+    Level 4 Brain: Cross-Domain Alignment Graph for an initiative.
+    Returns bipartite doc↔code concepts with ConceptMapping bridges + coverage stats.
+    """
+    from app.models.concept_mapping import ConceptMapping
+    from app.models.ontology_concept import OntologyConcept
+    from sqlalchemy import or_
+
+    # Get all non-rejected mappings
+    mappings = db.query(ConceptMapping).filter(
+        ConceptMapping.tenant_id == tenant_id,
+        ConceptMapping.status != "rejected",
+    ).all()
+
+    mapped_doc_ids = {m.document_concept_id for m in mappings}
+    mapped_code_ids = {m.code_concept_id for m in mappings}
+
+    # Get document concepts for this initiative
+    doc_q = db.query(OntologyConcept).filter(
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+        OntologyConcept.source_type == "document",
+    )
+    if initiative_id:
+        doc_q = doc_q.filter(or_(
+            OntologyConcept.initiative_id == initiative_id,
+            OntologyConcept.initiative_id.is_(None),
+        ))
+    all_doc_concepts = doc_q.all()
+
+    # Get code concepts for this initiative
+    code_q = db.query(OntologyConcept).filter(
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+        OntologyConcept.source_type.in_(["code", "both"]),
+    )
+    if initiative_id:
+        code_q = code_q.filter(or_(
+            OntologyConcept.initiative_id == initiative_id,
+            OntologyConcept.initiative_id.is_(None),
+        ))
+    all_code_concepts = code_q.all()
+
+    if include_unmapped:
+        doc_concepts = all_doc_concepts
+        code_concepts = all_code_concepts
+    else:
+        doc_concepts = [c for c in all_doc_concepts if c.id in mapped_doc_ids]
+        code_concepts = [c for c in all_code_concepts if c.id in mapped_code_ids]
+
+    doc_ids = {c.id for c in doc_concepts}
+    code_ids = {c.id for c in code_concepts}
+
+    visible_mappings = [
+        m for m in mappings
+        if m.document_concept_id in doc_ids and m.code_concept_id in code_ids
+    ]
+
+    def _node(c):
+        return {"id": c.id, "name": c.name, "concept_type": c.concept_type,
+                "source_type": c.source_type, "confidence_score": c.confidence_score or 0}
+
+    total_doc = len(all_doc_concepts)
+    mapped_doc_count = sum(1 for c in all_doc_concepts if c.id in mapped_doc_ids)
+
+    return {
+        "document_nodes": [_node(c) for c in doc_concepts],
+        "code_nodes": [_node(c) for c in code_concepts],
+        "mappings": [
+            {
+                "id": m.id, "document_concept_id": m.document_concept_id,
+                "code_concept_id": m.code_concept_id, "mapping_method": m.mapping_method,
+                "confidence_score": m.confidence_score, "status": m.status,
+                "relationship_type": m.relationship_type,
+            }
+            for m in visible_mappings
+        ],
+        "coverage_stats": {
+            "total_doc_concepts": total_doc,
+            "mapped_doc_concepts": mapped_doc_count,
+            "total_code_concepts": len(all_code_concepts),
+            "mapped_code_concepts": sum(1 for c in all_code_concepts if c.id in mapped_code_ids),
+            "coverage_pct": round(mapped_doc_count / total_doc, 3) if total_doc else 0,
+        },
+        "initiative_id": initiative_id,
+    }
+
+
+@router.get("/graph/brain")
+def get_organizational_brain(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Level 5 Brain: Organizational Brain.
+    Returns project-level bubbles with aggregated metrics and cross-project edges.
+    """
+    from app.models.concept_mapping import ConceptMapping
+    from collections import defaultdict
+
+    projects = crud.initiative.get_multi(db=db, tenant_id=tenant_id)
+    if not projects:
+        return {"projects": [], "connections": [], "total_projects": 0, "total_connections": 0}
+
+    all_concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
+    concept_by_project = defaultdict(list)
+    for c in all_concepts:
+        if c.initiative_id:
+            concept_by_project[c.initiative_id].append(c)
+
+    all_mappings = db.query(ConceptMapping).filter(
+        ConceptMapping.tenant_id == tenant_id,
+        ConceptMapping.status != "rejected",
+    ).all()
+    mapped_doc_ids = {m.document_concept_id for m in all_mappings}
+
+    # Cross-project mappings
+    try:
+        cross_mappings = crud.cross_project_mapping.get_all_for_tenant(db=db, tenant_id=tenant_id)
+    except Exception:
+        cross_mappings = []
+
+    cross_by_pair = defaultdict(list)
+    for cm in cross_mappings:
+        if hasattr(cm, 'status') and cm.status == "rejected":
+            continue
+        pair = tuple(sorted([cm.initiative_a_id, cm.initiative_b_id]))
+        cross_by_pair[pair].append(cm)
+
+    project_nodes = []
+    for p in projects:
+        concepts = concept_by_project.get(p.id, [])
+        doc_c = [c for c in concepts if c.source_type == "document"]
+        code_c = [c for c in concepts if c.source_type in ("code", "both")]
+        mapped = sum(1 for c in doc_c if c.id in mapped_doc_ids)
+        coverage = round(mapped / len(doc_c), 3) if doc_c else 0
+
+        top = sorted([c for c in concepts if c.confidence_score],
+                     key=lambda c: c.confidence_score, reverse=True)[:5]
+
+        project_nodes.append({
+            "id": p.id,
+            "name": p.name,
+            "doc_concept_count": len(doc_c),
+            "code_concept_count": len(code_c),
+            "total_concept_count": len(concepts),
+            "coverage_pct": coverage,
+            "top_concepts": [{"name": c.name, "type": c.concept_type} for c in top],
+        })
+
+    connections = []
+    project_ids = {p.id for p in projects}
+    for pair, cms in cross_by_pair.items():
+        if pair[0] not in project_ids or pair[1] not in project_ids:
+            continue
+        connections.append({
+            "project_a_id": pair[0],
+            "project_b_id": pair[1],
+            "connection_count": len(cms),
+            "relationship_types": list({getattr(cm, 'relationship_type', 'related') for cm in cms}),
+        })
+
+    return {
+        "projects": project_nodes,
+        "connections": connections,
+        "total_projects": len(project_nodes),
+        "total_connections": len(connections),
+    }
+
+
+# ============================================================
 # CONCEPT MAPPING ENDPOINTS (SPRINT 4 — Cross-Graph)
 # ============================================================
 

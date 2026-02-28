@@ -42,6 +42,7 @@ import {
   FolderKanban,
   Plus,
   Check,
+  BrainCircuit,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -101,6 +102,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       icon: Network,
       text: "Business Ontology",
       href: "/dashboard/ontology",
+    },
+    {
+      icon: BrainCircuit,
+      text: "Brain",
+      href: "/dashboard/brain",
+      badge: "New",
     },
     {
       icon: History,

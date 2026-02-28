@@ -94,11 +94,12 @@ class ProviderRouter(LoggerMixin):
 
     async def analyze_code_enhanced(
         self, code_content: str, repo_name: str = "", file_path: str = "", language: str = "",
-        tenant_id: int = None, user_id: int = None,
+        tenant_id: int = None, user_id: int = None, product_context: str = "",
     ) -> dict:
         """
         Route enhanced semantic code analysis to the appropriate provider.
         Dual mode: Claude. Single mode: Gemini. Fallback: Gemini.
+        product_context: BOE context envelope for richer analysis (zero AI cost).
         """
         if self.dual_mode:
             try:
@@ -113,6 +114,7 @@ class ProviderRouter(LoggerMixin):
         return await self.gemini.call_gemini_for_enhanced_analysis(
             code_content, repo_name, file_path, language,
             tenant_id=tenant_id, user_id=user_id,
+            product_context=product_context,
         )
 
     async def analyze_delta(

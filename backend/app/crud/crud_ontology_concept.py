@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
@@ -13,7 +13,7 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         self, db: Session, *, name: str, concept_type: str, tenant_id: int,
         description: str = None, confidence_score: float = None,
         source_type: str = "document", initiative_id: int = None,
-        source_component_id: int = None,
+        source_component_id: int = None, source_document_id: int = None,
     ) -> OntologyConcept:
         """
         Idempotent concept creation within a SINGLE source layer.
@@ -64,6 +64,11 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
                 existing.source_component_id = source_component_id
                 db.commit()
                 db.refresh(existing)
+            # Backfill source_document_id if not set
+            if source_document_id and not existing.source_document_id:
+                existing.source_document_id = source_document_id
+                db.commit()
+                db.refresh(existing)
             return existing
 
         db_obj = self.model(
@@ -75,6 +80,7 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             tenant_id=tenant_id,
             initiative_id=initiative_id,
             source_component_id=source_component_id,
+            source_document_id=source_document_id,
         )
         db.add(db_obj)
         db.commit()
@@ -243,6 +249,53 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             self.model.tenant_id == tenant_id,
             self.model.is_active == True,
         ).all()
+
+    def get_by_document(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> List[OntologyConcept]:
+        """Get all concepts linked to a specific document (document-level subgraph)."""
+        return db.query(self.model).filter(
+            self.model.source_document_id == document_id,
+            self.model.tenant_id == tenant_id,
+            self.model.is_active == True,
+        ).all()
+
+    def get_by_repository_grouped(
+        self, db: Session, *, repo_id: int, tenant_id: int
+    ) -> Dict[str, List[OntologyConcept]]:
+        """
+        Get all concepts for a repository, grouped by domain (directory).
+        Joins OntologyConcept → CodeComponent via source_component_id,
+        then groups by the parent directory of CodeComponent.location.
+        Returns: { "services/auth": [concepts], "models": [concepts], ... }
+        """
+        from app.models.code_component import CodeComponent
+        import os
+
+        results = db.query(self.model, CodeComponent.location).join(
+            CodeComponent,
+            self.model.source_component_id == CodeComponent.id,
+        ).filter(
+            CodeComponent.repository_id == repo_id,
+            self.model.tenant_id == tenant_id,
+            self.model.is_active == True,
+        ).all()
+
+        grouped: Dict[str, List[OntologyConcept]] = {}
+        for concept, location in results:
+            # Extract domain from file path (parent directory)
+            if location:
+                domain = os.path.dirname(location)
+                # Simplify: collapse deep paths to top 2 levels
+                parts = domain.split("/")
+                domain = "/".join(parts[:2]) if len(parts) > 2 else domain
+            else:
+                domain = "root"
+            if not domain:
+                domain = "root"
+            grouped.setdefault(domain, []).append(concept)
+
+        return grouped
 
 
 ontology_concept = CRUDOntologyConcept(OntologyConcept)

@@ -199,6 +199,20 @@ def static_analysis_worker(
             # Route to AI provider (ADHOC-08: Claude for code in dual mode, Gemini otherwise)
             from app.services.ai.provider_router import provider_router
 
+            # Build product context from BOE (zero AI cost — DB queries only)
+            product_context = ""
+            try:
+                from app.services.context_assembly_service import context_assembly_service
+                envelope = context_assembly_service.build_envelope(
+                    db=db, component_id=component_id, tenant_id=tenant_id,
+                    repo_id=component.repository_id,
+                )
+                product_context = envelope.to_prompt_context()
+                if product_context and product_context != "No prior context available for this file.":
+                    logger.info(f"Context envelope built for component {component_id}: ~{envelope.token_estimate()} tokens")
+            except Exception as ctx_err:
+                logger.warning(f"Context assembly failed (proceeding without): {ctx_err}")
+
             if repo_name:
                 # Enhanced analysis with business rules, API contracts, etc.
                 analysis_result = _run_async(
@@ -208,6 +222,7 @@ def static_analysis_worker(
                         file_path=file_path,
                         language=language,
                         tenant_id=tenant_id,
+                        product_context=product_context,
                     )
                 )
             else:

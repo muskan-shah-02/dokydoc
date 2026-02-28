@@ -23,6 +23,7 @@ class OntologyConcept(Base):
     confidence_score: Mapped[float] = mapped_column(nullable=True)  # AI confidence in this concept
     source_type: Mapped[str] = mapped_column(String(20), default="document", nullable=False, index=True)  # "document", "code", or "both"
     source_component_id: Mapped[int] = mapped_column(Integer, ForeignKey("code_components.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to originating code file
+    source_document_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to originating document
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
