@@ -1,7 +1,7 @@
 """Create knowledge_graph_versions table for graph storage and versioning
 
 Revision ID: s4b1_knowledge_graph_versions
-Revises: s4a4_add_source_document_id
+Revises: s4a4_source_document
 Create Date: 2026-03-01 10:00:00.000000
 
 Stores pre-built graph snapshots (nodes + edges as JSON) with versioning.
@@ -15,7 +15,7 @@ from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = 's4b1_knowledge_graph_versions'
-down_revision: Union[str, None] = 's4a4_add_source_document_id'
+down_revision: Union[str, None] = 's4a4_source_document'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
