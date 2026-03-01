@@ -1714,3 +1714,209 @@ def get_branch_preview_graph(
         commit_hash=preview.get("commit_hash", ""),
         changed_files=preview.get("changed_files", []),
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# GRAPH VERSIONING ENDPOINTS
+# Pre-built graph JSON for fast rendering + version history + diff
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/graph/component/{component_id}/current")
+def get_component_graph_current(
+    component_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get the current pre-built graph for a code component (fast, no joins)."""
+    version = crud.knowledge_graph_version.get_current(
+        db, source_type="component", source_id=component_id, tenant_id=tenant_id
+    )
+    if not version:
+        raise HTTPException(status_code=404, detail="No graph version found for this component")
+    return {
+        "version": version.version,
+        "graph_data": version.graph_data,
+        "graph_hash": version.graph_hash,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+    }
+
+
+@router.get("/graph/component/{component_id}/versions")
+def get_component_graph_versions(
+    component_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get version history for a code component's graph."""
+    versions = crud.knowledge_graph_version.get_history(
+        db, source_type="component", source_id=component_id, tenant_id=tenant_id
+    )
+    return [
+        {
+            "version": v.version,
+            "is_current": v.is_current,
+            "graph_hash": v.graph_hash,
+            "delta_summary": v.graph_delta.get("summary", "") if v.graph_delta else None,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]
+
+
+@router.get("/graph/component/{component_id}/diff")
+def get_component_graph_diff(
+    component_id: int,
+    v1: int = Query(..., description="First version number"),
+    v2: int = Query(..., description="Second version number"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get diff between two graph versions of a code component."""
+    diff = crud.knowledge_graph_version.get_diff(
+        db, source_type="component", source_id=component_id,
+        version_a=v1, version_b=v2, tenant_id=tenant_id
+    )
+    if diff is None:
+        raise HTTPException(status_code=404, detail="One or both versions not found")
+    return diff
+
+
+@router.get("/graph/document/{document_id}/current")
+def get_document_graph_current(
+    document_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get the current pre-built graph for a document (fast, no joins)."""
+    version = crud.knowledge_graph_version.get_current(
+        db, source_type="document", source_id=document_id, tenant_id=tenant_id
+    )
+    if not version:
+        raise HTTPException(status_code=404, detail="No graph version found for this document")
+    return {
+        "version": version.version,
+        "graph_data": version.graph_data,
+        "graph_hash": version.graph_hash,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+    }
+
+
+@router.get("/graph/document/{document_id}/versions")
+def get_document_graph_versions(
+    document_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get version history for a document's graph."""
+    versions = crud.knowledge_graph_version.get_history(
+        db, source_type="document", source_id=document_id, tenant_id=tenant_id
+    )
+    return [
+        {
+            "version": v.version,
+            "is_current": v.is_current,
+            "graph_hash": v.graph_hash,
+            "delta_summary": v.graph_delta.get("summary", "") if v.graph_delta else None,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]
+
+
+@router.get("/graph/document/{document_id}/diff")
+def get_document_graph_diff(
+    document_id: int,
+    v1: int = Query(..., description="First version number"),
+    v2: int = Query(..., description="Second version number"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get diff between two graph versions of a document."""
+    diff = crud.knowledge_graph_version.get_diff(
+        db, source_type="document", source_id=document_id,
+        version_a=v1, version_b=v2, tenant_id=tenant_id
+    )
+    if diff is None:
+        raise HTTPException(status_code=404, detail="One or both versions not found")
+    return diff
+
+
+# ══════════════════════════════════════════════════════════════════
+# REQUIREMENT TRACEABILITY ENDPOINTS
+# Layer 2 of the 3-layer hybrid validation system
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/traceability/document/{document_id}")
+def get_requirement_traces(
+    document_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get all requirement traces for a document with coverage summary."""
+    traces = crud.requirement_trace.get_by_document(
+        db, document_id=document_id, tenant_id=tenant_id
+    )
+    summary = crud.requirement_trace.get_coverage_summary(
+        db, document_id=document_id, tenant_id=tenant_id
+    )
+    return {
+        "traces": [
+            {
+                "id": t.id,
+                "requirement_key": t.requirement_key,
+                "requirement_text": t.requirement_text,
+                "code_concept_ids": t.code_concept_ids,
+                "code_component_ids": t.code_component_ids,
+                "coverage_status": t.coverage_status,
+                "validation_status": t.validation_status,
+                "validation_details": t.validation_details,
+            }
+            for t in traces
+        ],
+        "summary": summary,
+    }
+
+
+@router.get("/traceability/initiative/{initiative_id}")
+def get_initiative_traces(
+    initiative_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Get all requirement traces for an initiative/project."""
+    traces = crud.requirement_trace.get_by_initiative(
+        db, initiative_id=initiative_id, tenant_id=tenant_id
+    )
+    return {
+        "traces": [
+            {
+                "id": t.id,
+                "document_id": t.document_id,
+                "requirement_key": t.requirement_key,
+                "requirement_text": t.requirement_text,
+                "code_concept_ids": t.code_concept_ids,
+                "coverage_status": t.coverage_status,
+                "validation_status": t.validation_status,
+            }
+            for t in traces
+        ],
+        "total": len(traces),
+    }
+
+
+@router.post("/traceability/build/{document_id}")
+def build_requirement_traces(
+    document_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """Build/rebuild requirement traces for a document."""
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    from app.services.requirement_traceability_service import requirement_traceability_service
+    result = requirement_traceability_service.build_traces_for_document(
+        db=db, document_id=document_id, tenant_id=tenant_id
+    )
+    return result

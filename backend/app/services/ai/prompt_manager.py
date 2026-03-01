@@ -785,6 +785,16 @@ Perform a comprehensive analysis extracting ALL of the following:
 
 5. **STANDARD ANALYSIS** — Components, dependencies, patterns (as before)
 
+6. **COMPONENT INTERACTIONS** — How functions/classes call, inherit, or delegate to each other
+   - Look for: function calls within the file, class inheritance, method delegation,
+     validation chains, middleware pipelines, event handler wiring
+   - Example: "OrderService.create_order() calls PaymentService.charge() and EmailService.notify()"
+
+7. **DATA FLOWS** — How data moves through the file from input to output
+   - Look for: request parameters flowing through processing, database reads feeding transforms,
+     API responses being assembled, config values driving behavior
+   - Example: "User input → validate() → transform() → db.save() → response"
+
 STRICT RESPONSE FORMAT:
 Return ONLY valid JSON:
 {{
@@ -836,6 +846,24 @@ Return ONLY valid JSON:
                 "gaps": "Any noted security gaps or missing protections"
             }}
         ],
+        "component_interactions": [
+            {{
+                "source": "Function/Class that initiates the call",
+                "target": "Function/Class that is called or referenced",
+                "interaction_type": "calls|inherits|instantiates|validates_with|delegates_to|overrides|listens_to",
+                "description": "Brief description of the interaction",
+                "data_passed": "What data flows between them"
+            }}
+        ],
+        "data_flows": [
+            {{
+                "name": "Short description of the flow",
+                "source": "Where data originates (e.g., request body, DB query, config)",
+                "destination": "Where data goes (e.g., response, DB write, external API)",
+                "transformations": "What processing happens along the way",
+                "data_type": "user_input|db_record|api_response|config|event|file_content"
+            }}
+        ],
         "components": [
             {{
                 "name": "Element name",
@@ -860,6 +888,8 @@ CRITICAL:
 - For api_contracts: Include ALL endpoints with their full contract
 - For data_model_relationships: Include FK constraints and cascade behavior
 - For security_patterns: Note GAPS as well as implemented patterns
+- For component_interactions: Extract ALL function-to-function calls, class inheritance, and delegation patterns within this file
+- For data_flows: Trace how data enters, transforms, and exits — this is crucial for understanding business logic
 - If a section is not applicable to this file type, return an empty array []
 
 CODE TO ANALYZE:
@@ -876,6 +906,8 @@ CODE TO ANALYZE:
                                 "api_contracts": {"type": "array"},
                                 "data_model_relationships": {"type": "array"},
                                 "security_patterns": {"type": "array"},
+                                "component_interactions": {"type": "array"},
+                                "data_flows": {"type": "array"},
                                 "components": {"type": "array"},
                                 "dependencies": {"type": "array"},
                                 "exports": {"type": "array"},

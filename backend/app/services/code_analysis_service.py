@@ -527,6 +527,17 @@ class CodeAnalysisService(LoggerMixin):
             except Exception as e:
                 self.logger.warning(f"Ontology extraction failed (non-fatal): {e}")
 
+            # 7. Save graph version snapshot for fast rendering + versioning
+            try:
+                self._save_graph_version(
+                    db=db,
+                    source_type="component",
+                    source_id=component.id,
+                    tenant_id=tenant_id,
+                )
+            except Exception as e:
+                self.logger.warning(f"Graph version save failed (non-fatal): {e}")
+
         except httpx.RequestError as e:
             self.logger.error(f"HTTP Error fetching code for component {component_id}: {e}")
             if component:
@@ -569,7 +580,19 @@ class CodeAnalysisService(LoggerMixin):
         "Constant": "Attribute",
         "Variable": "Attribute",
         "Module": "Entity",
+        "Middleware": "Process",
     }
+
+    # File types that focus on business logic, API contracts, security, call chains
+    _LOGIC_FILE_TYPES = {"Service", "Controller", "Middleware"}
+    # File types that focus on data entities, field relationships, constraints
+    _DATA_FILE_TYPES = {"Model", "Migration"}
+    # File types that focus on UI props, state, events
+    _UI_FILE_TYPES = {"Component"}
+    # File types that focus on test coverage and implicit rules
+    _TEST_FILE_TYPES = {"Test"}
+    # File types that focus on settings and feature flags
+    _CONFIG_FILE_TYPES = {"Config"}
 
     def _extract_ontology_from_analysis(
         self, db, structured_analysis: dict, component_name: str, tenant_id: int,
@@ -577,170 +600,341 @@ class CodeAnalysisService(LoggerMixin):
     ) -> None:
         """
         Extract ontology concepts AND relationships from code analysis results.
-        Creates concepts with source_type="code" — no additional AI calls.
-        Also creates relationships from data_model_relationships, dependencies,
-        and API contracts found in the structured analysis.
+        Uses file-type-specific strategies to build rich, connected knowledge graphs.
+        Creates concepts with source_type="code" — no additional AI calls needed.
         """
         if not structured_analysis or not tenant_id:
             return
 
-        components = structured_analysis.get("components", [])
-        key_concepts = (
-            structured_analysis
-            .get("patterns_and_architecture", {})
-            .get("key_concepts", [])
-        )
         created_count = 0
         relationship_count = 0
-        concept_map = {}  # name -> OntologyConcept object (for relationship linking)
+        concept_map = {}  # name (lowered) -> OntologyConcept for dedup + relationship linking
 
-        # Extract significant code components as concepts
-        # Only extract Classes, Services, Models, Interfaces, Components (skip functions/variables)
-        significant_types = {"Class", "Interface", "Service", "Model", "Component", "Module"}
+        # Helper: get-or-create a concept and track it in concept_map
+        def _ensure_concept(name: str, concept_type: str, description: str = None,
+                            confidence: float = 0.75) -> "OntologyConcept | None":
+            nonlocal created_count
+            name = (name or "").strip()
+            if not name or len(name) < 2:
+                return None
+            key = name.lower()
+            if key in concept_map:
+                return concept_map[key]
+            concept = crud.ontology_concept.get_or_create(
+                db, name=name, concept_type=concept_type,
+                tenant_id=tenant_id, source_type="code",
+                description=description[:500] if description else None,
+                confidence_score=confidence,
+                source_component_id=source_component_id,
+            )
+            concept_map[key] = concept
+            created_count += 1
+            return concept
+
+        # Helper: create a relationship between two concepts
+        def _ensure_rel(source_name: str, target_name: str, rel_type: str,
+                        description: str = None, confidence: float = 0.8) -> bool:
+            nonlocal relationship_count
+            src = concept_map.get((source_name or "").strip().lower())
+            tgt = concept_map.get((target_name or "").strip().lower())
+            if not src or not tgt or src.id == tgt.id:
+                return False
+            crud.ontology_relationship.create_if_not_exists(
+                db, source_concept_id=src.id, target_concept_id=tgt.id,
+                relationship_type=rel_type, tenant_id=tenant_id,
+                description=description[:500] if description else None,
+                confidence_score=confidence,
+            )
+            relationship_count += 1
+            return True
+
+        # Detect file type
+        lang_info = structured_analysis.get("language_info", {})
+        file_type = lang_info.get("file_type", "Utility")
+
+        # ═══════════════════════════════════════════════════════════════
+        # COMMON EXTRACTION — runs for ALL file types
+        # ═══════════════════════════════════════════════════════════════
+
+        # 1. Root file/module concept
+        file_short = component_name.rsplit("/", 1)[-1] if "/" in component_name else component_name
+        summary = structured_analysis.get("summary", "") if isinstance(structured_analysis.get("summary"), str) else ""
+        file_concept = _ensure_concept(
+            file_short, "Service" if file_type in self._LOGIC_FILE_TYPES else "Entity",
+            description=summary or f"Module: {component_name}",
+            confidence=0.9,
+        )
+
+        # 2. Extract ALL components (no significant_types filter — every function matters)
+        components = structured_analysis.get("components", [])
         for comp in components:
             comp_type = comp.get("type", "")
-            if comp_type not in significant_types:
-                continue
-
-            name = comp.get("name", "").strip()
+            name = (comp.get("name", "") or "").strip()
             if not name or len(name) < 2:
                 continue
-
-            concept_type = self._TYPE_MAPPING.get(comp_type, "Entity")
+            concept_type = self._TYPE_MAPPING.get(comp_type, "Process")
             description = comp.get("purpose", "") or comp.get("details", "")
+            _ensure_concept(name, concept_type, description=description)
+            # Every component → defined_in → file (no orphans)
+            _ensure_rel(name, file_short, "defined_in", confidence=0.9)
 
-            concept = crud.ontology_concept.get_or_create(
-                db,
-                name=name,
-                concept_type=concept_type,
-                tenant_id=tenant_id,
-                description=description[:500] if description else None,
-                confidence_score=0.75,
-                source_type="code",
-                source_component_id=source_component_id,
-            )
-            concept_map[name] = concept
-            created_count += 1
-
-        # Extract key architectural concepts
+        # 3. Key architectural concepts
+        key_concepts = (
+            structured_analysis.get("patterns_and_architecture", {})
+            .get("key_concepts", [])
+        )
         for concept_name in key_concepts:
-            if not concept_name or len(concept_name.strip()) < 2:
-                continue
-            concept = crud.ontology_concept.get_or_create(
-                db,
-                name=concept_name.strip(),
-                concept_type="Process",
-                tenant_id=tenant_id,
-                description=f"Architectural concept from code: {component_name}",
-                confidence_score=0.65,
-                source_type="code",
-                source_component_id=source_component_id,
-            )
-            concept_map[concept_name.strip()] = concept
-            created_count += 1
+            if concept_name and len(concept_name.strip()) >= 2:
+                _ensure_concept(concept_name.strip(), "Process",
+                                description=f"Architectural concept: {concept_name}")
 
-        # ── Phase 2: Extract RELATIONSHIPS from structured analysis ──
-
-        # 2a. data_model_relationships → "has_many", "belongs_to", etc.
+        # 4. Data model relationships → always extracted
         data_rels = structured_analysis.get("data_model_relationships", [])
         for rel in data_rels:
-            source_name = rel.get("source_entity", "").strip()
-            target_name = rel.get("target_entity", "").strip()
-            rel_type = rel.get("relationship_type", "related_to").strip()
-            if not source_name or not target_name:
+            src_name = (rel.get("source_entity", "") or "").strip()
+            tgt_name = (rel.get("target_entity", "") or "").strip()
+            rel_type = (rel.get("relationship_type", "related_to") or "related_to").strip()
+            if not src_name or not tgt_name:
                 continue
+            _ensure_concept(src_name, "Entity", description=rel.get("description"))
+            _ensure_concept(tgt_name, "Entity")
+            _ensure_rel(src_name, tgt_name, rel_type,
+                        description=rel.get("description"), confidence=0.85)
 
-            # Ensure both concepts exist
-            source_concept = concept_map.get(source_name)
-            if not source_concept:
-                source_concept = crud.ontology_concept.get_or_create(
-                    db, name=source_name, concept_type="Entity",
-                    tenant_id=tenant_id, source_type="code",
-                    description=rel.get("description", "")[:500] if rel.get("description") else None,
-                    confidence_score=0.7,
-                )
-                concept_map[source_name] = source_concept
+        # 5. Component interactions → calls, inherits, delegates_to, etc.
+        interactions = structured_analysis.get("component_interactions", [])
+        for ix in interactions:
+            src = (ix.get("source", "") or "").strip()
+            tgt = (ix.get("target", "") or "").strip()
+            ix_type = (ix.get("interaction_type", "calls") or "calls").strip()
+            if not src or not tgt:
+                continue
+            _ensure_concept(src, "Process", description=ix.get("description"))
+            _ensure_concept(tgt, "Process", description=ix.get("description"))
+            _ensure_rel(src, tgt, ix_type,
+                        description=ix.get("data_passed", ix.get("description")),
+                        confidence=0.8)
 
-            target_concept = concept_map.get(target_name)
-            if not target_concept:
-                target_concept = crud.ontology_concept.get_or_create(
-                    db, name=target_name, concept_type="Entity",
-                    tenant_id=tenant_id, source_type="code",
-                    description=None, confidence_score=0.7,
-                )
-                concept_map[target_name] = target_concept
+        # 6. Data flows → transforms, flows_to edges
+        data_flows = structured_analysis.get("data_flows", [])
+        for flow in data_flows:
+            flow_name = (flow.get("name", "") or "").strip()
+            source = (flow.get("source", "") or "").strip()
+            dest = (flow.get("destination", "") or "").strip()
+            if not source or not dest:
+                continue
+            _ensure_concept(source, "Attribute",
+                            description=f"Data source: {flow.get('data_type', '')}")
+            _ensure_concept(dest, "Attribute",
+                            description=f"Data destination")
+            desc = flow.get("transformations", flow_name)
+            _ensure_rel(source, dest, "flows_to", description=desc, confidence=0.75)
 
-            if source_concept.id != target_concept.id:
-                crud.ontology_relationship.create_if_not_exists(
-                    db, source_concept_id=source_concept.id,
-                    target_concept_id=target_concept.id,
-                    relationship_type=rel_type, tenant_id=tenant_id,
-                    description=rel.get("description", ""),
-                    confidence_score=0.8,
-                )
-                relationship_count += 1
+        # ═══════════════════════════════════════════════════════════════
+        # FILE-TYPE-SPECIFIC EXTRACTION
+        # ═══════════════════════════════════════════════════════════════
 
-        # 2b. API contracts → create "exposes_endpoint" relationships
-        api_contracts = structured_analysis.get("api_contracts", [])
-        if api_contracts:
-            # Create a concept for the file/module itself
-            file_short = component_name.rsplit("/", 1)[-1] if "/" in component_name else component_name
-            file_concept = concept_map.get(file_short)
-            if not file_concept:
-                file_concept = crud.ontology_concept.get_or_create(
-                    db, name=file_short, concept_type="Service",
-                    tenant_id=tenant_id, source_type="code",
-                    description=f"API module: {component_name}",
-                    confidence_score=0.7,
-                )
-                concept_map[file_short] = file_concept
-
-            for api in api_contracts:
-                method = api.get("method", "")
-                path = api.get("path", "")
-                if not path:
-                    continue
-                endpoint_name = f"{method} {path}" if method else path
-                endpoint_concept = crud.ontology_concept.get_or_create(
-                    db, name=endpoint_name, concept_type="Process",
-                    tenant_id=tenant_id, source_type="code",
-                    description=api.get("description", "")[:500] if api.get("description") else None,
-                    confidence_score=0.8,
-                )
-                if file_concept.id != endpoint_concept.id:
-                    crud.ontology_relationship.create_if_not_exists(
-                        db, source_concept_id=file_concept.id,
-                        target_concept_id=endpoint_concept.id,
-                        relationship_type="exposes_endpoint", tenant_id=tenant_id,
-                        confidence_score=0.85,
-                    )
-                    relationship_count += 1
-
-        # 2c. Component-level dependencies within the same file
-        # If file has multiple significant components, create "contains" relationships
-        if len(concept_map) >= 2 and api_contracts:
-            for comp in components:
-                comp_type = comp.get("type", "")
-                comp_name = comp.get("name", "").strip()
-                if comp_type in significant_types and comp_name in concept_map:
-                    file_short = component_name.rsplit("/", 1)[-1] if "/" in component_name else component_name
-                    if file_short in concept_map and comp_name != file_short:
-                        fc = concept_map[file_short]
-                        cc = concept_map[comp_name]
-                        if fc.id != cc.id:
-                            crud.ontology_relationship.create_if_not_exists(
-                                db, source_concept_id=fc.id,
-                                target_concept_id=cc.id,
-                                relationship_type="contains", tenant_id=tenant_id,
-                                confidence_score=0.75,
-                            )
-                            relationship_count += 1
+        if file_type in self._LOGIC_FILE_TYPES:
+            self._extract_logic_file(structured_analysis, _ensure_concept, _ensure_rel, file_short)
+        elif file_type in self._DATA_FILE_TYPES:
+            self._extract_data_file(structured_analysis, _ensure_concept, _ensure_rel, file_short)
+        elif file_type in self._UI_FILE_TYPES:
+            self._extract_ui_file(structured_analysis, _ensure_concept, _ensure_rel, file_short)
+        elif file_type in self._TEST_FILE_TYPES:
+            self._extract_test_file(structured_analysis, _ensure_concept, _ensure_rel, file_short)
+        elif file_type in self._CONFIG_FILE_TYPES:
+            self._extract_config_file(structured_analysis, _ensure_concept, _ensure_rel, file_short)
+        # Utility/Generic — common extraction above is sufficient
 
         if created_count > 0 or relationship_count > 0:
             self.logger.info(
-                f"📊 Extracted {created_count} concepts + {relationship_count} relationships "
-                f"from code analysis of {component_name}"
+                f"[{file_type}] Extracted {created_count} concepts + {relationship_count} "
+                f"relationships from {component_name}"
             )
+
+    # ── File-type-specific extractors ──────────────────────────────────
+
+    @staticmethod
+    def _extract_logic_file(analysis: dict, ensure_concept, ensure_rel, file_short: str):
+        """Service/Controller/Middleware — business rules, API contracts, security."""
+        # Business rules → Rule concepts + enforces edges
+        for rule in analysis.get("business_rules", []):
+            rule_desc = (rule.get("description", "") or "").strip()
+            rule_loc = (rule.get("code_location", "") or "").strip()
+            rule_type = rule.get("rule_type", "constraint")
+            if not rule_desc:
+                continue
+            rule_name = rule.get("rule_id", "") or rule_desc[:60]
+            ensure_concept(rule_name, "Rule",
+                           description=f"[{rule_type}] {rule_desc}")
+            ensure_rel(rule_name, file_short, "defined_in", confidence=0.85)
+            if rule_loc:
+                ensure_rel(rule_loc, rule_name, "enforces",
+                           description=rule_desc, confidence=0.85)
+
+        # API contracts → Endpoint concepts + exposes edges
+        for api in analysis.get("api_contracts", []):
+            method = api.get("method", "")
+            path = api.get("path", "")
+            if not path:
+                continue
+            endpoint_name = f"{method} {path}" if method else path
+            ensure_concept(endpoint_name, "Process",
+                           description=api.get("description"))
+            ensure_rel(file_short, endpoint_name, "exposes_endpoint", confidence=0.9)
+
+        # Security patterns → Security concepts + protects edges
+        for sec in analysis.get("security_patterns", []):
+            sec_desc = (sec.get("description", "") or "").strip()
+            sec_type = sec.get("pattern_type", "security")
+            if not sec_desc:
+                continue
+            sec_name = f"{sec_type}: {sec_desc[:50]}"
+            ensure_concept(sec_name, "Rule",
+                           description=f"[Security/{sec_type}] {sec.get('implementation', '')}")
+            ensure_rel(sec_name, file_short, "protects", confidence=0.8)
+
+    @staticmethod
+    def _extract_data_file(analysis: dict, ensure_concept, ensure_rel, file_short: str):
+        """Model/Migration — data entities, field relationships, constraints, validations."""
+        # Business rules in models = validation/constraint rules
+        for rule in analysis.get("business_rules", []):
+            rule_desc = (rule.get("description", "") or "").strip()
+            rule_type = rule.get("rule_type", "validation")
+            if not rule_desc:
+                continue
+            rule_name = rule.get("rule_id", "") or rule_desc[:60]
+            ensure_concept(rule_name, "Rule",
+                           description=f"[{rule_type}] {rule_desc}")
+            ensure_rel(rule_name, file_short, "validates", confidence=0.85)
+
+    @staticmethod
+    def _extract_ui_file(analysis: dict, ensure_concept, ensure_rel, file_short: str):
+        """Component (UI) — props, state, events, user interactions."""
+        # Business rules in UI = form validations, conditional rendering
+        for rule in analysis.get("business_rules", []):
+            rule_desc = (rule.get("description", "") or "").strip()
+            if not rule_desc:
+                continue
+            rule_name = rule.get("rule_id", "") or rule_desc[:60]
+            ensure_concept(rule_name, "Rule",
+                           description=f"[UI Rule] {rule_desc}")
+            ensure_rel(file_short, rule_name, "enforces", confidence=0.8)
+
+        # Security patterns in UI = input validation, CSRF tokens
+        for sec in analysis.get("security_patterns", []):
+            sec_desc = (sec.get("description", "") or "").strip()
+            if not sec_desc:
+                continue
+            sec_name = f"UI: {sec_desc[:50]}"
+            ensure_concept(sec_name, "Rule",
+                           description=sec.get("implementation", sec_desc))
+            ensure_rel(sec_name, file_short, "protects", confidence=0.75)
+
+    @staticmethod
+    def _extract_test_file(analysis: dict, ensure_concept, ensure_rel, file_short: str):
+        """Test — test cases as implicit business rules, mocks as system boundaries."""
+        # Business rules in tests = assertions about expected behavior
+        for rule in analysis.get("business_rules", []):
+            rule_desc = (rule.get("description", "") or "").strip()
+            if not rule_desc:
+                continue
+            rule_name = rule.get("rule_id", "") or f"Test: {rule_desc[:50]}"
+            ensure_concept(rule_name, "Rule",
+                           description=f"[Test Assertion] {rule_desc}")
+            ensure_rel(file_short, rule_name, "tests", confidence=0.8)
+
+    @staticmethod
+    def _extract_config_file(analysis: dict, ensure_concept, ensure_rel, file_short: str):
+        """Config — settings, feature flags, connections."""
+        # Business rules in config = threshold/limit configs
+        for rule in analysis.get("business_rules", []):
+            rule_desc = (rule.get("description", "") or "").strip()
+            if not rule_desc:
+                continue
+            rule_name = rule.get("rule_id", "") or rule_desc[:60]
+            ensure_concept(rule_name, "Rule",
+                           description=f"[Config] {rule_desc}")
+            ensure_rel(file_short, rule_name, "configures", confidence=0.85)
+
+    def _save_graph_version(
+        self, db, *, source_type: str, source_id: int, tenant_id: int
+    ) -> None:
+        """
+        Build a graph snapshot from the ontology tables and save it as a
+        KnowledgeGraphVersion for fast rendering and version tracking.
+        """
+        # Fetch all concepts for this source
+        if source_type == "component":
+            concepts = db.query(crud.ontology_concept.model).filter(
+                crud.ontology_concept.model.tenant_id == tenant_id,
+                crud.ontology_concept.model.source_component_id == source_id,
+                crud.ontology_concept.model.is_active == True,
+            ).all()
+        else:
+            concepts = db.query(crud.ontology_concept.model).filter(
+                crud.ontology_concept.model.tenant_id == tenant_id,
+                crud.ontology_concept.model.source_document_id == source_id,
+                crud.ontology_concept.model.is_active == True,
+            ).all()
+
+        if not concepts:
+            return
+
+        concept_ids = {c.id for c in concepts}
+
+        # Fetch relationships between these concepts
+        relationships = db.query(crud.ontology_relationship.model).filter(
+            crud.ontology_relationship.model.tenant_id == tenant_id,
+            crud.ontology_relationship.model.source_concept_id.in_(concept_ids),
+            crud.ontology_relationship.model.target_concept_id.in_(concept_ids),
+        ).all()
+
+        # Build graph JSON
+        nodes = [
+            {
+                "id": c.id,
+                "name": c.name,
+                "type": c.concept_type,
+                "description": c.description or "",
+                "confidence": c.confidence_score,
+                "source_type": c.source_type,
+            }
+            for c in concepts
+        ]
+        edges = [
+            {
+                "id": r.id,
+                "source": r.source_concept_id,
+                "target": r.target_concept_id,
+                "type": r.relationship_type,
+                "description": r.description or "",
+                "confidence": r.confidence_score,
+            }
+            for r in relationships
+        ]
+        graph_data = {
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": {
+                "source_type": source_type,
+                "source_id": source_id,
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+            },
+        }
+
+        crud.knowledge_graph_version.save_version(
+            db,
+            source_type=source_type,
+            source_id=source_id,
+            tenant_id=tenant_id,
+            graph_data=graph_data,
+        )
+        self.logger.info(
+            f"Saved graph version: {source_type}:{source_id} "
+            f"({len(nodes)} nodes, {len(edges)} edges)"
+        )
 
 
 # Create a singleton instance for easy importing elsewhere in the app

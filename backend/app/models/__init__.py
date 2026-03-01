@@ -17,3 +17,5 @@ from .task import Task, TaskComment, TaskStatus, TaskPriority
 from .usage_log import UsageLog, FeatureType, OperationType
 from .repository import Repository  # SPRINT 3: Code Analysis Engine
 from .cross_project_mapping import CrossProjectMapping  # SPRINT 4: Cross-Project Mapping
+from .knowledge_graph_version import KnowledgeGraphVersion  # Graph versioning
+from .requirement_trace import RequirementTrace  # BRD-to-Code traceability

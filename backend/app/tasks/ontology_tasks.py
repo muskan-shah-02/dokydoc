@@ -27,11 +27,11 @@ from app.tasks.utils import run_async
 @celery_app.task(name="extract_ontology_entities", bind=True, max_retries=2)
 def extract_ontology_entities(self, document_id: int, tenant_id: int):
     """
-    Celery task: Extract business entities from a completed document's analysis
-    and populate the DOCUMENT GRAPH.
+    Celery task: Build document knowledge graph from structured_data.
 
-    Fire-and-forget. If it fails, the document remains "completed".
-    After extraction, triggers cross-graph mapping for new concepts.
+    Uses programmatic extraction (NO AI call) — reads the already-analyzed
+    structured_data from Pass 1-3 and builds concepts + relationships directly.
+    After graph building, triggers cross-graph mapping.
     """
     logger.info(f"ONTOLOGY_TASK started for document_id: {document_id}, tenant_id: {tenant_id}")
 
@@ -49,50 +49,16 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
             )
             return
 
-        result = run_async(
-            business_ontology_service.extract_entities_from_analysis(
-                db=db, document_id=document_id, tenant_id=tenant_id
-            )
+        # Programmatic graph building — no AI call, zero cost
+        result = business_ontology_service.build_graph_from_document_analysis(
+            db=db, document_id=document_id, tenant_id=tenant_id
         )
 
         logger.info(
             f"ONTOLOGY_TASK complete for document {document_id}: "
             f"{result.get('entities_created', 0)} entities, "
-            f"{result.get('relationships_created', 0)} relationships"
+            f"{result.get('relationships_created', 0)} relationships (no AI cost)"
         )
-
-        # Deduct cost and log to usage_log for billing analytics
-        cost_inr = result.get("cost_inr", 0)
-        if cost_inr > 0 and tenant_id:
-            try:
-                from app.services.billing_enforcement_service import billing_enforcement_service
-                billing_enforcement_service.deduct_cost(
-                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
-                    description=f"Ontology extraction: {document.filename}"
-                )
-            except Exception as billing_error:
-                logger.warning(f"Ontology billing deduction failed (non-critical): {billing_error}")
-
-            # Log to usage_log with ACTUAL token counts (including thinking tokens)
-            try:
-                from app.services.cost_service import cost_service
-                actual_input = result.get("input_tokens", 0)
-                actual_output = result.get("output_tokens", 0) + result.get("thinking_tokens", 0)
-                crud.usage_log.log_usage(
-                    db=db,
-                    tenant_id=tenant_id,
-                    user_id=None,
-                    document_id=document_id,
-                    feature_type="document_analysis",
-                    operation="ontology_extraction",
-                    model_used="gemini-2.5-flash",
-                    input_tokens=actual_input,
-                    output_tokens=actual_output,
-                    cost_usd=cost_inr / 84.0,
-                    cost_inr=cost_inr,
-                )
-            except Exception as log_error:
-                logger.warning(f"Usage logging failed (non-critical): {log_error}")
 
         # Trigger cross-graph mapping for newly created concepts
         if result.get("entities_created", 0) > 0:
@@ -115,10 +81,11 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
 @celery_app.task(name="extract_code_ontology_entities", bind=True, max_retries=2)
 def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
     """
-    Celery task: Extract business entities from a repository's code analysis
-    and populate the CODE GRAPH with source_type="code".
+    Celery task: Trigger cross-graph mapping after code analysis completes.
 
-    After extraction, triggers cross-graph mapping (algorithmic, not AI).
+    Code knowledge graphs are now built DURING analysis (in code_analysis_service
+    _extract_ontology_from_analysis) so this task only needs to trigger the
+    algorithmic mapping between document and code graphs. Zero AI cost.
     """
     logger.info(f"CODE_ONTOLOGY_TASK started for repo_id: {repo_id}, tenant_id: {tenant_id}")
 
@@ -136,59 +103,16 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             )
             return
 
-        result = run_async(
-            business_ontology_service.extract_entities_from_code(
-                db=db, repo_id=repo_id, tenant_id=tenant_id
+        # Graphs are already built during code analysis.
+        # Just trigger cross-graph mapping (algorithmic, not AI).
+        try:
+            run_cross_graph_mapping.delay(tenant_id)
+            logger.info(
+                f"CODE_ONTOLOGY_TASK: Dispatched cross-graph mapping for tenant {tenant_id} "
+                f"(code graphs already built during analysis)"
             )
-        )
-
-        logger.info(
-            f"CODE_ONTOLOGY_TASK complete for repo {repo_id}: "
-            f"{result.get('entities_created', 0)} entities, "
-            f"{result.get('relationships_created', 0)} relationships"
-        )
-
-        # Deduct cost and log to usage_log for billing analytics
-        cost_inr = result.get("cost_inr", 0)
-        if cost_inr > 0 and tenant_id:
-            try:
-                from app.services.billing_enforcement_service import billing_enforcement_service
-                billing_enforcement_service.deduct_cost(
-                    db=db, tenant_id=tenant_id, cost_inr=cost_inr,
-                    description=f"Code ontology extraction: {repo.name}"
-                )
-            except Exception as billing_error:
-                logger.warning(f"Code ontology billing deduction failed (non-critical): {billing_error}")
-
-            # Log to usage_log with ACTUAL token counts (including thinking tokens)
-            try:
-                actual_input = result.get("input_tokens", 0)
-                actual_output = result.get("output_tokens", 0) + result.get("thinking_tokens", 0)
-                crud.usage_log.log_usage(
-                    db=db,
-                    tenant_id=tenant_id,
-                    user_id=None,
-                    feature_type="code_analysis",
-                    operation="code_ontology_extraction",
-                    model_used="gemini-2.5-flash",
-                    input_tokens=actual_input,
-                    output_tokens=actual_output,
-                    cost_usd=cost_inr / 84.0,
-                    cost_inr=cost_inr,
-                )
-            except Exception as log_error:
-                logger.warning(f"Usage logging failed (non-critical): {log_error}")
-
-        # Trigger cross-graph mapping (algorithmic — replaces expensive AI reconciliation)
-        if result.get("entities_created", 0) > 0:
-            try:
-                run_cross_graph_mapping.delay(tenant_id)
-                logger.info(
-                    f"Dispatched algorithmic cross-graph mapping for tenant {tenant_id} "
-                    f"(replaces AI reconciliation — 97% cheaper)"
-                )
-            except Exception as map_err:
-                logger.warning(f"Failed to dispatch mapping task (non-critical): {map_err}")
+        except Exception as map_err:
+            logger.warning(f"Failed to dispatch mapping task (non-critical): {map_err}")
 
     except Exception as e:
         logger.error(f"CODE_ONTOLOGY_TASK failed for repo {repo_id}: {e}")

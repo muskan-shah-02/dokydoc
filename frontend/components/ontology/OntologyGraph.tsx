@@ -10,6 +10,8 @@ interface GraphNode {
   concept_type: string;
   source_type?: string;
   confidence_score: number;
+  description?: string;
+  source_component_id?: number;
 }
 
 interface GraphEdge {
@@ -96,6 +98,12 @@ const TYPE_COLORS: Record<
     text: "#3730a3",
     gradient: "#e0e7ff",
   },
+  Rule: {
+    bg: "#fff7ed",
+    border: "#fb923c",
+    text: "#9a3412",
+    gradient: "#ffedd5",
+  },
   Default: {
     bg: "#f9fafb",
     border: "#9ca3af",
@@ -119,6 +127,21 @@ const REL_COLORS: Record<string, string> = {
   relates_to: "#9ca3af",
   produces: "#f87171",
   consumes: "#2dd4bf",
+  defined_in: "#60a5fa",
+  calls: "#22c55e",
+  delegates_to: "#14b8a6",
+  enforces: "#f59e0b",
+  exposes_endpoint: "#8b5cf6",
+  protects: "#ef4444",
+  validates: "#f97316",
+  flows_to: "#06b6d4",
+  followed_by: "#6366f1",
+  inherits: "#a855f7",
+  configures: "#84cc16",
+  tests: "#ec4899",
+  specifies: "#3b82f6",
+  has_many: "#10b981",
+  belongs_to: "#10b981",
 };
 
 function getRelColor(rel: string): string {
@@ -265,16 +288,16 @@ function mindMapLayout(
     });
   }
 
-  // Light force repulsion pass to remove overlaps (20 iterations)
-  for (let iter = 0; iter < 20; iter++) {
+  // Force repulsion pass to remove overlaps (50 iterations for better separation)
+  for (let iter = 0; iter < 50; iter++) {
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const dx = nodes[i].x - nodes[j].x;
         const dy = nodes[i].y - nodes[j].y;
         const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const minDist = (nodes[i].w + nodes[j].w) / 2 + 30;
+        const minDist = (nodes[i].w + nodes[j].w) / 2 + 50;
         if (dist < minDist) {
-          const push = (minDist - dist) * 0.3;
+          const push = (minDist - dist) * 0.35;
           const px = (dx / dist) * push;
           const py = (dy / dist) * push;
           // Don't push root
@@ -439,6 +462,9 @@ export function OntologyGraph({
   const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const [expandedCluster, setExpandedCluster] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null);
+  const [dragNodeId, setDragNodeId] = useState<number | null>(null);
+  const [nodePositions, setNodePositions] = useState<Map<number, { x: number; y: number }>>(new Map());
+  const dragStartRef = useRef({ x: 0, y: 0, nodeX: 0, nodeY: 0 });
 
   const isLargeGraph = nodes.length > 200;
 
@@ -538,30 +564,71 @@ export function OntologyGraph({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      // Left-click drag or middle-click to pan
+      // Only start panning if not dragging a node
+      if (dragNodeId !== null) return;
       if (e.button === 0 || e.button === 1) {
         setIsPanning(true);
         panStartRef.current = { x: e.clientX, y: e.clientY, panX, panY };
         e.preventDefault();
       }
     },
-    [panX, panY]
+    [panX, panY, dragNodeId]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      if (dragNodeId !== null) {
+        handleNodeDrag(e);
+        return;
+      }
       if (!isPanning) return;
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
       setPanX(panStartRef.current.panX + dx);
       setPanY(panStartRef.current.panY + dy);
     },
-    [isPanning]
+    [isPanning, dragNodeId, handleNodeDrag]
   );
 
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
+    setDragNodeId(null);
   }, []);
+
+  // Node drag handlers
+  const handleNodeDragStart = useCallback(
+    (e: React.MouseEvent, nodeId: number) => {
+      e.stopPropagation();
+      const n = nodeMap.get(nodeId);
+      if (!n) return;
+      const pos = nodePositions.get(nodeId);
+      setDragNodeId(nodeId);
+      dragStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        nodeX: pos?.x ?? n.x,
+        nodeY: pos?.y ?? n.y,
+      };
+    },
+    [nodeMap, nodePositions]
+  );
+
+  const handleNodeDrag = useCallback(
+    (e: React.MouseEvent) => {
+      if (dragNodeId === null) return;
+      const dx = (e.clientX - dragStartRef.current.x) / zoom;
+      const dy = (e.clientY - dragStartRef.current.y) / zoom;
+      setNodePositions((prev) => {
+        const next = new Map(prev);
+        next.set(dragNodeId, {
+          x: dragStartRef.current.nodeX + dx,
+          y: dragStartRef.current.nodeY + dy,
+        });
+        return next;
+      });
+    },
+    [dragNodeId, zoom]
+  );
 
   const resetView = useCallback(() => {
     setZoom(1);
@@ -574,9 +641,13 @@ export function OntologyGraph({
   // --- Edge path with node radius offset ---
 
   function getEdgePath(e: GraphEdge): string {
-    const src = nodeMap.get(e.source_concept_id);
-    const tgt = nodeMap.get(e.target_concept_id);
-    if (!src || !tgt) return "";
+    const srcBase = nodeMap.get(e.source_concept_id);
+    const tgtBase = nodeMap.get(e.target_concept_id);
+    if (!srcBase || !tgtBase) return "";
+    const srcPos = nodePositions.get(e.source_concept_id);
+    const tgtPos = nodePositions.get(e.target_concept_id);
+    const src = { ...srcBase, x: srcPos?.x ?? srcBase.x, y: srcPos?.y ?? srcBase.y };
+    const tgt = { ...tgtBase, x: tgtPos?.x ?? tgtBase.x, y: tgtPos?.y ?? tgtBase.y };
     const dx = tgt.x - src.x;
     const dy = tgt.y - src.y;
     const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
@@ -686,7 +757,7 @@ export function OntologyGraph({
             </>
           )}
           <span className="text-gray-300 text-[10px]">
-            Drag=pan · Scroll=zoom
+            Drag node=move · Drag bg=pan · Scroll=zoom
           </span>
         </div>
       </div>
@@ -744,6 +815,11 @@ export function OntologyGraph({
                 </span>
               )}
             </div>
+            {n.description && (
+              <p className="mt-1.5 text-xs text-gray-600 leading-tight line-clamp-3">
+                {n.description}
+              </p>
+            )}
             <div className="mt-1 flex items-center gap-1 text-[10px] text-gray-400">
               <span>
                 Confidence:{" "}
@@ -1017,9 +1093,13 @@ export function OntologyGraph({
             <>
               {/* Edges — curved bezier with gradient colors */}
               {visibleEdges.map((e) => {
-                const src = nodeMap.get(e.source_concept_id);
-                const tgt = nodeMap.get(e.target_concept_id);
-                if (!src || !tgt) return null;
+                const srcBase = nodeMap.get(e.source_concept_id);
+                const tgtBase = nodeMap.get(e.target_concept_id);
+                if (!srcBase || !tgtBase) return null;
+                const srcPos = nodePositions.get(e.source_concept_id);
+                const tgtPos = nodePositions.get(e.target_concept_id);
+                const src = { x: srcPos?.x ?? srcBase.x, y: srcPos?.y ?? srcBase.y };
+                const tgt = { x: tgtPos?.x ?? tgtBase.x, y: tgtPos?.y ?? tgtBase.y };
                 const isConnected =
                   selectedId === e.source_concept_id ||
                   selectedId === e.target_concept_id;
@@ -1087,6 +1167,10 @@ export function OntologyGraph({
                 const color = getTypeColor(n.concept_type);
                 const isSelected = n.id === selectedId;
                 const isHovered = n.id === hoveredNodeId;
+                const isDragging = n.id === dragNodeId;
+                const pos = nodePositions.get(n.id);
+                const nx = pos?.x ?? n.x;
+                const ny = pos?.y ?? n.y;
                 const w = n.w;
                 const h = NODE_HEIGHT;
                 const displayName =
@@ -1097,15 +1181,16 @@ export function OntologyGraph({
                 return (
                   <g
                     key={`node-${n.id}`}
-                    transform={`translate(${n.x}, ${n.y})`}
+                    transform={`translate(${nx}, ${ny})`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onSelectNode(n.id);
+                      if (!isDragging) onSelectNode(n.id);
                     }}
+                    onMouseDown={(e) => handleNodeDragStart(e, n.id)}
                     onMouseEnter={() => setHoveredNodeId(n.id)}
                     onMouseLeave={() => setHoveredNodeId(null)}
-                    className="cursor-pointer"
-                    style={{ transition: "transform 0.1s" }}
+                    className={isDragging ? "cursor-grabbing" : "cursor-grab"}
+                    style={{ transition: isDragging ? "none" : "transform 0.1s" }}
                   >
                     {/* Node card */}
                     <rect

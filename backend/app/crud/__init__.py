@@ -24,3 +24,9 @@ from .crud_concept_mapping import concept_mapping
 
 # SPRINT 4: Cross-Project Mapping
 from .crud_cross_project_mapping import cross_project_mapping
+
+# Graph Versioning
+from .crud_knowledge_graph_version import knowledge_graph_version
+
+# Requirement Traceability
+from .crud_requirement_trace import requirement_trace

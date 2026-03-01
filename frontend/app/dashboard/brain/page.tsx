@@ -19,6 +19,7 @@ import {
   BrainBreadcrumb,
   BreadcrumbSegment,
 } from "@/components/ontology/BrainBreadcrumb";
+import { SystemArchitectureView } from "@/components/ontology/SystemArchitectureView";
 
 // --- Types ---
 
@@ -115,9 +116,17 @@ export default function BrainDashboardPage() {
             `/ontology/graph/domain/${next.repoId}`
           );
         } else if (next.level === 1 && next.componentId) {
-          data = await api.get<any>(
-            `/ontology/graph/component/${next.componentId}`
-          );
+          // Use pre-built graph version (fast) with fallback to live query
+          try {
+            const versionData = await api.get<any>(
+              `/ontology/graph/component/${next.componentId}/current`
+            );
+            data = versionData.graph_data;
+          } catch {
+            data = await api.get<any>(
+              `/ontology/graph/component/${next.componentId}`
+            );
+          }
         }
         setDrillData(data);
       } catch {
@@ -297,12 +306,15 @@ export default function BrainDashboardPage() {
                   data={metaData}
                   onSelectMapping={(id) => {
                     // Find the project for this node and drill into it
-                    const node = metaData.nodes.find((n) => n.id === id);
+                    const node = metaData.nodes.find((n: any) => n.id === id);
                     if (node && node.initiative_id) {
-                      // Find a repo for this project to drill into system view
-                      router.push(
-                        `/dashboard/projects/${node.initiative_id}`
-                      );
+                      // Drill into Level 3 (System Architecture) instead of navigating away
+                      drillInto({
+                        level: 3,
+                        projectId: node.initiative_id,
+                        projectName: node.name || `Project ${node.initiative_id}`,
+                        repoId: node.repo_id || node.initiative_id,
+                      });
                     }
                   }}
                 />
@@ -342,49 +354,26 @@ export default function BrainDashboardPage() {
                 into file-level view.
               </p>
             </div>
+            {drill.projectId && (
+              <button
+                onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
+                className="mr-5 mt-2 rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+              >
+                View Alignment (L4)
+              </button>
+            )}
             {drillData?.system_nodes?.length > 0 ? (
-              <div className="p-5">
-                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                  {drillData.system_nodes.map((domain: any, i: number) => (
-                    <button
-                      key={i}
-                      onClick={() =>
-                        drillInto({
-                          ...drill,
-                          level: 2,
-                          domainName: domain.domain_name,
-                        })
-                      }
-                      className="rounded-lg border bg-gradient-to-br from-white to-blue-50/50 p-4 text-left hover:border-blue-300 hover:shadow-sm"
-                    >
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-semibold text-gray-900">
-                          {domain.domain_name}
-                        </p>
-                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700">
-                          {domain.concept_count} concepts
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-gray-500">
-                        {domain.file_count} files
-                      </p>
-                      {domain.key_concepts?.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {domain.key_concepts
-                            .slice(0, 3)
-                            .map((c: string, j: number) => (
-                              <span
-                                key={j}
-                                className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600"
-                              >
-                                {c}
-                              </span>
-                            ))}
-                        </div>
-                      )}
-                    </button>
-                  ))}
-                </div>
+              <div style={{ height: "550px" }}>
+                <SystemArchitectureView
+                  data={drillData}
+                  onSelectDomain={(domainName) =>
+                    drillInto({
+                      ...drill,
+                      level: 2,
+                      domainName,
+                    })
+                  }
+                />
               </div>
             ) : (
               <div className="flex h-60 flex-col items-center justify-center text-gray-400">
@@ -416,6 +405,8 @@ export default function BrainDashboardPage() {
                         name: n.name,
                         concept_type: n.concept_type,
                         confidence_score: n.confidence_score,
+                        description: n.description,
+                        source_component_id: n.source_component_id,
                       }))}
                       edges={domain.edges.map((e: any) => ({
                         id: e.id,
@@ -424,8 +415,20 @@ export default function BrainDashboardPage() {
                         relationship_type: e.relationship_type,
                         confidence_score: e.confidence_score,
                       }))}
-                      selectedNodeId={null}
-                      onSelectNode={() => {}}
+                      selectedId={null}
+                      onSelectNode={(id) => {
+                        if (!id) return;
+                        // Find the node — if it has a source_component_id, drill to file level
+                        const node = domain.nodes.find((n: any) => n.id === id);
+                        if (node?.source_component_id) {
+                          drillInto({
+                            ...drill,
+                            level: 1,
+                            componentId: node.source_component_id,
+                            componentName: node.name,
+                          });
+                        }
+                      }}
                     />
                   );
                 })()}
@@ -439,29 +442,39 @@ export default function BrainDashboardPage() {
         ) : (
           /* Level 1: File subgraph */
           <div>
-            <div className="border-b px-5 py-3">
+            <div className="border-b px-5 py-3 flex items-center justify-between">
               <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
                 <FileText className="h-4 w-4 text-orange-500" />
                 Level 1 — File: {drill.componentName}
               </h2>
+              {drill.componentId && (
+                <button
+                  onClick={() => router.push(`/dashboard/code/${drill.componentId}`)}
+                  className="rounded-md bg-orange-50 px-3 py-1.5 text-xs font-medium text-orange-700 hover:bg-orange-100"
+                >
+                  View Full Details
+                </button>
+              )}
             </div>
             {drillData?.nodes?.length > 0 ? (
               <div style={{ height: "500px" }}>
                 <OntologyGraph
                   nodes={drillData.nodes.map((n: any) => ({
-                    id: n.id,
+                    id: n.id ?? n.name,
                     name: n.name,
-                    concept_type: n.concept_type,
-                    confidence_score: n.confidence_score,
+                    concept_type: n.type ?? n.concept_type,
+                    confidence_score: n.confidence ?? n.confidence_score ?? 0.7,
+                    description: n.description,
+                    source_type: n.source_type,
                   }))}
-                  edges={drillData.edges.map((e: any) => ({
-                    id: e.id,
-                    source_concept_id: e.source_concept_id,
-                    target_concept_id: e.target_concept_id,
-                    relationship_type: e.relationship_type,
-                    confidence_score: e.confidence_score,
+                  edges={(drillData.edges || []).map((e: any) => ({
+                    id: e.id ?? `${e.source}-${e.target}`,
+                    source_concept_id: e.source ?? e.source_concept_id,
+                    target_concept_id: e.target ?? e.target_concept_id,
+                    relationship_type: e.type ?? e.relationship_type,
+                    confidence_score: e.confidence ?? e.confidence_score ?? 0.7,
                   }))}
-                  selectedNodeId={null}
+                  selectedId={null}
                   onSelectNode={() => {}}
                 />
               </div>

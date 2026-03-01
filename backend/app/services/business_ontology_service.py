@@ -231,6 +231,240 @@ class BusinessOntologyService(LoggerMixin):
 
         return entities_created, relationships_created
 
+    def build_graph_from_document_analysis(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> Dict:
+        """
+        Programmatic graph builder for documents — NO AI call.
+        Reads the document's analysis results (structured_data from Pass 1-3) and
+        extracts concepts + relationships directly from the structured fields.
+
+        Replaces the old extract_entities_from_analysis() which made a 4th AI call.
+        """
+        self.logger.info(f"Building document graph for document {document_id} (no AI call)")
+
+        analysis_results = crud.analysis_result.get_multi_by_document(
+            db=db, document_id=document_id, tenant_id=tenant_id
+        )
+        if not analysis_results:
+            return {"entities_created": 0, "relationships_created": 0, "cost_inr": 0}
+
+        initiative_id = self._resolve_initiative_for_document(
+            db=db, document_id=document_id, tenant_id=tenant_id
+        )
+
+        entities_created = 0
+        relationships_created = 0
+        concept_map = {}  # lowered name -> OntologyConcept
+
+        def _ensure_doc_concept(name: str, concept_type: str, description: str = None,
+                                confidence: float = 0.75):
+            nonlocal entities_created
+            name = (name or "").strip()
+            if not name or len(name) < 2:
+                return None
+            key = name.lower()
+            if key in concept_map:
+                return concept_map[key]
+            concept = self.get_or_create_concept(
+                db=db, name=name, concept_type=concept_type,
+                tenant_id=tenant_id, description=description[:500] if description else None,
+                confidence_score=confidence, source_type="document",
+                initiative_id=initiative_id, source_document_id=document_id,
+            )
+            concept_map[key] = concept
+            entities_created += 1
+            return concept
+
+        def _ensure_doc_rel(source_name: str, target_name: str, rel_type: str,
+                            description: str = None, confidence: float = 0.8):
+            nonlocal relationships_created
+            src = concept_map.get((source_name or "").strip().lower())
+            tgt = concept_map.get((target_name or "").strip().lower())
+            if not src or not tgt or src.id == tgt.id:
+                return
+            self.link_concepts(
+                db=db, source_id=src.id, target_id=tgt.id,
+                relationship_type=rel_type, tenant_id=tenant_id,
+                description=description[:500] if description else None,
+                confidence_score=confidence,
+            )
+            relationships_created += 1
+
+        # Create a root concept for the document itself
+        document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+        doc_name = document.filename if document else f"Document-{document_id}"
+        _ensure_doc_concept(doc_name, "Entity", description="Source document")
+
+        for result in analysis_results:
+            data = result.structured_data
+            if not data or not isinstance(data, dict):
+                continue
+
+            # Extract from common structured_data keys produced by document analysis
+            # Requirements (BRD/SRS)
+            for req in data.get("requirements", []):
+                if isinstance(req, dict):
+                    req_name = req.get("name", "") or req.get("title", "") or req.get("id", "")
+                    req_desc = req.get("description", "") or req.get("text", "")
+                    if req_name:
+                        _ensure_doc_concept(req_name, "Process", description=req_desc, confidence=0.85)
+                        _ensure_doc_rel(doc_name, req_name, "contains")
+                elif isinstance(req, str) and len(req.strip()) >= 3:
+                    _ensure_doc_concept(req.strip(), "Process", confidence=0.7)
+                    _ensure_doc_rel(doc_name, req.strip(), "contains")
+
+            for req in data.get("functional_requirements", []):
+                if isinstance(req, dict):
+                    req_name = req.get("name", "") or req.get("title", "") or req.get("id", "")
+                    req_desc = req.get("description", "") or req.get("text", "")
+                    if req_name:
+                        _ensure_doc_concept(req_name, "Process", description=req_desc, confidence=0.85)
+                        _ensure_doc_rel(doc_name, req_name, "specifies")
+
+            for req in data.get("non_functional_requirements", []):
+                if isinstance(req, dict):
+                    req_name = req.get("name", "") or req.get("title", "") or req.get("id", "")
+                    req_desc = req.get("description", "") or req.get("text", "")
+                    if req_name:
+                        _ensure_doc_concept(req_name, "Attribute", description=req_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, req_name, "specifies")
+
+            # Business rules
+            for rule in data.get("business_rules", []):
+                if isinstance(rule, dict):
+                    rule_name = rule.get("name", "") or rule.get("rule_id", "") or rule.get("id", "")
+                    rule_desc = rule.get("description", "") or rule.get("text", "")
+                    if rule_name:
+                        _ensure_doc_concept(rule_name, "Rule", description=rule_desc, confidence=0.85)
+                        _ensure_doc_rel(doc_name, rule_name, "defines")
+                elif isinstance(rule, str) and len(rule.strip()) >= 3:
+                    _ensure_doc_concept(rule.strip(), "Rule", confidence=0.7)
+                    _ensure_doc_rel(doc_name, rule.strip(), "defines")
+
+            # Stakeholders / Actors
+            for actor in data.get("stakeholders", data.get("actors", [])):
+                if isinstance(actor, dict):
+                    actor_name = actor.get("name", "") or actor.get("role", "")
+                    actor_desc = actor.get("description", "") or actor.get("responsibility", "")
+                    if actor_name:
+                        _ensure_doc_concept(actor_name, "Entity", description=actor_desc, confidence=0.8)
+                        _ensure_doc_rel(actor_name, doc_name, "participates_in")
+                elif isinstance(actor, str) and len(actor.strip()) >= 2:
+                    _ensure_doc_concept(actor.strip(), "Entity", confidence=0.7)
+                    _ensure_doc_rel(actor.strip(), doc_name, "participates_in")
+
+            # User stories
+            for story in data.get("user_stories", []):
+                if isinstance(story, dict):
+                    story_name = story.get("title", "") or story.get("name", "") or story.get("id", "")
+                    story_desc = story.get("description", "") or story.get("story", "")
+                    actor = story.get("actor", "") or story.get("persona", "") or story.get("as_a", "")
+                    if story_name:
+                        _ensure_doc_concept(story_name, "Process", description=story_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, story_name, "contains")
+                        if actor:
+                            _ensure_doc_concept(actor, "Entity", confidence=0.7)
+                            _ensure_doc_rel(actor, story_name, "performs")
+
+            # Acceptance criteria
+            for ac in data.get("acceptance_criteria", []):
+                if isinstance(ac, dict):
+                    ac_name = ac.get("name", "") or ac.get("id", "") or ac.get("criterion", "")[:60]
+                    ac_desc = ac.get("description", "") or ac.get("criterion", "")
+                    if ac_name:
+                        _ensure_doc_concept(ac_name, "Rule", description=ac_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, ac_name, "requires")
+
+            # System references / integrations
+            for sys_ref in data.get("systems", data.get("integrations", [])):
+                if isinstance(sys_ref, dict):
+                    sys_name = sys_ref.get("name", "") or sys_ref.get("system", "")
+                    sys_desc = sys_ref.get("description", "") or sys_ref.get("purpose", "")
+                    if sys_name:
+                        _ensure_doc_concept(sys_name, "Service", description=sys_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, sys_name, "references")
+                elif isinstance(sys_ref, str) and len(sys_ref.strip()) >= 2:
+                    _ensure_doc_concept(sys_ref.strip(), "Service", confidence=0.7)
+                    _ensure_doc_rel(doc_name, sys_ref.strip(), "references")
+
+            # Data entities from document
+            for entity in data.get("data_entities", data.get("entities", data.get("data_models", []))):
+                if isinstance(entity, dict):
+                    ent_name = entity.get("name", "") or entity.get("entity", "")
+                    ent_desc = entity.get("description", "") or entity.get("purpose", "")
+                    if ent_name:
+                        _ensure_doc_concept(ent_name, "Entity", description=ent_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, ent_name, "describes")
+                elif isinstance(entity, str) and len(entity.strip()) >= 2:
+                    _ensure_doc_concept(entity.strip(), "Entity", confidence=0.7)
+                    _ensure_doc_rel(doc_name, entity.strip(), "describes")
+
+            # Process flows
+            for flow in data.get("process_flows", data.get("workflows", [])):
+                if isinstance(flow, dict):
+                    flow_name = flow.get("name", "") or flow.get("process", "")
+                    flow_desc = flow.get("description", "")
+                    steps = flow.get("steps", [])
+                    if flow_name:
+                        _ensure_doc_concept(flow_name, "Process", description=flow_desc, confidence=0.85)
+                        _ensure_doc_rel(doc_name, flow_name, "contains")
+                        # Link sequential steps
+                        prev_step = None
+                        for step in steps:
+                            step_name = step if isinstance(step, str) else (
+                                step.get("name", "") or step.get("action", ""))
+                            if step_name and len(step_name.strip()) >= 2:
+                                _ensure_doc_concept(step_name.strip(), "Process", confidence=0.7)
+                                _ensure_doc_rel(flow_name, step_name.strip(), "contains")
+                                if prev_step:
+                                    _ensure_doc_rel(prev_step, step_name.strip(), "followed_by")
+                                prev_step = step_name.strip()
+
+            # Security requirements
+            for sec in data.get("security_requirements", data.get("security", [])):
+                if isinstance(sec, dict):
+                    sec_name = sec.get("name", "") or sec.get("requirement", "")[:60]
+                    sec_desc = sec.get("description", "") or sec.get("requirement", "")
+                    if sec_name:
+                        _ensure_doc_concept(sec_name, "Rule", description=f"[Security] {sec_desc}", confidence=0.8)
+                        _ensure_doc_rel(doc_name, sec_name, "requires")
+
+            # Objectives / goals
+            for obj in data.get("objectives", data.get("goals", data.get("business_objectives", []))):
+                if isinstance(obj, dict):
+                    obj_name = obj.get("name", "") or obj.get("objective", "")[:60]
+                    obj_desc = obj.get("description", "") or obj.get("objective", "")
+                    if obj_name:
+                        _ensure_doc_concept(obj_name, "Process", description=obj_desc, confidence=0.8)
+                        _ensure_doc_rel(doc_name, obj_name, "aims_for")
+                elif isinstance(obj, str) and len(obj.strip()) >= 3:
+                    _ensure_doc_concept(obj.strip(), "Process", confidence=0.7)
+                    _ensure_doc_rel(doc_name, obj.strip(), "aims_for")
+
+        self.logger.info(
+            f"Document graph built for {document_id}: "
+            f"{entities_created} concepts, {relationships_created} relationships (no AI cost)"
+        )
+
+        # Save graph version snapshot for fast rendering + versioning
+        if entities_created > 0:
+            try:
+                self._save_document_graph_version(
+                    db=db, document_id=document_id, tenant_id=tenant_id
+                )
+            except Exception as e:
+                self.logger.warning(f"Document graph version save failed (non-fatal): {e}")
+
+        return {
+            "entities_created": entities_created,
+            "relationships_created": relationships_created,
+            "cost_inr": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+        }
+
     async def extract_entities_from_code(
         self, db: Session, *, repo_id: int, tenant_id: int
     ) -> Dict:
@@ -638,6 +872,58 @@ class BusinessOntologyService(LoggerMixin):
                 "confidence": c.confidence_score
             })
         return vocabulary
+
+    def _save_document_graph_version(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> None:
+        """Build and save a graph snapshot for a document's ontology concepts."""
+        concepts = db.query(crud.ontology_concept.model).filter(
+            crud.ontology_concept.model.tenant_id == tenant_id,
+            crud.ontology_concept.model.source_document_id == document_id,
+            crud.ontology_concept.model.is_active == True,
+        ).all()
+        if not concepts:
+            return
+
+        concept_ids = {c.id for c in concepts}
+        relationships = db.query(crud.ontology_relationship.model).filter(
+            crud.ontology_relationship.model.tenant_id == tenant_id,
+            crud.ontology_relationship.model.source_concept_id.in_(concept_ids),
+            crud.ontology_relationship.model.target_concept_id.in_(concept_ids),
+        ).all()
+
+        nodes = [
+            {
+                "id": c.id, "name": c.name, "type": c.concept_type,
+                "description": c.description or "", "confidence": c.confidence_score,
+                "source_type": c.source_type,
+            }
+            for c in concepts
+        ]
+        edges = [
+            {
+                "id": r.id, "source": r.source_concept_id,
+                "target": r.target_concept_id, "type": r.relationship_type,
+                "description": r.description or "", "confidence": r.confidence_score,
+            }
+            for r in relationships
+        ]
+        graph_data = {
+            "nodes": nodes, "edges": edges,
+            "metadata": {
+                "source_type": "document", "source_id": document_id,
+                "total_nodes": len(nodes), "total_edges": len(edges),
+            },
+        }
+
+        crud.knowledge_graph_version.save_version(
+            db, source_type="document", source_id=document_id,
+            tenant_id=tenant_id, graph_data=graph_data,
+        )
+        self.logger.info(
+            f"Saved document graph version: document:{document_id} "
+            f"({len(nodes)} nodes, {len(edges)} edges)"
+        )
 
 
 # Global instance
