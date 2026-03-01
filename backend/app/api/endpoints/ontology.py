@@ -874,10 +874,11 @@ def get_alignment_graph(
     mapped_code_ids = {m.code_concept_id for m in mappings}
 
     # Get document concepts for this initiative
+    # Include "both" because exact-matched concepts get promoted from "document" to "both"
     doc_q = db.query(OntologyConcept).filter(
         OntologyConcept.tenant_id == tenant_id,
         OntologyConcept.is_active == True,
-        OntologyConcept.source_type == "document",
+        OntologyConcept.source_type.in_(["document", "both"]),
     )
     if initiative_id:
         doc_q = doc_q.filter(or_(
@@ -921,6 +922,14 @@ def get_alignment_graph(
     total_doc = len(all_doc_concepts)
     mapped_doc_count = sum(1 for c in all_doc_concepts if c.id in mapped_doc_ids)
 
+    # Build gap analysis data (unmapped doc concepts = gaps, unmapped code = undocumented)
+    unmapped_doc = [c for c in all_doc_concepts if c.id not in mapped_doc_ids]
+    unmapped_code = [c for c in all_code_concepts if c.id not in mapped_code_ids]
+
+    # Build concept name lookup for mapping enrichment
+    concept_map = {c.id: c.name for c in all_doc_concepts}
+    concept_map.update({c.id: c.name for c in all_code_concepts})
+
     return {
         "document_nodes": [_node(c) for c in doc_concepts],
         "code_nodes": [_node(c) for c in code_concepts],
@@ -930,6 +939,8 @@ def get_alignment_graph(
                 "code_concept_id": m.code_concept_id, "mapping_method": m.mapping_method,
                 "confidence_score": m.confidence_score, "status": m.status,
                 "relationship_type": m.relationship_type,
+                "document_concept_name": concept_map.get(m.document_concept_id, ""),
+                "code_concept_name": concept_map.get(m.code_concept_id, ""),
             }
             for m in visible_mappings
         ],
@@ -940,8 +951,87 @@ def get_alignment_graph(
             "mapped_code_concepts": sum(1 for c in all_code_concepts if c.id in mapped_code_ids),
             "coverage_pct": round(mapped_doc_count / total_doc, 3) if total_doc else 0,
         },
+        "gap_analysis": {
+            "gaps": [{"id": c.id, "name": c.name, "concept_type": c.concept_type} for c in unmapped_doc[:50]],
+            "undocumented": [{"id": c.id, "name": c.name, "concept_type": c.concept_type} for c in unmapped_code[:50]],
+            "contradictions": [],
+            "total_gaps": len(unmapped_doc),
+            "total_undocumented": len(unmapped_code),
+            "total_contradictions": 0,
+        },
         "initiative_id": initiative_id,
     }
+
+
+@router.post("/run-mapping")
+def trigger_cross_graph_mapping(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Manually trigger the 3-tier cross-graph mapping pipeline.
+    Dispatches a Celery task that matches document concepts ↔ code concepts.
+    """
+    from app.tasks.ontology_tasks import run_cross_graph_mapping
+    try:
+        run_cross_graph_mapping.delay(tenant_id)
+        return {"status": "dispatched", "message": "Cross-graph mapping task queued"}
+    except Exception as e:
+        logger.error(f"Failed to dispatch mapping task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to dispatch mapping task")
+
+
+@router.post("/extract/document/{document_id}")
+def trigger_document_extraction(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Manually trigger ontology entity extraction for a document.
+    Fires the Celery task that reads analysis results and creates OntologyConcepts.
+    """
+    doc = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Document status is '{doc.status}', must be 'completed'")
+
+    from app.tasks.ontology_tasks import extract_ontology_entities
+    try:
+        extract_ontology_entities.delay(document_id, tenant_id)
+        return {"status": "dispatched", "message": f"Ontology extraction queued for document {document_id}"}
+    except Exception as e:
+        logger.error(f"Failed to dispatch extraction task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to dispatch extraction task")
+
+
+@router.post("/extract/repository/{repo_id}")
+def trigger_repository_extraction(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Manually trigger ontology entity extraction for a repository.
+    Fires the Celery task that reads code analysis and creates OntologyConcepts.
+    """
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if repo.analysis_status != "completed":
+        raise HTTPException(status_code=400, detail=f"Repository status is '{repo.analysis_status}', must be 'completed'")
+
+    from app.tasks.ontology_tasks import extract_code_ontology_entities
+    try:
+        extract_code_ontology_entities.delay(repo_id, tenant_id)
+        return {"status": "dispatched", "message": f"Code ontology extraction queued for repo {repo_id}"}
+    except Exception as e:
+        logger.error(f"Failed to dispatch extraction task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to dispatch extraction task")
 
 
 @router.get("/graph/brain")

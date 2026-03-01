@@ -74,6 +74,8 @@ export default function ProjectDetailPage() {
   const [alignmentLoading, setAlignmentLoading] = useState(false);
   const [alignmentOpen, setAlignmentOpen] = useState(false);
   const [selectedMappingId, setSelectedMappingId] = useState<number | null>(null);
+  const [mappingRunning, setMappingRunning] = useState(false);
+  const [extractionRunning, setExtractionRunning] = useState(false);
 
   // For linking assets
   const [showLinkDialog, setShowLinkDialog] = useState(false);
@@ -149,19 +151,57 @@ export default function ProjectDetailPage() {
     } catch { /* ignore */ }
   };
 
-  const fetchAlignment = useCallback(async () => {
-    if (alignmentData) return; // already loaded
+  const fetchAlignment = useCallback(async (forceReload = false) => {
+    if (alignmentData && !forceReload) return; // already loaded
     setAlignmentLoading(true);
     try {
       const data = await api.get<any>(`/ontology/graph/alignment/${projectId}`);
       setAlignmentData(data);
     } catch {
-      // endpoint may return empty — that's ok
-      setAlignmentData({ document_nodes: [], code_nodes: [], mapping_edges: [], gaps: null });
+      setAlignmentData({ document_nodes: [], code_nodes: [], mappings: [], coverage_stats: null });
     } finally {
       setAlignmentLoading(false);
     }
   }, [projectId, alignmentData]);
+
+  const handleRunMapping = async () => {
+    setMappingRunning(true);
+    try {
+      await api.post("/ontology/run-mapping");
+      // Reload alignment data after a brief delay for mapping to complete
+      setTimeout(async () => {
+        await fetchAlignment(true);
+        setMappingRunning(false);
+      }, 3000);
+    } catch {
+      setMappingRunning(false);
+    }
+  };
+
+  const handleRunExtraction = async () => {
+    setExtractionRunning(true);
+    try {
+      // Trigger extraction for all linked documents and repos
+      const docAssets = assets.filter((a) => a.asset_type === "DOCUMENT" && a.is_active);
+      const repoAssets = assets.filter((a) => a.asset_type === "REPOSITORY" && a.is_active);
+      const promises: Promise<any>[] = [];
+      for (const a of docAssets) {
+        promises.push(api.post(`/ontology/extract/document/${a.asset_id}`).catch(() => null));
+      }
+      for (const a of repoAssets) {
+        promises.push(api.post(`/ontology/extract/repository/${a.asset_id}`).catch(() => null));
+      }
+      await Promise.all(promises);
+      // After extraction, run mapping
+      await api.post("/ontology/run-mapping").catch(() => null);
+      setTimeout(async () => {
+        await fetchAlignment(true);
+        setExtractionRunning(false);
+      }, 5000);
+    } catch {
+      setExtractionRunning(false);
+    }
+  };
 
   const handleLinkAsset = async (assetId: number) => {
     setLinking(true);
@@ -421,18 +461,66 @@ export default function ProjectDetailPage() {
               </div>
             ) : alignmentData && (alignmentData.document_nodes?.length > 0 || alignmentData.code_nodes?.length > 0) ? (
               <>
-                {/* Gap Analysis Summary */}
-                {alignmentData.gaps && (
-                  <div className="mb-4">
-                    <GapAnalysis data={alignmentData.gaps} loading={false} />
+                {/* Coverage Stats */}
+                {alignmentData.coverage_stats && (
+                  <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div className="rounded-lg border bg-blue-50/60 p-3">
+                      <p className="text-xs font-medium text-gray-500">Doc Concepts</p>
+                      <p className="mt-1 text-xl font-bold text-gray-900">{alignmentData.coverage_stats.total_doc_concepts}</p>
+                    </div>
+                    <div className="rounded-lg border bg-green-50/60 p-3">
+                      <p className="text-xs font-medium text-gray-500">Code Concepts</p>
+                      <p className="mt-1 text-xl font-bold text-gray-900">{alignmentData.coverage_stats.total_code_concepts}</p>
+                    </div>
+                    <div className="rounded-lg border bg-indigo-50/60 p-3">
+                      <p className="text-xs font-medium text-gray-500">Mappings Found</p>
+                      <p className="mt-1 text-xl font-bold text-gray-900">{alignmentData.mappings?.length ?? 0}</p>
+                    </div>
+                    <div className="rounded-lg border bg-amber-50/60 p-3">
+                      <p className="text-xs font-medium text-gray-500">Coverage</p>
+                      <p className="mt-1 text-xl font-bold text-gray-900">{Math.round((alignmentData.coverage_stats.coverage_pct ?? 0) * 100)}%</p>
+                    </div>
                   </div>
                 )}
+                {/* Gap Analysis Summary */}
+                {alignmentData.gap_analysis && (
+                  <div className="mb-4">
+                    <GapAnalysis data={alignmentData.gap_analysis} loading={false} />
+                  </div>
+                )}
+                {/* Action buttons */}
+                <div className="mb-4 flex items-center gap-2">
+                  <button
+                    onClick={handleRunExtraction}
+                    disabled={extractionRunning || mappingRunning}
+                    className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {extractionRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    {extractionRunning ? "Extracting..." : "Extract & Map"}
+                  </button>
+                  <button
+                    onClick={handleRunMapping}
+                    disabled={mappingRunning || extractionRunning}
+                    className="flex items-center gap-1.5 rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    {mappingRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitCompare className="h-3.5 w-3.5" />}
+                    {mappingRunning ? "Mapping..." : "Run Mapping Only"}
+                  </button>
+                  <button
+                    onClick={() => fetchAlignment(true)}
+                    disabled={alignmentLoading}
+                    className="flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${alignmentLoading ? "animate-spin" : ""}`} />
+                    Refresh
+                  </button>
+                </div>
                 {/* Cross Graph View */}
                 <div className="rounded-lg border" style={{ height: "500px" }}>
                   <CrossGraphView
                     documentNodes={alignmentData.document_nodes || []}
                     codeNodes={alignmentData.code_nodes || []}
-                    mappings={alignmentData.mapping_edges || []}
+                    mappings={alignmentData.mappings || []}
                     selectedMappingId={selectedMappingId}
                     onSelectMapping={setSelectedMappingId}
                   />
@@ -443,6 +531,16 @@ export default function ProjectDetailPage() {
                 <GitCompare className="mb-2 h-8 w-8" />
                 <p className="text-sm">No alignment data yet</p>
                 <p className="mt-1 text-xs">Link documents and repositories, then analyze them to see doc ↔ code alignment</p>
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    onClick={handleRunExtraction}
+                    disabled={extractionRunning}
+                    className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {extractionRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    {extractionRunning ? "Running..." : "Extract Ontology & Run Mapping"}
+                  </button>
+                </div>
               </div>
             )}
           </div>

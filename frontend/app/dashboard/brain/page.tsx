@@ -72,7 +72,7 @@ export default function BrainDashboardPage() {
     setLoading(true);
     try {
       const [meta, brainRes] = await Promise.all([
-        api.get<MetaGraphData>("/ontology/meta-graph"),
+        api.get<MetaGraphData>("/ontology/graph/meta"),
         api.get<any>("/ontology/graph/brain"),
       ]);
       setMetaData(meta);
