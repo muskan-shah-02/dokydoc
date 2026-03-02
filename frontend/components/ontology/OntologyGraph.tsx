@@ -562,40 +562,7 @@ export function OntologyGraph({
     setZoom((z) => Math.max(0.15, Math.min(4, z * delta)));
   }, []);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      // Only start panning if not dragging a node
-      if (dragNodeId !== null) return;
-      if (e.button === 0 || e.button === 1) {
-        setIsPanning(true);
-        panStartRef.current = { x: e.clientX, y: e.clientY, panX, panY };
-        e.preventDefault();
-      }
-    },
-    [panX, panY, dragNodeId]
-  );
-
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (dragNodeId !== null) {
-        handleNodeDrag(e);
-        return;
-      }
-      if (!isPanning) return;
-      const dx = e.clientX - panStartRef.current.x;
-      const dy = e.clientY - panStartRef.current.y;
-      setPanX(panStartRef.current.panX + dx);
-      setPanY(panStartRef.current.panY + dy);
-    },
-    [isPanning, dragNodeId, handleNodeDrag]
-  );
-
-  const handleMouseUp = useCallback(() => {
-    setIsPanning(false);
-    setDragNodeId(null);
-  }, []);
-
-  // Node drag handlers
+  // Node drag handlers (must be declared before handleMouseMove which uses handleNodeDrag)
   const handleNodeDragStart = useCallback(
     (e: React.MouseEvent, nodeId: number) => {
       e.stopPropagation();
@@ -629,6 +596,39 @@ export function OntologyGraph({
     },
     [dragNodeId, zoom]
   );
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      // Only start panning if not dragging a node
+      if (dragNodeId !== null) return;
+      if (e.button === 0 || e.button === 1) {
+        setIsPanning(true);
+        panStartRef.current = { x: e.clientX, y: e.clientY, panX, panY };
+        e.preventDefault();
+      }
+    },
+    [panX, panY, dragNodeId]
+  );
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      if (dragNodeId !== null) {
+        handleNodeDrag(e);
+        return;
+      }
+      if (!isPanning) return;
+      const dx = e.clientX - panStartRef.current.x;
+      const dy = e.clientY - panStartRef.current.y;
+      setPanX(panStartRef.current.panX + dx);
+      setPanY(panStartRef.current.panY + dy);
+    },
+    [isPanning, dragNodeId, handleNodeDrag]
+  );
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+    setDragNodeId(null);
+  }, []);
 
   const resetView = useCallback(() => {
     setZoom(1);
