@@ -32,10 +32,9 @@ interface BrainStats {
 
 interface MetaGraphData {
   nodes: any[];
-  intra_edges: any[];
   cross_edges: any[];
-  total_nodes: number;
-  total_intra_edges: number;
+  total_concepts: number;
+  total_relationships: number;
   total_cross_edges: number;
   projects: { id: number; name: string }[];
 }
@@ -79,9 +78,8 @@ export default function BrainDashboardPage() {
       setMetaData(meta);
       setStats({
         total_projects: meta.projects?.length ?? 0,
-        total_concepts: meta.total_nodes ?? 0,
-        total_mappings:
-          (meta.total_intra_edges ?? 0) + (meta.total_cross_edges ?? 0),
+        total_concepts: meta.total_concepts ?? 0,
+        total_mappings: meta.total_relationships ?? 0,
         coverage_pct: brainRes.coverage_pct ?? 0,
       });
       setError("");
@@ -304,16 +302,15 @@ export default function BrainDashboardPage() {
               <div style={{ height: "600px" }}>
                 <MetaGraphView
                   data={metaData}
-                  onSelectMapping={(id) => {
-                    // Find the project for this node and drill into it
-                    const node = metaData.nodes.find((n: any) => n.id === id);
-                    if (node && node.initiative_id) {
-                      // Drill into Level 3 (System Architecture) instead of navigating away
+                  onSelectMapping={(nodeId) => {
+                    // Each node is a project — drill into Level 3 (System Architecture)
+                    const node = metaData.nodes.find((n: any) => n.id === nodeId);
+                    if (node) {
                       drillInto({
                         level: 3,
-                        projectId: node.initiative_id,
-                        projectName: node.name || `Project ${node.initiative_id}`,
-                        repoId: node.repo_id || node.initiative_id,
+                        projectId: node.initiative_id ?? node.id,
+                        projectName: node.name || `Project ${node.id}`,
+                        repoId: node.repo_id ?? node.initiative_id ?? node.id,
                       });
                     }
                   }}
@@ -525,14 +522,42 @@ export default function BrainDashboardPage() {
               color: "bg-orange-50 text-orange-700",
             },
           ].map((l) => (
-            <div
+            <button
               key={l.level}
-              className={`rounded-lg p-3 ${l.color}`}
+              onClick={() => {
+                if (l.level === 5) {
+                  drillInto({ level: 5 });
+                } else if (l.level === 4 && drill.projectId) {
+                  router.push(`/dashboard/projects/${drill.projectId}`);
+                } else if (l.level === 3 && drill.projectId) {
+                  drillInto({
+                    level: 3,
+                    projectId: drill.projectId,
+                    projectName: drill.projectName,
+                    repoId: drill.repoId,
+                  });
+                } else if (l.level === 2 && drill.repoId) {
+                  drillInto({
+                    ...drill,
+                    level: 2,
+                    domainName: drill.domainName,
+                  });
+                }
+                // L1 requires a specific componentId, so no generic click action
+              }}
+              className={`rounded-lg p-3 text-left transition-all hover:ring-2 hover:ring-offset-1 ${l.color} ${
+                drill.level === l.level
+                  ? "ring-2 ring-offset-1 font-semibold"
+                  : "opacity-80 hover:opacity-100"
+              }`}
             >
               <p className="text-xs font-semibold">L{l.level}</p>
               <p className="text-sm font-medium">{l.label}</p>
               <p className="mt-0.5 text-[10px] opacity-70">{l.desc}</p>
-            </div>
+              {drill.level === l.level && (
+                <p className="mt-1 text-[10px] font-semibold opacity-90">← Current</p>
+              )}
+            </button>
           ))}
         </div>
       </div>

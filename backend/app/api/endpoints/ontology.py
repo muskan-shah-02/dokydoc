@@ -1474,71 +1474,128 @@ def get_meta_graph(
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
-    Org-wide meta-graph: all concepts clustered by project,
-    with both intra-project edges and cross-project edges.
+    Org-wide meta-graph: projects as aggregated nodes (not individual concepts).
+    Each node represents a project with concept/relationship counts and top concepts.
+    Cross-project edges show mapping counts between projects.
     """
-    # Get all concepts with their project assignments
+    from app.models.initiative_asset import InitiativeAsset
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.ontology_relationship import OntologyRelationship
+    from collections import defaultdict
+
+    # Get all projects
+    projects = crud.initiative.get_multi(db=db, tenant_id=tenant_id)
+
+    # Get all concepts and relationships for counts
     concepts = crud.ontology_concept.get_all_active(db=db, tenant_id=tenant_id)
     relationships = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+
+    # Build concept-to-initiative map
+    concept_initiative = {}
+    initiative_concepts = defaultdict(list)
+    for c in concepts:
+        concept_initiative[c.id] = c.initiative_id
+        initiative_concepts[c.initiative_id or 0].append(c)
+
+    # Build relationship counts per initiative
+    initiative_rel_count = defaultdict(int)
+    for r in relationships:
+        init_id = concept_initiative.get(r.source_concept_id)
+        if init_id:
+            initiative_rel_count[init_id] += 1
+
+    # Get repo mapping per initiative
+    initiative_repo = {}
+    assets = db.query(InitiativeAsset).filter(
+        InitiativeAsset.tenant_id == tenant_id,
+        InitiativeAsset.asset_type == "REPOSITORY",
+        InitiativeAsset.is_active == True,
+    ).all()
+    for a in assets:
+        initiative_repo[a.initiative_id] = a.asset_id
+
+    # Get file count per initiative (via repository)
+    initiative_file_count = {}
+    for init_id, repo_id in initiative_repo.items():
+        count = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+        ).count()
+        initiative_file_count[init_id] = count
+
+    # Build project-level aggregated nodes
+    nodes = []
+    for p in projects:
+        p_concepts = initiative_concepts.get(p.id, [])
+        # Top concepts by confidence
+        top_concepts = sorted(p_concepts, key=lambda c: c.confidence_score, reverse=True)
+        # Type distribution
+        type_dist = defaultdict(int)
+        for c in p_concepts:
+            type_dist[c.concept_type] += 1
+
+        nodes.append({
+            "id": p.id,
+            "name": p.name,
+            "initiative_id": p.id,
+            "repo_id": initiative_repo.get(p.id),
+            "concept_count": len(p_concepts),
+            "relationship_count": initiative_rel_count.get(p.id, 0),
+            "file_count": initiative_file_count.get(p.id, 0),
+            "top_concepts": [c.name for c in top_concepts[:8]],
+            "type_distribution": dict(type_dist),
+            "status": p.status,
+        })
+
+    # Handle unscoped concepts (no initiative)
+    unscoped = initiative_concepts.get(0, [])
+    if unscoped:
+        type_dist = defaultdict(int)
+        for c in unscoped:
+            type_dist[c.concept_type] += 1
+        top = sorted(unscoped, key=lambda c: c.confidence_score, reverse=True)
+        nodes.append({
+            "id": -1,
+            "name": "Unscoped Concepts",
+            "initiative_id": None,
+            "repo_id": None,
+            "concept_count": len(unscoped),
+            "relationship_count": 0,
+            "file_count": 0,
+            "top_concepts": [c.name for c in top[:8]],
+            "type_distribution": dict(type_dist),
+            "status": "ACTIVE",
+        })
+
+    # Cross-project edges from CrossProjectMapping
     cross_mappings = crud.cross_project_mapping.get_all_for_tenant(
         db=db, tenant_id=tenant_id
     )
+    cross_edge_counts = defaultdict(lambda: {"count": 0, "types": set()})
+    for m in cross_mappings:
+        if m.status == "rejected":
+            continue
+        key = tuple(sorted([m.initiative_a_id, m.initiative_b_id]))
+        cross_edge_counts[key]["count"] += 1
+        cross_edge_counts[key]["types"].add(m.relationship_type)
 
-    # Build nodes with project cluster info
-    nodes = [
-        {
-            "id": c.id,
-            "name": c.name,
-            "concept_type": c.concept_type,
-            "source_type": c.source_type,
-            "initiative_id": c.initiative_id,
-            "confidence_score": c.confidence_score,
-        }
-        for c in concepts
-    ]
-
-    # Intra-project edges (from OntologyRelationship)
-    intra_edges = [
-        {
-            "id": r.id,
-            "source_concept_id": r.source_concept_id,
-            "target_concept_id": r.target_concept_id,
-            "relationship_type": r.relationship_type,
-            "confidence_score": r.confidence_score,
-            "edge_type": "intra_project",
-        }
-        for r in relationships
-    ]
-
-    # Cross-project edges (from CrossProjectMapping)
     cross_edges = [
         {
-            "id": m.id + 100000,  # Offset to avoid ID collision with intra edges
-            "source_concept_id": m.concept_a_id,
-            "target_concept_id": m.concept_b_id,
-            "relationship_type": m.relationship_type,
-            "confidence_score": m.confidence_score,
-            "edge_type": "cross_project",
-            "status": m.status,
-            "mapping_method": m.mapping_method,
-            "initiative_a_id": m.initiative_a_id,
-            "initiative_b_id": m.initiative_b_id,
+            "source_id": k[0],
+            "target_id": k[1],
+            "relationship_count": v["count"],
+            "relationship_types": list(v["types"]),
         }
-        for m in cross_mappings
-        if m.status != "rejected"
+        for k, v in cross_edge_counts.items()
     ]
-
-    # Get project names for clustering
-    projects = crud.initiative.get_multi(db=db, tenant_id=tenant_id)
-    project_map = {p.id: p.name for p in projects}
 
     return {
         "nodes": nodes,
-        "intra_edges": intra_edges,
         "cross_edges": cross_edges,
-        "total_nodes": len(nodes),
-        "total_intra_edges": len(intra_edges),
-        "total_cross_edges": len(cross_edges),
+        "total_concepts": len(concepts),
+        "total_relationships": len(relationships),
+        "total_cross_edges": sum(e["relationship_count"] for e in cross_edges),
         "projects": [
             {"id": p.id, "name": p.name}
             for p in projects

@@ -1,29 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 // --- Types ---
 
-interface MetaNode {
+interface ProjectNode {
   id: number;
   name: string;
-  concept_type: string;
-  source_type: string;
   initiative_id: number | null;
-  confidence_score: number;
+  repo_id: number | null;
+  concept_count: number;
+  relationship_count: number;
+  file_count: number;
+  top_concepts: string[];
+  type_distribution: Record<string, number>;
+  status: string;
 }
 
-interface MetaEdge {
-  id: number;
-  source_concept_id: number;
-  target_concept_id: number;
-  relationship_type: string;
-  confidence_score: number;
-  edge_type: "intra_project" | "cross_project";
-  status?: string;
-  mapping_method?: string;
-  initiative_a_id?: number;
-  initiative_b_id?: number;
+interface CrossEdge {
+  source_id: number;
+  target_id: number;
+  relationship_count: number;
+  relationship_types: string[];
 }
 
 interface Project {
@@ -32,11 +30,10 @@ interface Project {
 }
 
 interface MetaGraphData {
-  nodes: MetaNode[];
-  intra_edges: MetaEdge[];
-  cross_edges: MetaEdge[];
-  total_nodes: number;
-  total_intra_edges: number;
+  nodes: ProjectNode[];
+  cross_edges: CrossEdge[];
+  total_concepts: number;
+  total_relationships: number;
   total_cross_edges: number;
   projects: Project[];
 }
@@ -44,40 +41,20 @@ interface MetaGraphData {
 // --- Color Palette for Projects ---
 
 const PROJECT_COLORS = [
-  { bg: "#dbeafe", border: "#3b82f6", text: "#1d4ed8" }, // blue
-  { bg: "#dcfce7", border: "#22c55e", text: "#15803d" }, // green
-  { bg: "#fef3c7", border: "#f59e0b", text: "#b45309" }, // amber
-  { bg: "#fce7f3", border: "#ec4899", text: "#be185d" }, // pink
-  { bg: "#e0e7ff", border: "#6366f1", text: "#4338ca" }, // indigo
-  { bg: "#f3e8ff", border: "#a855f7", text: "#7c3aed" }, // purple
-  { bg: "#ccfbf1", border: "#14b8a6", text: "#0f766e" }, // teal
-  { bg: "#ffedd5", border: "#f97316", text: "#c2410c" }, // orange
+  { bg: "#dbeafe", border: "#3b82f6", text: "#1d4ed8", gradient: "#bfdbfe" },
+  { bg: "#dcfce7", border: "#22c55e", text: "#15803d", gradient: "#bbf7d0" },
+  { bg: "#fef3c7", border: "#f59e0b", text: "#b45309", gradient: "#fde68a" },
+  { bg: "#fce7f3", border: "#ec4899", text: "#be185d", gradient: "#fbcfe8" },
+  { bg: "#e0e7ff", border: "#6366f1", text: "#4338ca", gradient: "#c7d2fe" },
+  { bg: "#f3e8ff", border: "#a855f7", text: "#7c3aed", gradient: "#e9d5ff" },
+  { bg: "#ccfbf1", border: "#14b8a6", text: "#0f766e", gradient: "#99f6e4" },
+  { bg: "#ffedd5", border: "#f97316", text: "#c2410c", gradient: "#fed7aa" },
 ];
+
+const UNSCOPED_COLOR = { bg: "#f3f4f6", border: "#9ca3af", text: "#4b5563", gradient: "#e5e7eb" };
 
 function getProjectColor(index: number) {
   return PROJECT_COLORS[index % PROJECT_COLORS.length];
-}
-
-const TYPE_ABBREV: Record<string, string> = {
-  TECHNOLOGY: "T",
-  PROCESS: "P",
-  ACTOR: "A",
-  RULE: "R",
-  REQUIREMENT: "Rq",
-  DATA_ENTITY: "D",
-  SYSTEM: "S",
-  FEATURE: "F",
-};
-
-// --- Force Simulation Node ---
-
-interface SimNode extends MetaNode {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  fx?: number | null; // fixed position for dragging
-  fy?: number | null;
 }
 
 // --- Component ---
@@ -87,684 +64,445 @@ export function MetaGraphView({
   onSelectMapping,
 }: {
   data: MetaGraphData;
-  onSelectMapping?: (mappingId: number) => void;
+  onSelectMapping?: (nodeId: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const [nodes, setNodes] = useState<SimNode[]>([]);
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null);
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; node: SimNode } | null>(null);
+  const [hoveredId, setHoveredId] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
-  // Zoom / pan state
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  // Pan & zoom
+  const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 1000, h: 600 });
   const [isPanning, setIsPanning] = useState(false);
-  const panStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const panStart = useRef({ x: 0, y: 0, vbx: 0, vby: 0 });
 
-  // Drag state
-  const [dragNodeId, setDragNodeId] = useState<number | null>(null);
-  const dragRef = useRef<{ startX: number; startY: number } | null>(null);
+  // Drag
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [nodePositions, setNodePositions] = useState<Map<number, { x: number; y: number }>>(new Map());
+  const dragStartRef = useRef({ x: 0, y: 0, nodeX: 0, nodeY: 0 });
 
-  // Search
-  const [search, setSearch] = useState("");
+  const W = 1000;
+  const H = 600;
 
-  const allEdges = useMemo(
-    () => [...data.intra_edges, ...data.cross_edges],
-    [data.intra_edges, data.cross_edges]
-  );
+  // Layout: position project bubbles in a ring
+  const layoutNodes = useMemo(() => {
+    const { nodes } = data;
+    if (!nodes || nodes.length === 0) return [];
 
-  // Project color map
-  const projectColorMap = useMemo(() => {
-    const map = new Map<number, { bg: string; border: string; text: string }>();
-    data.projects.forEach((p, i) => map.set(p.id, getProjectColor(i)));
-    return map;
-  }, [data.projects]);
+    const cx = W / 2;
+    const cy = H / 2;
+    const maxConcepts = Math.max(...nodes.map((n) => n.concept_count), 1);
 
-  const unscopedColor = { bg: "#f3f4f6", border: "#9ca3af", text: "#4b5563" };
+    return nodes.map((n, i) => {
+      const sizeFactor = 0.3 + 0.7 * (n.concept_count / maxConcepts);
+      const radius = 50 + sizeFactor * 60; // 50-110px
+      const angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+      const spread = nodes.length === 1 ? 0 : Math.min(W, H) * 0.25;
+      const color = n.initiative_id !== null && n.initiative_id >= 0
+        ? getProjectColor(i)
+        : UNSCOPED_COLOR;
 
-  // World dimensions for simulation
-  const WORLD_W = 1600;
-  const WORLD_H = 1000;
-
-  // Force simulation
-  useEffect(() => {
-    if (data.nodes.length === 0) return;
-
-    const projectGroups = new Map<number | null, MetaNode[]>();
-    data.nodes.forEach((n) => {
-      const key = n.initiative_id;
-      if (!projectGroups.has(key)) projectGroups.set(key, []);
-      projectGroups.get(key)!.push(n);
+      return {
+        ...n,
+        x: cx + Math.cos(angle) * spread,
+        y: cy + Math.sin(angle) * spread,
+        radius,
+        color,
+      };
     });
+  }, [data]);
 
-    const groupKeys = Array.from(projectGroups.keys());
-    const clusterRadius = Math.min(WORLD_W, WORLD_H) * 0.3;
-    const centerX = WORLD_W / 2;
-    const centerY = WORLD_H / 2;
-
-    const simNodes: SimNode[] = [];
-    groupKeys.forEach((key, gi) => {
-      const group = projectGroups.get(key)!;
-      const angle = (gi / Math.max(groupKeys.length, 1)) * 2 * Math.PI;
-      const cx = centerX + Math.cos(angle) * clusterRadius;
-      const cy = centerY + Math.sin(angle) * clusterRadius;
-
-      group.forEach((n, ni) => {
-        const innerAngle = (ni / Math.max(group.length, 1)) * 2 * Math.PI;
-        const spread = Math.min(200, group.length * 18);
-        simNodes.push({
-          ...n,
-          x: cx + Math.cos(innerAngle) * spread + (Math.random() - 0.5) * 40,
-          y: cy + Math.sin(innerAngle) * spread + (Math.random() - 0.5) * 40,
-          vx: 0,
-          vy: 0,
-        });
-      });
-    });
-
-    const nodeMap = new Map(simNodes.map((n) => [n.id, n]));
-    const iterations = 120;
-
-    for (let iter = 0; iter < iterations; iter++) {
-      const alpha = 1 - iter / iterations;
-
-      // Stronger repulsion for better spacing
-      for (let i = 0; i < simNodes.length; i++) {
-        for (let j = i + 1; j < simNodes.length; j++) {
-          const a = simNodes[i];
-          const b = simNodes[j];
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-          // Much stronger repulsion
-          const force = (3000 * alpha) / (dist * dist);
-          const fx = (dx / dist) * force;
-          const fy = (dy / dist) * force;
-          a.vx -= fx;
-          a.vy -= fy;
-          b.vx += fx;
-          b.vy += fy;
-        }
-      }
-
-      // Edge attraction
-      allEdges.forEach((e) => {
-        const source = nodeMap.get(e.source_concept_id);
-        const target = nodeMap.get(e.target_concept_id);
-        if (!source || !target) return;
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const strength = e.edge_type === "cross_project" ? 0.01 : 0.04;
-        const force = dist * strength * alpha;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        source.vx += fx;
-        source.vy += fy;
-        target.vx -= fx;
-        target.vy -= fy;
-      });
-
-      // Center pull
-      simNodes.forEach((n) => {
-        n.vx += (centerX - n.x) * 0.003 * alpha;
-        n.vy += (centerY - n.y) * 0.003 * alpha;
-      });
-
-      // Apply velocity with damping
-      simNodes.forEach((n) => {
-        n.x += n.vx * 0.4;
-        n.y += n.vy * 0.4;
-        n.vx *= 0.8;
-        n.vy *= 0.8;
-        n.x = Math.max(80, Math.min(WORLD_W - 80, n.x));
-        n.y = Math.max(60, Math.min(WORLD_H - 60, n.y));
-      });
-    }
-
-    setNodes([...simNodes]);
-    // Auto-fit: reset pan and zoom
-    setPan({ x: 0, y: 0 });
-    setZoom(1);
-  }, [data, allEdges]);
-
-  const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
-
-  // Search highlight
-  const searchLower = search.toLowerCase();
-  const matchedIds = useMemo(() => {
-    if (!searchLower) return new Set<number>();
-    return new Set(
-      nodes
-        .filter(
-          (n) =>
-            n.name.toLowerCase().includes(searchLower) ||
-            n.concept_type.toLowerCase().includes(searchLower)
-        )
-        .map((n) => n.id)
-    );
-  }, [nodes, searchLower]);
-
-  // Connected edges/nodes for selected node
-  const selectedEdges = useMemo(() => {
-    if (!selectedNodeId) return new Set<number>();
-    return new Set(
-      allEdges
-        .filter(
-          (e) =>
-            e.source_concept_id === selectedNodeId ||
-            e.target_concept_id === selectedNodeId
-        )
-        .map((e) => e.id)
-    );
-  }, [allEdges, selectedNodeId]);
-
-  const connectedNodeIds = useMemo(() => {
-    if (!selectedNodeId) return new Set<number>();
-    const ids = new Set<number>();
-    ids.add(selectedNodeId);
-    allEdges.forEach((e) => {
-      if (e.source_concept_id === selectedNodeId) ids.add(e.target_concept_id);
-      if (e.target_concept_id === selectedNodeId) ids.add(e.source_concept_id);
-    });
-    return ids;
-  }, [allEdges, selectedNodeId]);
-
-  // --- Zoom handlers ---
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.08 : 0.08;
-      setZoom((z) => Math.max(0.2, Math.min(3, z + delta)));
+  // Get position (with drag override)
+  const getPos = useCallback(
+    (id: number) => {
+      const override = nodePositions.get(id);
+      if (override) return override;
+      const node = layoutNodes.find((n) => n.id === id);
+      return node ? { x: node.x, y: node.y } : { x: W / 2, y: H / 2 };
     },
-    []
+    [layoutNodes, nodePositions]
   );
 
-  const zoomIn = () => setZoom((z) => Math.min(3, z + 0.2));
-  const zoomOut = () => setZoom((z) => Math.max(0.2, z - 0.2));
-  const resetView = () => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-  };
+  const getNode = useCallback(
+    (id: number) => layoutNodes.find((n) => n.id === id),
+    [layoutNodes]
+  );
 
-  // --- Pan handlers ---
+  // Mouse handlers
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      // Only pan on background (not node) click
-      if ((e.target as Element).closest(".meta-node")) return;
+      if (dragId !== null) return;
       setIsPanning(true);
-      panStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+      panStart.current = { x: e.clientX, y: e.clientY, vbx: viewBox.x, vby: viewBox.y };
     },
-    [pan]
+    [dragId, viewBox]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      if (dragNodeId !== null && dragRef.current) {
-        // Drag node
-        const rect = svgRef.current?.getBoundingClientRect();
-        if (!rect) return;
-        const nx = (e.clientX - rect.left - pan.x) / zoom;
-        const ny = (e.clientY - rect.top - pan.y) / zoom;
-        setNodes((prev) =>
-          prev.map((n) =>
-            n.id === dragNodeId
-              ? { ...n, x: Math.max(40, Math.min(WORLD_W - 40, nx)), y: Math.max(30, Math.min(WORLD_H - 30, ny)) }
-              : n
-          )
-        );
+      if (dragId !== null) {
+        const svg = svgRef.current;
+        if (!svg) return;
+        const rect = svg.getBoundingClientRect();
+        const scaleX = viewBox.w / rect.width;
+        const scaleY = viewBox.h / rect.height;
+        const dx = (e.clientX - dragStartRef.current.x) * scaleX;
+        const dy = (e.clientY - dragStartRef.current.y) * scaleY;
+        setNodePositions((prev) => {
+          const next = new Map(prev);
+          next.set(dragId, {
+            x: dragStartRef.current.nodeX + dx,
+            y: dragStartRef.current.nodeY + dy,
+          });
+          return next;
+        });
         return;
       }
-      if (!isPanning) return;
-      const dx = e.clientX - panStart.current.x;
-      const dy = e.clientY - panStart.current.y;
-      setPan({ x: panStart.current.panX + dx, y: panStart.current.panY + dy });
+      if (isPanning) {
+        const svg = svgRef.current;
+        if (!svg) return;
+        const rect = svg.getBoundingClientRect();
+        const scaleX = viewBox.w / rect.width;
+        const scaleY = viewBox.h / rect.height;
+        const dx = (e.clientX - panStart.current.x) * scaleX;
+        const dy = (e.clientY - panStart.current.y) * scaleY;
+        setViewBox((v) => ({ ...v, x: panStart.current.vbx - dx, y: panStart.current.vby - dy }));
+      }
     },
-    [isPanning, dragNodeId, pan, zoom]
+    [dragId, isPanning, viewBox]
   );
 
   const handleMouseUp = useCallback(() => {
     setIsPanning(false);
-    setDragNodeId(null);
-    dragRef.current = null;
+    setDragId(null);
   }, []);
 
-  // --- Node drag ---
-  const handleNodeDragStart = useCallback(
-    (e: React.MouseEvent, nodeId: number) => {
-      e.stopPropagation();
-      setDragNodeId(nodeId);
-      dragRef.current = { startX: e.clientX, startY: e.clientY };
-    },
-    []
-  );
-
-  // --- Tooltip ---
-  const handleNodeHover = useCallback(
-    (e: React.MouseEvent, node: SimNode) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setHoveredNodeId(node.id);
-      setTooltip({
-        x: e.clientX - rect.left + 12,
-        y: e.clientY - rect.top - 8,
-        node,
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 1.08 : 0.93;
+      const svg = svgRef.current;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const mx = ((e.clientX - rect.left) / rect.width) * viewBox.w + viewBox.x;
+      const my = ((e.clientY - rect.top) / rect.height) * viewBox.h + viewBox.y;
+      setViewBox({
+        x: mx - (mx - viewBox.x) * factor,
+        y: my - (my - viewBox.y) * factor,
+        w: viewBox.w * factor,
+        h: viewBox.h * factor,
       });
     },
-    []
+    [viewBox]
   );
 
-  const handleNodeLeave = useCallback(() => {
-    setHoveredNodeId(null);
-    setTooltip(null);
-  }, []);
+  const handleNodeDragStart = useCallback(
+    (id: number, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setDragId(id);
+      const pos = getPos(id);
+      dragStartRef.current = { x: e.clientX, y: e.clientY, nodeX: pos.x, nodeY: pos.y };
+    },
+    [getPos]
+  );
 
-  if (data.nodes.length === 0) {
+  // Hovered node data
+  const hoveredNode = useMemo(
+    () => (hoveredId !== null ? layoutNodes.find((n) => n.id === hoveredId) : null),
+    [hoveredId, layoutNodes]
+  );
+
+  // Max edge weight for scaling
+  const maxEdgeWeight = useMemo(() => {
+    if (!data.cross_edges || data.cross_edges.length === 0) return 1;
+    return Math.max(...data.cross_edges.map((e) => e.relationship_count));
+  }, [data.cross_edges]);
+
+  if (!data.nodes || data.nodes.length === 0) {
     return (
       <div className="flex h-64 items-center justify-center rounded-lg border bg-white text-sm text-gray-400">
-        No concepts available for meta-graph. Create projects and extract ontology first.
+        No projects available. Create a project and analyze repositories to see the organizational brain.
       </div>
     );
   }
 
-  const viewBox = `0 0 ${WORLD_W} ${WORLD_H}`;
-
   return (
-    <div className="space-y-3">
-      {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-white px-4 py-2.5">
-        {/* Legend */}
-        <span className="text-xs font-medium text-gray-500">Projects:</span>
-        {data.projects.map((p, i) => {
-          const color = getProjectColor(i);
+    <div ref={containerRef} className="relative h-full w-full select-none">
+      <svg
+        ref={svgRef}
+        viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
+        className="h-full w-full"
+        style={{ cursor: dragId ? "grabbing" : isPanning ? "grabbing" : "grab" }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onWheel={handleWheel}
+      >
+        <defs>
+          <filter id="meta-glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="6" result="blur" />
+            <feFlood floodColor="#818cf8" floodOpacity="0.35" result="color" />
+            <feComposite in="color" in2="blur" operator="in" result="glow" />
+            <feMerge>
+              <feMergeNode in="glow" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <radialGradient id="meta-shine" cx="35%" cy="35%" r="65%">
+            <stop offset="0%" stopColor="#ffffff" stopOpacity={0.5} />
+            <stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
+          </radialGradient>
+        </defs>
+
+        {/* Subtle background */}
+        <rect
+          x={viewBox.x - 200}
+          y={viewBox.y - 200}
+          width={viewBox.w + 400}
+          height={viewBox.h + 400}
+          fill="#fafbfc"
+        />
+
+        {/* Cross-project edges */}
+        {(data.cross_edges || []).map((edge, i) => {
+          const srcPos = getPos(edge.source_id);
+          const tgtPos = getPos(edge.target_id);
+          const srcNode = getNode(edge.source_id);
+          const tgtNode = getNode(edge.target_id);
+          if (!srcNode || !tgtNode) return null;
+
+          const dx = tgtPos.x - srcPos.x;
+          const dy = tgtPos.y - srcPos.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const nx = dx / dist;
+          const ny = dy / dist;
+          const sx = srcPos.x + nx * srcNode.radius;
+          const sy = srcPos.y + ny * srcNode.radius;
+          const ex = tgtPos.x - nx * tgtNode.radius;
+          const ey = tgtPos.y - ny * tgtNode.radius;
+          const curveMag = dist * 0.12;
+          const cpx = (sx + ex) / 2 + ny * curveMag;
+          const cpy = (sy + ey) / 2 - nx * curveMag;
+          const path = `M ${sx} ${sy} Q ${cpx} ${cpy} ${ex} ${ey}`;
+
+          const weight = edge.relationship_count;
+          const normalizedWeight = weight / maxEdgeWeight;
+          const strokeWidth = 2 + normalizedWeight * 3;
+          const isHighlighted = hoveredId === edge.source_id || hoveredId === edge.target_id;
+
           return (
-            <div key={p.id} className="flex items-center gap-1.5">
-              <span
-                className="inline-block h-3 w-3 rounded-sm border"
-                style={{ backgroundColor: color.bg, borderColor: color.border }}
+            <g key={`edge-${i}`}>
+              <path
+                d={path}
+                fill="none"
+                stroke={isHighlighted ? "#f97316" : "#cbd5e1"}
+                strokeWidth={strokeWidth}
+                strokeOpacity={isHighlighted ? 0.8 : 0.4}
+                strokeDasharray="8 4"
               />
-              <span className="text-xs text-gray-600">{p.name}</span>
-            </div>
+              <g transform={`translate(${cpx}, ${cpy})`}>
+                <rect
+                  x={-16}
+                  y={-10}
+                  width={32}
+                  height={20}
+                  rx={10}
+                  fill={isHighlighted ? "#f97316" : "#f8fafc"}
+                  stroke={isHighlighted ? "#f97316" : "#e2e8f0"}
+                  strokeWidth={1}
+                />
+                <text
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  fill={isHighlighted ? "#fff" : "#64748b"}
+                  fontSize={10}
+                  fontWeight={600}
+                >
+                  {weight}
+                </text>
+              </g>
+            </g>
           );
         })}
 
-        <div className="mx-2 h-4 w-px bg-gray-200" />
+        {/* Project bubbles */}
+        {layoutNodes.map((node) => {
+          const pos = getPos(node.id);
+          const isHovered = hoveredId === node.id;
+          const isDragging = dragId === node.id;
 
-        {/* Edge legend */}
-        <span className="flex items-center gap-1 text-xs text-gray-400">
-          <span className="h-px w-5 bg-gray-400" /> Intra
-        </span>
-        <span className="flex items-center gap-1 text-xs text-gray-400">
-          <span className="h-px w-5 border-t-2 border-dashed border-orange-400" /> Cross
-        </span>
+          const displayName =
+            node.name.length > 20 ? node.name.slice(0, 18) + "..." : node.name;
+          const topConcepts = node.top_concepts.slice(0, 3);
 
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Search */}
-        <input
-          type="text"
-          placeholder="Search nodes..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-40 rounded border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-700 placeholder-gray-400 focus:border-blue-300 focus:outline-none"
-        />
-
-        {/* Zoom controls */}
-        <div className="flex items-center gap-1">
-          <button
-            onClick={zoomOut}
-            className="rounded border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-          >
-            -
-          </button>
-          <span className="min-w-[3rem] text-center text-xs text-gray-500">
-            {Math.round(zoom * 100)}%
-          </span>
-          <button
-            onClick={zoomIn}
-            className="rounded border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-          >
-            +
-          </button>
-          <button
-            onClick={resetView}
-            className="ml-1 rounded border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-            title="Reset view"
-          >
-            Fit
-          </button>
-        </div>
-      </div>
-
-      {/* Graph canvas */}
-      <div
-        ref={containerRef}
-        className="relative overflow-hidden rounded-lg border bg-white"
-        style={{ height: "600px", cursor: isPanning ? "grabbing" : dragNodeId ? "grabbing" : "grab" }}
-        onWheel={handleWheel}
-      >
-        <svg
-          ref={svgRef}
-          width="100%"
-          height="100%"
-          viewBox={viewBox}
-          style={{
-            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-            transformOrigin: "0 0",
-          }}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
-          className="select-none"
-        >
-          {/* Background grid */}
-          <defs>
-            <pattern
-              id="metaGrid"
-              width="50"
-              height="50"
-              patternUnits="userSpaceOnUse"
-            >
-              <path
-                d="M 50 0 L 0 0 0 50"
-                fill="none"
-                stroke="#f0f0f0"
-                strokeWidth="0.5"
-              />
-            </pattern>
-            <marker
-              id="metaArrow"
-              viewBox="0 0 10 10"
-              refX="22"
-              refY="5"
-              markerWidth="4"
-              markerHeight="4"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
-            </marker>
-            <marker
-              id="metaCrossArrow"
-              viewBox="0 0 10 10"
-              refX="22"
-              refY="5"
-              markerWidth="4"
-              markerHeight="4"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316" />
-            </marker>
-            {/* Glow filter for search matches */}
-            <filter id="searchGlow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="3" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-          <rect width={WORLD_W} height={WORLD_H} fill="url(#metaGrid)" />
-
-          {/* Project cluster backgrounds */}
-          {data.projects.map((p, i) => {
-            const color = getProjectColor(i);
-            const projectNodes = nodes.filter((n) => n.initiative_id === p.id);
-            if (projectNodes.length === 0) return null;
-
-            const padding = 50;
-            const minX = Math.min(...projectNodes.map((n) => n.x)) - padding;
-            const minY = Math.min(...projectNodes.map((n) => n.y)) - padding;
-            const maxX = Math.max(...projectNodes.map((n) => n.x)) + padding;
-            const maxY = Math.max(...projectNodes.map((n) => n.y)) + padding;
-
-            return (
-              <g key={`cluster-${p.id}`}>
-                <rect
-                  x={minX}
-                  y={minY}
-                  width={maxX - minX}
-                  height={maxY - minY}
-                  rx={16}
-                  fill={color.bg}
-                  fillOpacity={0.15}
-                  stroke={color.border}
-                  strokeWidth={1}
-                  strokeDasharray="8 4"
-                  strokeOpacity={0.5}
-                />
-                <text
-                  x={minX + 12}
-                  y={minY + 18}
-                  fontSize={12}
-                  fontWeight={600}
-                  fill={color.text}
-                  opacity={0.7}
-                >
-                  {p.name}
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Intra-project edges */}
-          {data.intra_edges.map((e) => {
-            const source = nodeMap.get(e.source_concept_id);
-            const target = nodeMap.get(e.target_concept_id);
-            if (!source || !target) return null;
-            const dimmed =
-              selectedNodeId !== null && !selectedEdges.has(e.id);
-            return (
-              <line
-                key={`intra-${e.id}`}
-                x1={source.x}
-                y1={source.y}
-                x2={target.x}
-                y2={target.y}
-                stroke="#cbd5e1"
-                strokeWidth={1}
-                opacity={dimmed ? 0.1 : 0.6}
-                markerEnd="url(#metaArrow)"
-              />
-            );
-          })}
-
-          {/* Cross-project edges */}
-          {data.cross_edges.map((e) => {
-            const source = nodeMap.get(e.source_concept_id);
-            const target = nodeMap.get(e.target_concept_id);
-            if (!source || !target) return null;
-            const color =
-              e.status === "confirmed"
-                ? "#22c55e"
-                : e.status === "candidate"
-                ? "#f59e0b"
-                : "#ef4444";
-            const dimmed =
-              selectedNodeId !== null && !selectedEdges.has(e.id);
-            return (
-              <g key={`cross-${e.id}`}>
-                <line
-                  x1={source.x}
-                  y1={source.y}
-                  x2={target.x}
-                  y2={target.y}
-                  stroke={color}
-                  strokeWidth={2}
-                  strokeDasharray="8 4"
-                  opacity={dimmed ? 0.1 : 0.8}
-                  markerEnd="url(#metaCrossArrow)"
-                  className="cursor-pointer"
-                  onClick={() => onSelectMapping?.(e.id)}
-                />
-                {!dimmed && (
-                  <text
-                    x={(source.x + target.x) / 2}
-                    y={(source.y + target.y) / 2 - 8}
-                    fontSize={8}
-                    fill={color}
-                    textAnchor="middle"
-                    fontWeight={600}
-                    opacity={0.8}
-                  >
-                    {e.relationship_type?.replace(/_/g, " ")}
-                  </text>
-                )}
-              </g>
-            );
-          })}
-
-          {/* Nodes */}
-          {nodes.map((node) => {
-            const color = node.initiative_id
-              ? projectColorMap.get(node.initiative_id) || unscopedColor
-              : unscopedColor;
-            const isSelected = selectedNodeId === node.id;
-            const isHovered = hoveredNodeId === node.id;
-            const isSearchMatch = searchLower && matchedIds.has(node.id);
-            const dimmed =
-              selectedNodeId !== null &&
-              !connectedNodeIds.has(node.id);
-            const searchDimmed =
-              searchLower && !matchedIds.has(node.id);
-            const opacity = dimmed || searchDimmed ? 0.15 : 1;
-            const r = isSelected || isHovered ? 18 : 14;
-
-            return (
-              <g
-                key={node.id}
-                className="meta-node"
-                style={{ cursor: "pointer", opacity }}
-                onClick={() =>
-                  setSelectedNodeId(isSelected ? null : node.id)
+          return (
+            <g
+              key={node.id}
+              transform={`translate(${pos.x}, ${pos.y})`}
+              style={{ cursor: isDragging ? "grabbing" : "pointer" }}
+              filter={isHovered ? "url(#meta-glow)" : undefined}
+              onMouseDown={(e) => handleNodeDragStart(node.id, e)}
+              onMouseEnter={(e) => {
+                setHoveredId(node.id);
+                setTooltipPos({ x: e.clientX, y: e.clientY });
+              }}
+              onMouseLeave={() => setHoveredId(null)}
+              onClick={(e) => {
+                if (!isDragging) {
+                  e.stopPropagation();
+                  onSelectMapping?.(node.id);
                 }
-                onMouseDown={(e) => handleNodeDragStart(e, node.id)}
-                onMouseEnter={(e) => handleNodeHover(e, node)}
-                onMouseLeave={handleNodeLeave}
-                filter={isSearchMatch ? "url(#searchGlow)" : undefined}
-              >
-                {/* Outer ring for selected */}
-                {isSelected && (
-                  <circle
-                    cx={node.x}
-                    cy={node.y}
-                    r={22}
-                    fill="none"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    strokeDasharray="4 2"
-                    opacity={0.5}
-                  />
-                )}
-                {/* Node circle */}
-                <circle
-                  cx={node.x}
-                  cy={node.y}
-                  r={r}
-                  fill={color.bg}
-                  stroke={
-                    isSelected
-                      ? "#2563eb"
-                      : isSearchMatch
-                      ? "#f59e0b"
-                      : color.border
-                  }
-                  strokeWidth={isSelected ? 2.5 : isSearchMatch ? 2 : 1.5}
-                />
-                {/* Type badge */}
-                <text
-                  x={node.x}
-                  y={node.y + 4}
-                  textAnchor="middle"
-                  fontSize={10}
-                  fontWeight={700}
-                  fill={color.text}
-                >
-                  {TYPE_ABBREV[node.concept_type] || node.concept_type.charAt(0)}
-                </text>
-                {/* Label */}
-                <text
-                  x={node.x}
-                  y={node.y + 28}
-                  textAnchor="middle"
-                  fontSize={8}
-                  fill="#374151"
-                  fontWeight={isSelected ? 600 : 400}
-                >
-                  {node.name.length > 22
-                    ? node.name.slice(0, 20) + "..."
-                    : node.name}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
+              }}
+            >
+              {/* Outer ring */}
+              <circle
+                r={node.radius + 3}
+                fill={node.color.border}
+                opacity={isHovered ? 0.9 : 0.6}
+              />
+              {/* Inner fill */}
+              <circle r={node.radius} fill={node.color.bg} />
+              {/* Shine */}
+              <circle r={node.radius} fill="url(#meta-shine)" opacity={0.4} />
 
-        {/* Tooltip */}
-        {tooltip && (
-          <div
-            className="pointer-events-none absolute z-50 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg"
-            style={{ left: tooltip.x, top: tooltip.y, maxWidth: 280 }}
-          >
-            <div className="text-sm font-semibold text-gray-900">
-              {tooltip.node.name}
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-500">
-              <span className="rounded bg-gray-100 px-1.5 py-0.5 font-medium">
-                {tooltip.node.concept_type}
-              </span>
-              <span>
-                {tooltip.node.source_type === "code"
-                  ? "Code"
-                  : tooltip.node.source_type === "both"
-                  ? "Code + Doc"
-                  : "Document"}
-              </span>
-              <span>
-                {Math.round(tooltip.node.confidence_score * 100)}% confidence
-              </span>
-            </div>
-            {tooltip.node.initiative_id && (
-              <div className="mt-1 text-xs text-gray-400">
-                Project:{" "}
-                {data.projects.find((p) => p.id === tooltip.node.initiative_id)
-                  ?.name || "Unknown"}
+              {/* Project name */}
+              <text
+                textAnchor="middle"
+                dominantBaseline="central"
+                y={-node.radius * 0.3}
+                fill={node.color.text}
+                fontSize={14}
+                fontWeight={700}
+              >
+                {displayName}
+              </text>
+
+              {/* Stats line */}
+              <text
+                textAnchor="middle"
+                dominantBaseline="central"
+                y={-node.radius * 0.05}
+                fill={node.color.text}
+                fontSize={10}
+                opacity={0.75}
+              >
+                {node.concept_count} concepts · {node.relationship_count} rels
+              </text>
+
+              {/* File count */}
+              <text
+                textAnchor="middle"
+                dominantBaseline="central"
+                y={node.radius * 0.15}
+                fill={node.color.text}
+                fontSize={9}
+                opacity={0.6}
+              >
+                {node.file_count} files
+              </text>
+
+              {/* Top concepts */}
+              {topConcepts.map((concept, ci) => {
+                const truncated = concept.length > 18 ? concept.slice(0, 16) + ".." : concept;
+                return (
+                  <text
+                    key={ci}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    y={node.radius * 0.35 + ci * 11}
+                    fill={node.color.text}
+                    fontSize={8}
+                    opacity={0.45}
+                  >
+                    {truncated}
+                  </text>
+                );
+              })}
+
+              {/* Click hint */}
+              <text
+                textAnchor="middle"
+                dominantBaseline="central"
+                y={node.radius * 0.8}
+                fill={node.color.border}
+                fontSize={8}
+                opacity={isHovered ? 0.8 : 0}
+              >
+                Click to explore →
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* Tooltip */}
+      {hoveredNode && (
+        <div
+          className="pointer-events-none absolute z-50 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
+          style={{
+            left: Math.min(
+              tooltipPos.x - (containerRef.current?.getBoundingClientRect().left ?? 0) + 16,
+              (containerRef.current?.clientWidth ?? 800) - 280
+            ),
+            top: Math.min(
+              tooltipPos.y - (containerRef.current?.getBoundingClientRect().top ?? 0) - 10,
+              (containerRef.current?.clientHeight ?? 600) - 180
+            ),
+          }}
+        >
+          <p className="text-sm font-semibold text-gray-900">{hoveredNode.name}</p>
+          <div className="mt-1.5 space-y-1 text-xs text-gray-500">
+            <p>
+              <span className="font-medium text-gray-700">{hoveredNode.concept_count}</span> concepts ·{" "}
+              <span className="font-medium text-gray-700">{hoveredNode.relationship_count}</span> relationships ·{" "}
+              <span className="font-medium text-gray-700">{hoveredNode.file_count}</span> files
+            </p>
+            {hoveredNode.top_concepts.length > 0 && (
+              <div>
+                <p className="mt-1 font-medium text-gray-600">Top concepts:</p>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {hoveredNode.top_concepts.slice(0, 6).map((c, i) => (
+                    <span key={i} className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
+                      {c}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {Object.keys(hoveredNode.type_distribution).length > 0 && (
+              <div className="mt-1">
+                <p className="font-medium text-gray-600">Types:</p>
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {Object.entries(hoveredNode.type_distribution)
+                    .sort(([, a], [, b]) => b - a)
+                    .slice(0, 5)
+                    .map(([type, count]) => (
+                      <span key={type} className="rounded bg-purple-50 px-1.5 py-0.5 text-[10px] text-purple-700">
+                        {type}: {count}
+                      </span>
+                    ))}
+                </div>
               </div>
             )}
           </div>
-        )}
-
-        {/* Instructions overlay */}
-        <div className="absolute bottom-2 left-2 rounded bg-black/40 px-2 py-1 text-[10px] text-white/70">
-          Scroll to zoom &middot; Drag background to pan &middot; Drag nodes to
-          reposition &middot; Click node to focus
+          <p className="mt-2 text-[10px] text-gray-400">Click to drill into system architecture</p>
         </div>
+      )}
+
+      {/* Legend */}
+      <div className="absolute bottom-3 left-3 rounded-md border bg-white/90 px-3 py-2 text-[10px] text-gray-500 backdrop-blur-sm">
+        <p className="font-semibold text-gray-700">Level 5 — Organizational Overview</p>
+        <p className="mt-0.5">Bubble size = concept count</p>
+        <p>Dashed edge = cross-project mapping</p>
+        <p className="mt-1 text-gray-400">Click a project to drill into L3 · Scroll to zoom · Drag to pan</p>
       </div>
 
       {/* Stats bar */}
-      <div className="flex items-center gap-4 rounded-lg border bg-white px-4 py-2 text-xs text-gray-500">
-        <span>{data.total_nodes} concepts</span>
-        <span>{data.total_intra_edges} intra-project edges</span>
-        <span className="font-medium text-orange-600">
-          {data.total_cross_edges} cross-project edges
-        </span>
-        <span>{data.projects.length} projects</span>
-        {selectedNodeId && (
-          <>
-            <span className="mx-1 text-gray-300">|</span>
-            <span className="font-medium text-blue-600">
-              {nodes.find((n) => n.id === selectedNodeId)?.name} selected
-            </span>
-            <button
-              onClick={() => setSelectedNodeId(null)}
-              className="ml-1 text-gray-400 hover:text-gray-600"
-            >
-              Clear
-            </button>
-          </>
-        )}
+      <div className="absolute bottom-3 right-3 rounded-md border bg-white/90 px-3 py-2 text-[10px] text-gray-500 backdrop-blur-sm">
+        <span className="font-medium text-gray-700">{data.total_concepts}</span> concepts ·{" "}
+        <span className="font-medium text-gray-700">{data.total_relationships}</span> relationships ·{" "}
+        <span className="font-medium text-orange-600">{data.total_cross_edges}</span> cross-project
       </div>
     </div>
   );

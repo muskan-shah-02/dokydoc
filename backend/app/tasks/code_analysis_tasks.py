@@ -284,12 +284,18 @@ def static_analysis_worker(
         except Exception:
             pass
 
+        # Build version string: use content hash prefix + timestamp
+        version_str = f"v{analysis_end.strftime('%Y%m%d.%H%M')}"
+        if previous_hash:
+            version_str += f"-{previous_hash[:8]}"
+
         update_data = {
             "summary": analysis_result.get("summary"),
             "structured_analysis": new_analysis,
             "analysis_status": "completed",
             "previous_analysis_hash": previous_hash if previous_analysis else None,
             "analysis_completed_at": analysis_end,
+            "version": version_str,
             "ai_cost_inr": total_cost_inr,  # Always save (0 for cached, >0 for API calls)
             "token_count_input": token_usage_final.get("input_tokens", 0) if token_usage_final else 0,
             "token_count_output": token_usage_final.get("output_tokens", 0) if token_usage_final else 0,
