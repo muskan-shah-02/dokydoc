@@ -305,14 +305,13 @@ export default function BrainDashboardPage() {
                   onSelectMapping={(nodeId) => {
                     // Each node is a project — drill into Level 3 (System Architecture)
                     const node = metaData.nodes.find((n: any) => n.id === nodeId);
-                    if (node) {
-                      drillInto({
-                        level: 3,
-                        projectId: node.initiative_id ?? node.id,
-                        projectName: node.name || `Project ${node.id}`,
-                        repoId: node.repo_id ?? node.initiative_id ?? node.id,
-                      });
-                    }
+                    if (!node || node.id === -1 || !node.initiative_id) return; // Skip unscoped
+                    drillInto({
+                      level: 3,
+                      projectId: node.initiative_id,
+                      projectName: node.name || `Project ${node.initiative_id}`,
+                      repoId: node.repo_id ?? node.initiative_id,
+                    });
                   }}
                 />
               </div>
@@ -351,7 +350,7 @@ export default function BrainDashboardPage() {
                 into file-level view.
               </p>
             </div>
-            {drill.projectId && (
+            {drill.projectId && drill.projectId > 0 && (
               <button
                 onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
                 className="mr-5 mt-2 rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"

@@ -1977,3 +1977,56 @@ def build_requirement_traces(
         db=db, document_id=document_id, tenant_id=tenant_id
     )
     return result
+
+
+@router.post("/backfill-initiative-ids")
+def backfill_concept_initiative_ids(
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Backfill initiative_id on existing OntologyConcepts that have NULL initiative_id.
+    Resolves via: OntologyConcept.source_component_id → CodeComponent.repository_id → InitiativeAsset.
+    """
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.code_component import CodeComponent
+    from app.models.initiative_asset import InitiativeAsset
+
+    # Build repo→initiative lookup
+    assets = db.query(InitiativeAsset).filter(
+        InitiativeAsset.tenant_id == tenant_id,
+        InitiativeAsset.asset_type == "REPOSITORY",
+        InitiativeAsset.is_active == True,
+    ).all()
+    repo_to_initiative = {a.asset_id: a.initiative_id for a in assets}
+
+    # Build component→repo lookup
+    components = db.query(CodeComponent.id, CodeComponent.repository_id).filter(
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.repository_id.isnot(None),
+    ).all()
+    comp_to_repo = {c.id: c.repository_id for c in components}
+
+    # Find unscoped concepts
+    unscoped = db.query(OntologyConcept).filter(
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.initiative_id.is_(None),
+        OntologyConcept.source_component_id.isnot(None),
+    ).all()
+
+    updated = 0
+    for concept in unscoped:
+        repo_id = comp_to_repo.get(concept.source_component_id)
+        if repo_id:
+            initiative_id = repo_to_initiative.get(repo_id)
+            if initiative_id:
+                concept.initiative_id = initiative_id
+                updated += 1
+
+    db.commit()
+    return {
+        "total_unscoped": len(unscoped),
+        "updated": updated,
+        "remaining_unscoped": len(unscoped) - updated,
+    }

@@ -310,11 +310,16 @@ def static_analysis_worker(
         if new_analysis and tenant_id:
             try:
                 from app.services.code_analysis_service import code_analysis_service
+                # Resolve initiative_id: component → repository → initiative
+                _initiative_id = code_analysis_service._resolve_initiative_for_component(
+                    db, repository_id=component.repository_id, tenant_id=tenant_id
+                )
                 code_analysis_service._extract_ontology_from_analysis(
                     db, structured_analysis=new_analysis,
                     component_name=file_path or component.name,
                     tenant_id=tenant_id,
                     source_component_id=component.id,
+                    initiative_id=_initiative_id,
                 )
             except Exception as onto_err:
                 logger.warning(f"Inline ontology extraction failed (non-critical): {onto_err}")

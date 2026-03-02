@@ -517,12 +517,17 @@ class CodeAnalysisService(LoggerMixin):
 
             # 6. Extract ontology concepts from analysis (no additional AI calls)
             try:
+                # Resolve initiative_id: CodeComponent → Repository → InitiativeAsset
+                _initiative_id = self._resolve_initiative_for_component(
+                    db, repository_id=component.repository_id, tenant_id=tenant_id
+                )
                 self._extract_ontology_from_analysis(
                     db=db,
                     structured_analysis=analysis_result.get("structured_analysis", {}),
                     component_name=component.name,
                     tenant_id=tenant_id,
                     source_component_id=component.id,
+                    initiative_id=_initiative_id,
                 )
             except Exception as e:
                 self.logger.warning(f"Ontology extraction failed (non-fatal): {e}")
@@ -584,6 +589,24 @@ class CodeAnalysisService(LoggerMixin):
     }
 
     # File types that focus on business logic, API contracts, security, call chains
+    def _resolve_initiative_for_component(
+        self, db, *, repository_id: int = None, tenant_id: int
+    ):
+        """Resolve initiative_id for a code component via Repository → InitiativeAsset."""
+        if not repository_id:
+            return None
+        try:
+            from app.models.initiative_asset import InitiativeAsset
+            asset = db.query(InitiativeAsset).filter(
+                InitiativeAsset.tenant_id == tenant_id,
+                InitiativeAsset.asset_type == "REPOSITORY",
+                InitiativeAsset.asset_id == repository_id,
+                InitiativeAsset.is_active == True,
+            ).first()
+            return asset.initiative_id if asset else None
+        except Exception:
+            return None
+
     _LOGIC_FILE_TYPES = {"Service", "Controller", "Middleware"}
     # File types that focus on data entities, field relationships, constraints
     _DATA_FILE_TYPES = {"Model", "Migration"}
@@ -597,6 +620,7 @@ class CodeAnalysisService(LoggerMixin):
     def _extract_ontology_from_analysis(
         self, db, structured_analysis: dict, component_name: str, tenant_id: int,
         source_component_id: int = None,
+        initiative_id: int = None,
     ) -> None:
         """
         Extract ontology concepts AND relationships from code analysis results.
@@ -626,6 +650,7 @@ class CodeAnalysisService(LoggerMixin):
                 description=description[:500] if description else None,
                 confidence_score=confidence,
                 source_component_id=source_component_id,
+                initiative_id=initiative_id,
             )
             concept_map[key] = concept
             created_count += 1
