@@ -71,6 +71,9 @@ export default function BrainDashboardPage() {
   const fetchMetaGraph = useCallback(async () => {
     setLoading(true);
     try {
+      // Auto-backfill initiative_ids for any unscoped concepts (fire-and-forget)
+      api.post("/ontology/backfill-initiative-ids", {}).catch(() => {});
+
       const [meta, brainRes] = await Promise.all([
         api.get<MetaGraphData>("/ontology/graph/meta"),
         api.get<any>("/ontology/graph/brain"),

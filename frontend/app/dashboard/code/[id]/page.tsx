@@ -35,6 +35,7 @@ import {
   IndianRupee,
   Cpu,
   Network,
+  History,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,6 +44,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RepositoryAnalysisView } from "@/components/analysis/RepositoryAnalysisView";
 import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
+import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
 import { api } from "@/lib/api";
 
 interface CodeComponentDetail {
@@ -74,6 +76,7 @@ export default function CodeComponentDetailPage() {
   const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
   const [domainData, setDomainData] = useState<any>(null);
   const [systemData, setSystemData] = useState<any>(null);
+  const [versionPanelOpen, setVersionPanelOpen] = useState(false);
 
   const fetchGraph = async (compId: string) => {
     setGraphLoading(true);
@@ -381,6 +384,18 @@ export default function CodeComponentDetailPage() {
         </TabsContent>
 
         <TabsContent value="graph">
+          {/* Version History button */}
+          <div className="flex justify-end mb-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVersionPanelOpen(true)}
+              className="gap-1.5 text-xs"
+            >
+              <History className="w-3.5 h-3.5" />
+              Version History
+            </Button>
+          </div>
           {graphLoading ? (
             <div className="flex items-center justify-center h-64">
               <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
@@ -396,6 +411,13 @@ export default function CodeComponentDetailPage() {
               <p className="text-xs mt-1">Concepts appear after analysis + BOE extraction</p>
             </div>
           )}
+          {/* Graph Version Panel (slide-over) */}
+          <GraphVersionPanel
+            sourceType="component"
+            sourceId={Number(id)}
+            isOpen={versionPanelOpen}
+            onClose={() => setVersionPanelOpen(false)}
+          />
         </TabsContent>
 
         {component.component_type === "Repository" && (

@@ -80,6 +80,7 @@ export function MetaGraphView({
   const [dragId, setDragId] = useState<number | null>(null);
   const [nodePositions, setNodePositions] = useState<Map<number, { x: number; y: number }>>(new Map());
   const dragStartRef = useRef({ x: 0, y: 0, nodeX: 0, nodeY: 0 });
+  const didDragRef = useRef(false); // Track if actual dragging happened
 
   const W = 1000;
   const H = 600;
@@ -148,6 +149,10 @@ export function MetaGraphView({
         const scaleY = viewBox.h / rect.height;
         const dx = (e.clientX - dragStartRef.current.x) * scaleX;
         const dy = (e.clientY - dragStartRef.current.y) * scaleY;
+        // Mark as real drag if moved more than 5px
+        if (Math.abs(dx) + Math.abs(dy) > 5) {
+          didDragRef.current = true;
+        }
         setNodePositions((prev) => {
           const next = new Map(prev);
           next.set(dragId, {
@@ -200,6 +205,7 @@ export function MetaGraphView({
     (id: number, e: React.MouseEvent) => {
       e.stopPropagation();
       setDragId(id);
+      didDragRef.current = false; // Reset — haven't dragged yet
       const pos = getPos(id);
       dragStartRef.current = { x: e.clientX, y: e.clientY, nodeX: pos.x, nodeY: pos.y };
     },
@@ -349,7 +355,8 @@ export function MetaGraphView({
               }}
               onMouseLeave={() => setHoveredId(null)}
               onClick={(e) => {
-                if (!isDragging) {
+                // Only fire click if we didn't actually drag
+                if (!didDragRef.current) {
                   e.stopPropagation();
                   onSelectMapping?.(node.id);
                 }

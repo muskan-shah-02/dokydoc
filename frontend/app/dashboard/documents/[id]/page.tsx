@@ -62,7 +62,8 @@ import { api } from "@/lib/api";
 import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
 import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
-import { Network } from "lucide-react";
+import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
+import { Network, History } from "lucide-react";
 
 // --- 1. Types ---
 
@@ -845,6 +846,7 @@ export default function DocumentDetailPage() {
   const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
+  const [versionPanelOpen, setVersionPanelOpen] = useState(false);
 
   const fetchGraphData = useCallback(async (docId: string) => {
     setGraphLoading(true);
@@ -1118,6 +1120,18 @@ export default function DocumentDetailPage() {
         </TabsContent>
 
         <TabsContent value="graph">
+          {/* Version History button */}
+          <div className="flex justify-end mb-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVersionPanelOpen(true)}
+              className="gap-1.5 text-xs"
+            >
+              <History className="w-3.5 h-3.5" />
+              Version History
+            </Button>
+          </div>
           {graphLoading ? (
             <div className="flex items-center justify-center h-64">
               <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
@@ -1142,6 +1156,15 @@ export default function DocumentDetailPage() {
                 Refresh
               </button>
             </div>
+          )}
+          {/* Graph Version Panel (slide-over) */}
+          {doc && (
+            <GraphVersionPanel
+              sourceType="document"
+              sourceId={doc.id}
+              isOpen={versionPanelOpen}
+              onClose={() => setVersionPanelOpen(false)}
+            />
           )}
         </TabsContent>
       </Tabs>
