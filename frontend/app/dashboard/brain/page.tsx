@@ -20,6 +20,7 @@ import {
   BreadcrumbSegment,
 } from "@/components/ontology/BrainBreadcrumb";
 import { SystemArchitectureView } from "@/components/ontology/SystemArchitectureView";
+import { CrossProjectMappingPanel } from "@/components/ontology/CrossProjectMappingPanel";
 
 // --- Types ---
 
@@ -563,6 +564,15 @@ export default function BrainDashboardPage() {
           ))}
         </div>
       </div>
+
+      {/* Cross-Project Mappings */}
+      {metaData && metaData.projects.length >= 2 && (
+        <div className="mt-6">
+          <CrossProjectMappingPanel
+            projects={metaData.projects}
+          />
+        </div>
+      )}
     </div>
   );
 }

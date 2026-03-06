@@ -36,6 +36,7 @@ import {
   Cpu,
   Network,
   History,
+  GitBranch,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -45,6 +46,7 @@ import { RepositoryAnalysisView } from "@/components/analysis/RepositoryAnalysis
 import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
+import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
 import { api } from "@/lib/api";
 
 interface CodeComponentDetail {
@@ -77,6 +79,26 @@ export default function CodeComponentDetailPage() {
   const [domainData, setDomainData] = useState<any>(null);
   const [systemData, setSystemData] = useState<any>(null);
   const [versionPanelOpen, setVersionPanelOpen] = useState(false);
+  const [branchData, setBranchData] = useState<any>(null);
+  const [branchList, setBranchList] = useState<any[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
+  const [branchLoading, setBranchLoading] = useState(false);
+
+  const fetchBranches = async (repoId: string) => {
+    try {
+      const data = await api.get<any[]>(`/ontology/graph/branches/${repoId}`);
+      setBranchList(data);
+    } catch { setBranchList([]); }
+  };
+
+  const fetchBranchPreview = async (repoId: string, branch: string) => {
+    setBranchLoading(true);
+    try {
+      const data = await api.get<any>(`/ontology/graph/preview/${repoId}/${branch}`);
+      setBranchData(data);
+    } catch { setBranchData(null); }
+    finally { setBranchLoading(false); }
+  };
 
   const fetchGraph = async (compId: string) => {
     setGraphLoading(true);
@@ -326,6 +348,8 @@ export default function CodeComponentDetailPage() {
           fetchDomainGraph(Number(id));
         if (v === "system" && !systemData && component?.component_type === "Repository")
           fetchSystemGraph(Number(id));
+        if (v === "branches" && branchList.length === 0 && component?.component_type === "Repository")
+          fetchBranches(String(id));
       }}>
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start">
           <TabsTrigger value="analysis" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6">
@@ -341,6 +365,9 @@ export default function CodeComponentDetailPage() {
               </TabsTrigger>
               <TabsTrigger value="system" className="data-[state=active]:bg-amber-50 data-[state=active]:text-amber-700 h-10 px-6">
                 <Cpu className="w-4 h-4 mr-2" /> System Architecture
+              </TabsTrigger>
+              <TabsTrigger value="branches" className="data-[state=active]:bg-cyan-50 data-[state=active]:text-cyan-700 h-10 px-6">
+                <GitBranch className="w-4 h-4 mr-2" /> Branch Preview
               </TabsTrigger>
             </>
           )}
@@ -504,6 +531,58 @@ export default function CodeComponentDetailPage() {
                   <p className="text-xs mt-1">Analyze files in this repository first</p>
                 </div>
               )}
+            </TabsContent>
+
+            <TabsContent value="branches">
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <select
+                    className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+                    value={selectedBranch || ""}
+                    onChange={(e) => {
+                      const branch = e.target.value;
+                      setSelectedBranch(branch);
+                      if (branch && id) fetchBranchPreview(String(id), branch);
+                    }}
+                  >
+                    <option value="">
+                      {branchList.length === 0 ? "No branches available" : "Select a branch..."}
+                    </option>
+                    {branchList.map((b: any) => (
+                      <option key={b.branch} value={b.branch}>{b.branch} ({b.commit_hash?.slice(0, 8)})</option>
+                    ))}
+                  </select>
+                </div>
+                {branchLoading ? (
+                  <div className="flex items-center justify-center h-64">
+                    <Loader2 className="w-6 h-6 animate-spin text-cyan-600" />
+                    <span className="ml-2 text-sm text-gray-500">Loading branch preview...</span>
+                  </div>
+                ) : branchData && branchData.nodes?.length > 0 ? (
+                  <div style={{ height: "500px" }}>
+                    <BranchPreviewGraph
+                      nodes={branchData.nodes}
+                      edges={branchData.edges}
+                      branch={selectedBranch || ""}
+                      commitHash={branchData.commit_hash || ""}
+                      changedFiles={branchData.changed_files || []}
+                      selectedId={null}
+                      onSelectNode={() => {}}
+                    />
+                  </div>
+                ) : selectedBranch ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                    <GitBranch className="w-12 h-12 mb-3" />
+                    <p className="text-sm font-medium">No preview data for this branch</p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                    <GitBranch className="w-12 h-12 mb-3" />
+                    <p className="text-sm font-medium">Select a branch to preview its impact</p>
+                    <p className="text-xs mt-1">Branch previews show how code changes affect the knowledge graph</p>
+                  </div>
+                )}
+              </div>
             </TabsContent>
           </>
         )}

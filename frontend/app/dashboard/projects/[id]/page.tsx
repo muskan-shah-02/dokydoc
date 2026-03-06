@@ -21,6 +21,7 @@ import { api } from "@/lib/api";
 import { useProject, Initiative } from "@/contexts/ProjectContext";
 import { CrossGraphView } from "@/components/ontology/CrossGraphView";
 import { GapAnalysis } from "@/components/ontology/GapAnalysis";
+import { RequirementTraceabilityPanel } from "@/components/ontology/RequirementTraceabilityPanel";
 
 interface InitiativeAsset {
   id: number;
@@ -546,6 +547,16 @@ export default function ProjectDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Requirement Traceability (L4 extension) */}
+      {assets.length > 0 && (
+        <div className="mt-6">
+          <RequirementTraceabilityPanel
+            initiativeId={projectId}
+            documentIds={assets.filter(a => a.asset_type === "DOCUMENT").map(a => a.asset_id)}
+          />
+        </div>
+      )}
 
       {/* Link Asset Dialog */}
       {showLinkDialog && (

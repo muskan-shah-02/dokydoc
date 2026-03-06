@@ -97,7 +97,7 @@ export function CrossGraphView({
   // Layout constants
   const nodeHeight = 38;
   const nodeWidth = 160;
-  const gapX = Math.max(200, containerWidth - 2 * nodeWidth - 120); // dynamic gap based on width
+  const gapX = Math.min(Math.max(200, containerWidth - 2 * nodeWidth - 120), 400); // cap gap to prevent excessive spread
   const marginTop = 60;
   const marginLeft = 40;
   const spacing = 52;
@@ -142,8 +142,7 @@ export function CrossGraphView({
   return (
     <div
       ref={containerRef}
-      className="relative w-full overflow-auto rounded-lg border bg-white"
-      style={{ maxHeight: "70vh" }}
+      className="relative h-full w-full overflow-auto rounded-lg border bg-white"
     >
       {/* Node count indicator */}
       <div className="sticky left-0 top-0 z-10 flex items-center gap-4 border-b bg-white/90 px-4 py-2 backdrop-blur-sm">
