@@ -1,7 +1,9 @@
 services:
   # PostgreSQL Database
   db:
-    image: pgvector/pgvector:pg15
+    build:
+      context: ./db
+      dockerfile: Dockerfile
     container_name: dokydoc_db
     # ... (rest of db config is unchanged)
     restart: unless-stopped
@@ -12,6 +14,7 @@ services:
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db/init-extensions.sql:/docker-entrypoint-initdb.d/01-init-extensions.sql:ro
     ports:
       - "5432:5432"
     networks:
