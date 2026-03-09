@@ -17,25 +17,32 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _try_in_savepoint(conn, sql):
+    """Execute SQL in a savepoint so failures don't abort the transaction."""
+    try:
+        nested = conn.begin_nested()
+        conn.execute(text(sql))
+        nested.commit()
+        return True
+    except Exception:
+        nested.rollback()
+        return False
+
+
 def upgrade() -> None:
     conn = op.get_bind()
 
     # Enable pgvector extension (requires superuser or CREATE privilege)
-    try:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-    except Exception:
-        # pgvector may not be available in all environments
-        # Skip silently — embedding features will be disabled at runtime
-        pass
+    pgvector_available = _try_in_savepoint(conn, "CREATE EXTENSION IF NOT EXISTS vector")
 
     inspector = inspect(conn)
 
     # Add embedding column to ontology_concepts
     existing_cols = [c["name"] for c in inspector.get_columns("ontology_concepts")]
     if "embedding" not in existing_cols:
-        try:
-            op.execute("ALTER TABLE ontology_concepts ADD COLUMN embedding vector(768)")
-        except Exception:
+        if not pgvector_available or not _try_in_savepoint(
+            conn, "ALTER TABLE ontology_concepts ADD COLUMN embedding vector(768)"
+        ):
             # Fallback: use JSONB if pgvector is not available
             op.add_column("ontology_concepts", sa.Column("embedding", sa.JSON(), nullable=True))
 
@@ -48,29 +55,28 @@ def upgrade() -> None:
     # Add embedding column to knowledge_graph_versions
     existing_kgv_cols = [c["name"] for c in inspector.get_columns("knowledge_graph_versions")]
     if "embedding" not in existing_kgv_cols:
-        try:
-            op.execute("ALTER TABLE knowledge_graph_versions ADD COLUMN embedding vector(768)")
-        except Exception:
+        if not pgvector_available or not _try_in_savepoint(
+            conn, "ALTER TABLE knowledge_graph_versions ADD COLUMN embedding vector(768)"
+        ):
             op.add_column("knowledge_graph_versions", sa.Column("embedding", sa.JSON(), nullable=True))
 
     if "summary_text" not in existing_kgv_cols:
         op.add_column("knowledge_graph_versions", sa.Column("summary_text", sa.Text(), nullable=True))
 
     # Create HNSW indexes for fast ANN search (only if pgvector is available)
-    try:
-        op.execute(
+    if pgvector_available:
+        _try_in_savepoint(
+            conn,
             "CREATE INDEX IF NOT EXISTS idx_ontology_concepts_embedding_hnsw "
             "ON ontology_concepts USING hnsw (embedding vector_cosine_ops) "
-            "WITH (m = 16, ef_construction = 64)"
+            "WITH (m = 16, ef_construction = 64)",
         )
-        op.execute(
+        _try_in_savepoint(
+            conn,
             "CREATE INDEX IF NOT EXISTS idx_kgv_embedding_hnsw "
             "ON knowledge_graph_versions USING hnsw (embedding vector_cosine_ops) "
-            "WITH (m = 16, ef_construction = 64)"
+            "WITH (m = 16, ef_construction = 64)",
         )
-    except Exception:
-        # pgvector not available — skip index creation
-        pass
 
 
 def downgrade() -> None:
