@@ -151,6 +151,24 @@ class BusinessOntologyService(LoggerMixin):
             f"initiative_id={initiative_id}, ₹{total_cost_inr:.4f}"
         )
 
+        # SPRINT 4: Queue embedding generation for newly created concepts
+        if entities_created > 0:
+            try:
+                from app.tasks.embedding_tasks import generate_concept_embeddings
+                from app.models.ontology_concept import OntologyConcept
+                recent_ids = [
+                    c.id for c in db.query(OntologyConcept.id).filter(
+                        OntologyConcept.tenant_id == tenant_id,
+                        OntologyConcept.embedded_at.is_(None),
+                        OntologyConcept.source_document_id == document_id,
+                    ).limit(200).all()
+                ]
+                if recent_ids:
+                    generate_concept_embeddings.delay(recent_ids, tenant_id)
+                    self.logger.info(f"Queued embedding generation for {len(recent_ids)} concepts")
+            except Exception as emb_err:
+                self.logger.debug(f"Embedding task dispatch failed (non-fatal): {emb_err}")
+
         return {
             "entities_created": entities_created,
             "relationships_created": relationships_created,

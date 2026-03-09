@@ -21,6 +21,7 @@ import {
 } from "@/components/ontology/BrainBreadcrumb";
 import { SystemArchitectureView } from "@/components/ontology/SystemArchitectureView";
 import { CrossProjectMappingPanel } from "@/components/ontology/CrossProjectMappingPanel";
+import SemanticSearch from "@/components/ontology/SemanticSearch";
 
 // --- Types ---
 
@@ -214,6 +215,17 @@ export default function BrainDashboardPage() {
               </p>
             </div>
           </div>
+          {/* Semantic Search */}
+          <SemanticSearch
+            className="w-80"
+            onSelectConcept={(concept) => {
+              // Navigate to concept's graph context
+              if (concept.source_type === "code" || concept.source_type === "both") {
+                // Could drill into code graph - for now show alert
+                console.log("Selected concept:", concept);
+              }
+            }}
+          />
         </div>
       </div>
 

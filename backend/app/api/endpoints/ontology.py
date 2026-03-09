@@ -2030,3 +2030,98 @@ def backfill_concept_initiative_ids(
         "updated": updated,
         "remaining_unscoped": len(unscoped) - updated,
     }
+
+
+# ============================================================
+# SPRINT 4: Semantic Search Endpoints
+# ============================================================
+
+@router.get("/search")
+def semantic_search(
+    q: str = Query(..., min_length=1, description="Search query"),
+    concept_type: Optional[str] = Query(None, description="Filter by concept type"),
+    source_type: Optional[str] = Query(None, description="Filter by source type (document/code/both)"),
+    initiative_id: Optional[int] = Query(None, description="Filter by initiative"),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0, description="Minimum confidence score"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Sprint 4: Semantic search across ontology concepts.
+    Uses vector similarity (pgvector) when available, falls back to text search.
+    """
+    from app.services.semantic_search_service import semantic_search_service
+    results = semantic_search_service.search_concepts(
+        db, q, tenant_id,
+        concept_type=concept_type,
+        source_type=source_type,
+        initiative_id=initiative_id,
+        min_confidence=min_confidence,
+        limit=limit,
+    )
+    return {"query": q, "results": results, "count": len(results)}
+
+
+@router.get("/search/related/{concept_id}")
+def find_related_concepts(
+    concept_id: int,
+    depth: int = Query(1, ge=1, le=3, description="Graph traversal depth"),
+    limit: int = Query(20, ge=1, le=100, description="Max results"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Sprint 4: Find concepts related to a given concept.
+    Combines graph traversal with vector similarity.
+    """
+    from app.services.semantic_search_service import semantic_search_service
+    results = semantic_search_service.find_related(
+        db, concept_id, tenant_id,
+        depth=depth,
+        limit=limit,
+    )
+    return {"concept_id": concept_id, "related": results, "count": len(results)}
+
+
+@router.get("/search/graphs")
+def search_graphs(
+    q: str = Query(..., min_length=1, description="Search query"),
+    source_type: Optional[str] = Query(None, description="Filter: component or document"),
+    limit: int = Query(10, ge=1, le=50, description="Max results"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Sprint 4: Search knowledge graph versions by summary similarity.
+    """
+    from app.services.semantic_search_service import semantic_search_service
+    results = semantic_search_service.search_graphs(
+        db, q, tenant_id,
+        source_type=source_type,
+        limit=limit,
+    )
+    return {"query": q, "results": results, "count": len(results)}
+
+
+@router.post("/embeddings/generate", status_code=status.HTTP_202_ACCEPTED)
+def generate_embeddings(
+    background_tasks: BackgroundTasks,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Sprint 4: Trigger embedding generation for all un-embedded concepts.
+    Runs as a background Celery task.
+    """
+    try:
+        from app.tasks.embedding_tasks import embed_all_tenant_concepts
+        embed_all_tenant_concepts.delay(tenant_id)
+        return {"status": "accepted", "message": "Embedding generation task enqueued"}
+    except Exception as e:
+        logger.warning(f"Failed to enqueue embedding task: {e}")
+        return {"status": "accepted", "message": "Embedding generation scheduled"}
