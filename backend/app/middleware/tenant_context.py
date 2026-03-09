@@ -113,6 +113,8 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
 
             # Store additional context for logging and audit
             request.state.tenant_subdomain = payload.get("tenant_subdomain")
+            request.state.user_id = payload.get("user_id")
+            request.state.user_email = user_email
 
             # Validate tenant_id exists
             if not request.state.tenant_id:

@@ -30,3 +30,9 @@ from .crud_knowledge_graph_version import knowledge_graph_version
 
 # Requirement Traceability
 from .crud_requirement_trace import requirement_trace
+
+# Sprint 5: Audit Trail
+from .crud_audit_log import audit_log
+
+# Sprint 5: Notifications
+from .crud_notification import notification

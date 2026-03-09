@@ -18,9 +18,11 @@ from app.api.endpoints import (
     ontology, initiatives,  # SPRINT 3: Business Ontology Engine + Governance
     repositories,  # SPRINT 3: Code Analysis Engine
     webhooks,  # SPRINT 4: Git Webhook Integration (ADHOC-09)
+    audit, notifications, exports,  # SPRINT 5: Audit Trail, Notifications, Exports
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
+from app.middleware.audit_middleware import AuditMiddleware
 from slowapi.errors import RateLimitExceeded
 
 # Setup logging
@@ -65,6 +67,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
 
 # --- Middleware Configuration ---
+
+# SPRINT 5: Audit Middleware (logs mutating requests, runs AFTER tenant context)
+app.add_middleware(AuditMiddleware)
 
 # SPRINT 2: Tenant Context Middleware (MUST be added BEFORE CORS)
 # This extracts tenant_id from JWT and injects it into request.state
@@ -355,6 +360,27 @@ app.include_router(
     webhooks.router,
     prefix=f"/api/{settings.API_VERSION}/webhooks",
     tags=["Webhooks"]
+)
+
+# SPRINT 5: Audit Trail
+app.include_router(
+    audit.router,
+    prefix=f"/api/{settings.API_VERSION}/audit",
+    tags=["Audit Trail"]
+)
+
+# SPRINT 5: Notifications
+app.include_router(
+    notifications.router,
+    prefix=f"/api/{settings.API_VERSION}/notifications",
+    tags=["Notifications"]
+)
+
+# SPRINT 5: Data Exports
+app.include_router(
+    exports.router,
+    prefix=f"/api/{settings.API_VERSION}/exports",
+    tags=["Exports"]
 )
 
 # --- Startup Event (Legacy support) ---

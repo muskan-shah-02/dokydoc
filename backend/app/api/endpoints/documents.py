@@ -39,34 +39,43 @@ router = APIRouter()
 # --- The process_document_pipeline function has been MOVED to app/tasks.py ---
 
 
-@router.get("/", response_model=List[schemas.Document])
+@router.get("/")
 def read_documents(
     tenant_id: int = Depends(deps.get_tenant_id),  # SPRINT 2: Tenant context
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
     initiative_id: Optional[int] = Query(None, description="Filter by initiative (project) ID"),
+    cursor: Optional[int] = Query(None, description="Cursor (last document ID from previous page)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
 ) -> Any:
     """
-    Retrieve all documents for the current tenant, optionally filtered by initiative.
+    Retrieve documents for the current tenant with cursor-based pagination.
 
     SPRINT 2: Documents are scoped to tenant, not just owner.
     SPRINT 4: Optional initiative_id filtering via project context.
     """
+    from app.api.pagination import paginate_query
+    from app.models.document import Document
+
     document_endpoints.logger.info(f"Fetching documents for tenant {tenant_id}, user {current_user.id}, initiative_id={initiative_id}")
+
     if initiative_id:
-        documents = crud.document.get_by_initiative(
+        query = crud.document.build_initiative_query(
             db=db,
             initiative_id=initiative_id,
-            tenant_id=tenant_id
+            tenant_id=tenant_id,
         )
     else:
-        documents = crud.document.get_multi_by_owner(
+        query = crud.document.build_owner_query(
             db=db,
             owner_id=current_user.id,
-            tenant_id=tenant_id  # SPRINT 2: Mandatory tenant filtering
+            tenant_id=tenant_id,
         )
-    document_endpoints.logger.info(f"Retrieved {len(documents)} documents for tenant {tenant_id}")
-    return documents
+
+    page = paginate_query(query, Document.id, cursor=cursor, page_size=page_size)
+
+    document_endpoints.logger.info(f"Retrieved {len(page['items'])} documents for tenant {tenant_id}")
+    return page
 
 
 @router.get("/{document_id}", response_model=schemas.Document)

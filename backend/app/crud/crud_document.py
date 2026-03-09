@@ -59,50 +59,35 @@ class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
         db.refresh(db_obj)
         return db_obj
 
-    def get_multi_by_owner(
-        self, db: Session, *, owner_id: int, tenant_id: int, skip: int = 0, limit: int = 100
-    ) -> List[Document]:
-        """
-        Retrieve multiple documents from the database belonging to a specific owner.
-
-        SPRINT 2: tenant_id is now REQUIRED for multi-tenancy isolation.
-        Documents are filtered by BOTH owner_id and tenant_id.
-
-        Args:
-            db: Database session
-            owner_id: Owner user ID
-            tenant_id: REQUIRED tenant ID for multi-tenancy isolation
-            skip: Pagination offset
-            limit: Pagination limit
-
-        Returns:
-            List of documents belonging to the owner in the tenant
-        """
-        # CRITICAL VALIDATION: Ensure tenant_id is provided
+    def build_owner_query(
+        self, db: Session, *, owner_id: int, tenant_id: int,
+    ):
+        """Build a filtered query for owner documents (without ordering/pagination)."""
         if not tenant_id:
-            raise ValueError("tenant_id is REQUIRED for get_multi_by_owner()")
+            raise ValueError("tenant_id is REQUIRED for build_owner_query()")
 
-        # FLAW-11-B FIX: Eager load segments to prevent N+1 queries
-        # when dashboard/document list accesses segment counts or statuses
         return (
             db.query(self.model)
             .options(selectinload(Document.segments))
             .filter(
                 Document.owner_id == owner_id,
-                Document.tenant_id == tenant_id  # SPRINT 2: Tenant isolation
+                Document.tenant_id == tenant_id,
             )
-            .offset(skip)
-            .limit(limit)
-            .all()
         )
 
-    def get_by_initiative(
-        self, db: Session, *, initiative_id: int, tenant_id: int,
-        skip: int = 0, limit: int = 100
+    def get_multi_by_owner(
+        self, db: Session, *, owner_id: int, tenant_id: int, skip: int = 0, limit: int = 100
     ) -> List[Document]:
-        """Get documents linked to a specific initiative via InitiativeAsset."""
+        """Retrieve documents belonging to a specific owner (offset-based, kept for backward compat)."""
+        query = self.build_owner_query(db=db, owner_id=owner_id, tenant_id=tenant_id)
+        return query.offset(skip).limit(limit).all()
+
+    def build_initiative_query(
+        self, db: Session, *, initiative_id: int, tenant_id: int,
+    ):
+        """Build a filtered query for initiative documents (without ordering/pagination)."""
         if not tenant_id:
-            raise ValueError("tenant_id is REQUIRED for get_by_initiative()")
+            raise ValueError("tenant_id is REQUIRED for build_initiative_query()")
 
         from app.models.initiative_asset import InitiativeAsset
         asset_ids = db.query(InitiativeAsset.asset_id).filter(
@@ -119,10 +104,15 @@ class CRUDDocument(CRUDBase[Document, DocumentCreate, DocumentUpdate]):
                 self.model.id.in_(asset_ids),
                 self.model.tenant_id == tenant_id,
             )
-            .offset(skip)
-            .limit(limit)
-            .all()
         )
+
+    def get_by_initiative(
+        self, db: Session, *, initiative_id: int, tenant_id: int,
+        skip: int = 0, limit: int = 100
+    ) -> List[Document]:
+        """Get documents linked to a specific initiative (offset-based, kept for backward compat)."""
+        query = self.build_initiative_query(db=db, initiative_id=initiative_id, tenant_id=tenant_id)
+        return query.offset(skip).limit(limit).all()
 
 # Create a single instance of the CRUDDocument class that we can import elsewhere
 document = CRUDDocument(Document)
