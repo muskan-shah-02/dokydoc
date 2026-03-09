@@ -665,7 +665,8 @@ export default function DocumentsPage() {
         const errData = await response.json();
         throw new Error(errData.detail || "Failed to fetch documents.");
       }
-      const data: Document[] = await response.json();
+      const raw = await response.json();
+      const data: Document[] = Array.isArray(raw) ? raw : (raw.items ?? raw.documents ?? []);
 
       // Fetch link counts
       const documentsWithLinkCounts = await Promise.all(

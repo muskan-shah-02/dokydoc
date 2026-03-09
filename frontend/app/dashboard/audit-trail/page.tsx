@@ -487,6 +487,7 @@ export default function AuditTrailPage() {
               </p>
             </div>
           ) : (
+            <>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -569,6 +570,7 @@ export default function AuditTrailPage() {
                 </Button>
               </div>
             )}
+            </>
           )}
         </CardContent>
       </Card>

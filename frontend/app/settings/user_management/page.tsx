@@ -190,7 +190,7 @@ export default function UserManagementPage() {
         </div>
 
         {/* Users Table */}
-        <div className="rounded-lg border bg-white shadow-sm overflow-hidden">
+        <div className="rounded-lg border bg-white shadow-sm overflow-visible">
           {isLoading ? (
             <div className="p-8 text-center">
               <div className="mb-4 h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600 mx-auto"></div>
