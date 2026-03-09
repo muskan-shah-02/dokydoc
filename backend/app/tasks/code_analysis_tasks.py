@@ -574,6 +574,45 @@ def repo_analysis_task(
             f"{completed} succeeded, {failed} failed out of {len(file_list)} files"
         )
 
+        # SPRINT 5: Notify repo owner about analysis completion
+        try:
+            from app.services.notification_service import notify
+            if final_status == "completed" and failed == 0:
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=repo.owner_id,
+                    notification_type="analysis_complete",
+                    title="Repository Analysis Complete",
+                    message=f"All {completed} files in '{repo.name}' have been analyzed successfully.",
+                    resource_type="repository",
+                    resource_id=repo_id,
+                )
+            elif completed > 0:
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=repo.owner_id,
+                    notification_type="analysis_complete",
+                    title="Repository Analysis Complete",
+                    message=f"Analysis of '{repo.name}' finished: {completed} succeeded, {failed} failed out of {len(file_list)} files.",
+                    resource_type="repository",
+                    resource_id=repo_id,
+                )
+            else:
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=repo.owner_id,
+                    notification_type="analysis_failed",
+                    title="Repository Analysis Failed",
+                    message=f"Analysis of '{repo.name}' failed for all {len(file_list)} files.",
+                    resource_type="repository",
+                    resource_id=repo_id,
+                )
+        except Exception as notif_err:
+            logger.debug(f"Notification send failed (non-fatal): {notif_err}")
+
         # Fire code ontology extraction to populate graph from code analysis
         if completed > 0 and tenant_id:
             try:
@@ -611,6 +650,24 @@ def repo_analysis_task(
             )
         except Exception:
             pass
+
+        # SPRINT 5: Notify repo owner about critical failure
+        try:
+            from app.services.notification_service import notify
+            if repo:
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=repo.owner_id,
+                    notification_type="analysis_failed",
+                    title="Repository Analysis Error",
+                    message=f"A critical error occurred while analyzing '{repo.name}': {str(e)[:200]}",
+                    resource_type="repository",
+                    resource_id=repo_id,
+                )
+        except Exception:
+            pass
+
         return {"status": "failed", "repo_id": repo_id, "error": str(e)}
     finally:
         if db.is_active:

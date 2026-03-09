@@ -14,8 +14,9 @@
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useAuth, Permission } from "@/contexts/AuthContext";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { api } from "@/lib/api";
 import {
   Users,
   FileText,
@@ -27,18 +28,74 @@ import {
   Activity,
   CheckCircle2,
   Clock,
-  TrendingUp,
-  UserPlus,
-  Receipt,
+  Loader2,
 } from "lucide-react";
+
+interface AdminDashboardData {
+  userCount: number;
+  documentCount: number;
+  monthlyCost: number;
+  balance: number;
+  billingType: string;
+  activeTasks: number;
+  recentActivity: Array<{
+    id: number;
+    action: string;
+    resource_type: string;
+    resource_id: number | null;
+    user_email: string;
+    created_at: string;
+    details: any;
+  }>;
+}
 
 export default function AdminDashboardPage() {
   const { user, tenant, isCXO, isAdmin, hasPermission, isLoading, getPrimaryDashboardUrl } = useAuth();
   const router = useRouter();
   const [permissionChecked, setPermissionChecked] = useState(false);
+  const [data, setData] = useState<AdminDashboardData | null>(null);
+  const [dataLoading, setDataLoading] = useState(true);
 
   // Check if user has admin dashboard permission (CXO or Admin role)
   const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
+
+  const fetchData = useCallback(async () => {
+    setDataLoading(true);
+    try {
+      const [usersRes, docsRes, billingRes, auditRes] = await Promise.all([
+        api.get<any[]>("/users").catch(() => []),
+        api.get<any>("/documents?page_size=1").catch(() => ({ items: [] })),
+        api.get<any>("/billing/usage").catch(() => null),
+        api.get<any>("/audit/logs?page_size=5").catch(() => ({ items: [] })),
+      ]);
+
+      const userCount = Array.isArray(usersRes) ? usersRes.length : 1;
+      const documentCount = docsRes?.total || (Array.isArray(docsRes?.items) ? docsRes.items.length : 0);
+      const activityItems = auditRes?.items || (Array.isArray(auditRes) ? auditRes : []);
+
+      setData({
+        userCount,
+        documentCount,
+        monthlyCost: billingRes?.current_month_cost || 0,
+        balance: billingRes?.balance_inr || 0,
+        billingType: billingRes?.billing_type || tenant?.billing_type || "prepaid",
+        activeTasks: 0,
+        recentActivity: activityItems.slice(0, 5),
+      });
+    } catch {
+      setData({
+        userCount: 1,
+        documentCount: 0,
+        monthlyCost: 0,
+        balance: 0,
+        billingType: "prepaid",
+        activeTasks: 0,
+        recentActivity: [],
+      });
+    } finally {
+      setDataLoading(false);
+    }
+  }, [tenant]);
 
   // Check permission after auth is loaded
   useEffect(() => {
@@ -52,6 +109,12 @@ export default function AdminDashboardPage() {
       }
     }
   }, [user, isLoading, canAccessAdminDashboard, router, permissionChecked, getPrimaryDashboardUrl]);
+
+  useEffect(() => {
+    if (user && !isLoading) {
+      fetchData();
+    }
+  }, [user, isLoading, fetchData]);
 
   if (isLoading) {
     return (
@@ -95,7 +158,7 @@ export default function AdminDashboardPage() {
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           <MetricCard
             label="Total Users"
-            value="1"
+            value={dataLoading ? "..." : String(data?.userCount ?? 0)}
             max={tenant?.max_users || 10}
             icon={<Users className="h-5 w-5" />}
             color="blue"
@@ -103,7 +166,7 @@ export default function AdminDashboardPage() {
           />
           <MetricCard
             label="Documents"
-            value="0"
+            value={dataLoading ? "..." : String(data?.documentCount ?? 0)}
             max={tenant?.max_documents || 100}
             icon={<FileText className="h-5 w-5" />}
             color="green"
@@ -111,14 +174,14 @@ export default function AdminDashboardPage() {
           />
           <MetricCard
             label="Monthly Cost"
-            value="$0"
+            value={dataLoading ? "..." : `$${(data?.monthlyCost ?? 0).toFixed(2)}`}
             icon={<DollarSign className="h-5 w-5" />}
             color="orange"
             href="/settings/billing"
           />
           <MetricCard
             label="Active Tasks"
-            value="0"
+            value={dataLoading ? "..." : String(data?.activeTasks ?? 0)}
             icon={<Activity className="h-5 w-5" />}
             color="purple"
             href="/tasks"
@@ -175,26 +238,35 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
 
-              {tenant?.billing_type === "prepaid" ? (
+              {(data?.billingType || tenant?.billing_type) === "prepaid" ? (
                 <div>
                   <div className="mb-2 flex justify-between text-sm">
                     <span className="text-gray-600">Balance</span>
-                    <span className="font-medium text-gray-900">$0.00</span>
+                    <span className="font-medium text-gray-900">
+                      {dataLoading ? "..." : `$${(data?.balance ?? 0).toFixed(2)}`}
+                    </span>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-gray-200">
-                    <div className="h-full w-0 bg-green-600"></div>
+                    <div
+                      className="h-full bg-green-600 transition-all"
+                      style={{ width: `${Math.min(100, ((data?.balance ?? 0) / Math.max(1, tenant?.monthly_limit_inr || 10000)) * 100)}%` }}
+                    ></div>
                   </div>
                   <p className="mt-2 text-xs text-gray-500">
-                    Add balance to continue using services
+                    {(data?.balance ?? 0) > 0
+                      ? `$${(data?.balance ?? 0).toFixed(2)} remaining`
+                      : "Add balance to continue using services"}
                   </p>
                 </div>
               ) : (
                 <div>
                   <div className="mb-2 flex justify-between text-sm">
                     <span className="text-gray-600">Usage this month</span>
-                    <span className="font-medium text-gray-900">$0.00</span>
+                    <span className="font-medium text-gray-900">
+                      {dataLoading ? "..." : `$${(data?.monthlyCost ?? 0).toFixed(2)}`}
+                    </span>
                   </div>
-                  <p className="text-xs text-gray-500">Next billing date: N/A</p>
+                  <p className="text-xs text-gray-500">Postpaid billing</p>
                 </div>
               )}
             </div>
@@ -248,18 +320,45 @@ export default function AdminDashboardPage() {
         <div className="rounded-lg border bg-white p-6 shadow-sm">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Recent Activity</h2>
-            <Activity className="h-5 w-5 text-gray-400" />
+            <Link href="/dashboard/audit-trail" className="text-sm text-blue-600 hover:text-blue-700">
+              View All
+            </Link>
           </div>
 
-          <div className="flex flex-col items-center justify-center py-8 text-center">
-            <div className="rounded-full bg-gray-100 p-3">
-              <Clock className="h-6 w-6 text-gray-400" />
+          {dataLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600"></div>
             </div>
-            <h3 className="mt-4 text-sm font-medium text-gray-900">No activity yet</h3>
-            <p className="mt-1 text-sm text-gray-600">
-              Team activity will appear here
-            </p>
-          </div>
+          ) : data?.recentActivity && data.recentActivity.length > 0 ? (
+            <div className="space-y-3">
+              {data.recentActivity.map((activity) => (
+                <div key={activity.id} className="flex items-start gap-3 rounded-lg border p-3">
+                  <div className="mt-0.5">
+                    <Activity className="h-4 w-4 text-gray-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900">
+                      {activity.action?.replace(/_/g, " ")}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {activity.user_email} &middot; {activity.resource_type}
+                      {activity.created_at && ` &middot; ${new Date(activity.created_at).toLocaleString()}`}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-8 text-center">
+              <div className="rounded-full bg-gray-100 p-3">
+                <Clock className="h-6 w-6 text-gray-400" />
+              </div>
+              <h3 className="mt-4 text-sm font-medium text-gray-900">No activity yet</h3>
+              <p className="mt-1 text-sm text-gray-600">
+                Team activity will appear here
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </AppLayout>

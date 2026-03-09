@@ -11,10 +11,11 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useAuth } from "@/contexts/AuthContext";
+import { useNotifications } from "@/contexts/NotificationContext";
 import { RoleSwitcher } from "./RoleSwitcher";
 import {
   User,
@@ -24,15 +25,48 @@ import {
   Menu,
   Building2,
   Crown,
+  Bell,
+  CheckCheck,
+  FileText,
+  Code,
+  AlertTriangle,
+  Info,
 } from "lucide-react";
 
 interface HeaderProps {
   onMenuToggle: () => void;
 }
 
+function getNotificationIcon(type: string) {
+  switch (type) {
+    case "analysis_complete":
+      return <FileText className="h-4 w-4 text-green-500" />;
+    case "analysis_failed":
+      return <AlertTriangle className="h-4 w-4 text-red-500" />;
+    case "validation_alert":
+      return <AlertTriangle className="h-4 w-4 text-yellow-500" />;
+    default:
+      return <Info className="h-4 w-4 text-blue-500" />;
+  }
+}
+
 export function Header({ onMenuToggle }: HeaderProps) {
   const { user, tenant, logout, isCXO } = useAuth();
+  const { notifications, unreadCount, markRead, markAllRead } = useNotifications();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  // Close bell dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) {
+        setBellOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   return (
     <header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b bg-white px-4 shadow-sm lg:px-6">
@@ -89,6 +123,92 @@ export function Header({ onMenuToggle }: HeaderProps) {
             </span>
           </div>
         )}
+
+        {/* Notification Bell */}
+        <div className="relative" ref={bellRef}>
+          <button
+            onClick={() => setBellOpen(!bellOpen)}
+            className="relative rounded-lg p-2 hover:bg-gray-100"
+            title="Notifications"
+          >
+            <Bell className="h-5 w-5 text-gray-600" />
+            {unreadCount > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                {unreadCount > 99 ? "99+" : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {bellOpen && (
+            <div className="absolute right-0 z-20 mt-2 w-80 rounded-lg border bg-white shadow-lg">
+              <div className="flex items-center justify-between border-b px-4 py-3">
+                <h3 className="text-sm font-semibold text-gray-900">Notifications</h3>
+                <div className="flex items-center gap-2">
+                  {unreadCount > 0 && (
+                    <button
+                      onClick={() => markAllRead()}
+                      className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                      <CheckCheck className="inline h-3.5 w-3.5 mr-0.5" />
+                      Mark all read
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="max-h-80 overflow-y-auto">
+                {notifications.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-center">
+                    <Bell className="h-8 w-8 text-gray-300 mb-2" />
+                    <p className="text-sm text-gray-500">No notifications yet</p>
+                  </div>
+                ) : (
+                  notifications.slice(0, 10).map((n) => (
+                    <button
+                      key={n.id}
+                      onClick={() => {
+                        if (!n.is_read) markRead(n.id);
+                      }}
+                      className={`w-full flex items-start gap-3 px-4 py-3 text-left hover:bg-gray-50 border-b last:border-b-0 ${
+                        !n.is_read ? "bg-blue-50/50" : ""
+                      }`}
+                    >
+                      <div className="mt-0.5 flex-shrink-0">
+                        {getNotificationIcon(n.type)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm ${!n.is_read ? "font-semibold" : "font-medium"} text-gray-900 truncate`}>
+                          {n.title}
+                        </p>
+                        <p className="text-xs text-gray-500 line-clamp-2 mt-0.5">
+                          {n.message}
+                        </p>
+                        {n.created_at && (
+                          <p className="text-xs text-gray-400 mt-1">
+                            {new Date(n.created_at).toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                      {!n.is_read && (
+                        <div className="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full bg-blue-500" />
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+
+              <div className="border-t px-4 py-2">
+                <Link
+                  href="/dashboard/notifications"
+                  onClick={() => setBellOpen(false)}
+                  className="block text-center text-sm text-blue-600 hover:text-blue-700"
+                >
+                  View all notifications
+                </Link>
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* User Menu */}
         <div className="relative">

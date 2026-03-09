@@ -146,6 +146,22 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             crud.document.update(db=db, db_obj=document, obj_in={"status": "completed", "progress": 100, "error_message": None})
             logger.info(f"Multi-pass analysis completed successfully for document_id: {document_id}")
 
+            # SPRINT 5: Notify document owner that analysis is complete
+            try:
+                from app.services.notification_service import notify
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=document.owner_id,
+                    notification_type="analysis_complete",
+                    title="Analysis Complete",
+                    message=f"Your document '{document.filename}' has been analyzed successfully.",
+                    resource_type="document",
+                    resource_id=document.id,
+                )
+            except Exception as notif_err:
+                logger.debug(f"Notification send failed (non-fatal): {notif_err}")
+
             # SPRINT 3: Fire-and-forget ontology enrichment (non-blocking)
             # Document is already "completed" — user sees results immediately
             # Entity extraction runs in a separate Celery task
@@ -203,6 +219,22 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             # set the error_message in the DB, per DAE-01.
             logger.warning(f"Multi-pass analysis failed for document_id: {document_id}")
 
+            # SPRINT 5: Notify owner about analysis failure
+            try:
+                from app.services.notification_service import notify
+                notify(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=document.owner_id,
+                    notification_type="analysis_failed",
+                    title="Analysis Failed",
+                    message=f"Analysis of '{document.filename}' did not complete successfully.",
+                    resource_type="document",
+                    resource_id=document.id,
+                )
+            except Exception:
+                pass
+
     except Exception as e:
         logger.error(f"A top-level error occurred during multi-pass analysis for document {document_id}: {e}")
         # Fix for DAE-01: Save the actual error message
@@ -211,3 +243,19 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
             "progress": 100,
             "error_message": str(e)
         })
+
+        # SPRINT 5: Notify owner about critical failure
+        try:
+            from app.services.notification_service import notify
+            notify(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=document.owner_id,
+                notification_type="analysis_failed",
+                title="Analysis Error",
+                message=f"A critical error occurred while analyzing '{document.filename}': {str(e)[:200]}",
+                resource_type="document",
+                resource_id=document.id,
+            )
+        except Exception:
+            pass
