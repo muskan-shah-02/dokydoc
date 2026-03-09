@@ -1252,6 +1252,56 @@ def reject_mapping(
     return {"status": "rejected", "mapping_id": mapping_id}
 
 
+@router.post("/mappings/{mapping_id}/feedback")
+def submit_mapping_feedback(
+    mapping_id: int,
+    *,
+    action: str = Query(..., description="Action: 'confirm' or 'reject'"),
+    comment: Optional[str] = Query(None, description="Optional feedback comment"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Submit feedback on a mapping — confirm or reject with optional comment.
+    Tracks who provided the feedback and when, enabling threshold tuning.
+    """
+    if action not in ("confirm", "reject"):
+        raise HTTPException(status_code=400, detail="Action must be 'confirm' or 'reject'")
+
+    result = crud.concept_mapping.submit_feedback(
+        db=db,
+        mapping_id=mapping_id,
+        tenant_id=tenant_id,
+        action=action,
+        user_id=current_user.id,
+        comment=comment,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+
+    return {
+        "status": result.status,
+        "mapping_id": mapping_id,
+        "feedback_by": current_user.id,
+        "feedback_comment": result.feedback_comment,
+        "feedback_at": result.feedback_at.isoformat() if result.feedback_at else None,
+    }
+
+
+@router.get("/mappings/feedback/stats")
+def get_mapping_feedback_stats(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get aggregated feedback statistics — useful for tuning mapping thresholds.
+    Shows acceptance rates and average confidence by mapping method.
+    """
+    return crud.concept_mapping.get_feedback_stats(db=db, tenant_id=tenant_id)
+
+
 @router.delete("/mappings/{mapping_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_mapping(
     mapping_id: int,

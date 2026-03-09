@@ -1,7 +1,7 @@
 # DokyDoc — Sprint 4-8 Unified Development Roadmap
 
 > **Last Updated:** 2026-03-09
-> **Current Sprint:** Sprint 5 (completing)
+> **Current Sprint:** Sprint 5 (COMPLETE)
 > **Next Up:** Sprint 4 (Semantic Search + Validation Enhancement)
 
 ---
@@ -37,6 +37,10 @@
 | **Sprint 5** | Notification Auto-Triggers | COMPLETE | Document pipeline + repo analysis triggers |
 | **Sprint 5** | Admin Dashboard Real Data | COMPLETE | Users, docs, billing, audit wired to APIs |
 | **Sprint 5** | Billing Analytics | COMPLETE | `/billing/analytics`, per-user analytics, CXO charts |
+| **Sprint 5** | Mapping Feedback Loop | COMPLETE | `POST /ontology/mappings/{id}/feedback`, threshold calibration |
+| **Sprint 5** | Branch Comparison View | COMPLETE | `code/compare/page.tsx`, two-column diff with delta highlights |
+| **Sprint 5** | PR Comment Integration | COMPLETE | `pr_comment_service.py`, auto-post analysis summary to PRs |
+| **Sprint 5** | Mapping Quality Dashboard | COMPLETE | Brain L5 confidence indicators, quality summary panel |
 
 ### What's NOT Built Yet (Sprints 4 Remaining, 6-8)
 
@@ -46,9 +50,9 @@
 | **Sprint 4** | Semantic Search API | NOT BUILT | pgvector setup |
 | **Sprint 4** | Semantic Search UI | NOT BUILT | Search API |
 | **Sprint 4** | Validation Report Export (PDF/JSON) | NOT BUILT | — |
-| **Sprint 5** | Mapping Feedback (confirm/reject) | NOT BUILT | — |
-| **Sprint 5** | Branch Comparison View | NOT BUILT | Graph versioning (done) |
-| **Sprint 5** | PR Comment Integration | NOT BUILT | — |
+| **Sprint 5** | Mapping Feedback (confirm/reject) | COMPLETE | `concept_mapping.py`, feedback endpoint + threshold tuning |
+| **Sprint 5** | Branch Comparison View | COMPLETE | `code/compare/page.tsx`, two-column graph diff |
+| **Sprint 5** | PR Comment Integration | COMPLETE | `pr_comment_service.py`, webhook auto-post |
 | **Sprint 6** | Approval Workflow | NOT BUILT | — |
 | **Sprint 6** | Security Hardening (encryption at rest) | NOT BUILT | — |
 | **Sprint 7** | RAG/Chat Assistant | NOT BUILT | Embeddings (Sprint 4) |

@@ -11,6 +11,9 @@ import {
   AlertCircle,
   ArrowLeft,
   Layers,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { MetaGraphView } from "@/components/ontology/MetaGraphView";
@@ -30,6 +33,15 @@ interface BrainStats {
   total_concepts: number;
   total_mappings: number;
   coverage_pct: number;
+}
+
+interface MappingQuality {
+  total_mappings: number;
+  confirmed_mappings: number;
+  candidate_mappings: number;
+  contradictions: number;
+  document_concepts: number;
+  code_concepts: number;
 }
 
 interface MetaGraphData {
@@ -57,6 +69,7 @@ export default function BrainDashboardPage() {
   const [metaData, setMetaData] = useState<MetaGraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [mappingQuality, setMappingQuality] = useState<MappingQuality | null>(null);
   const [stats, setStats] = useState<BrainStats>({
     total_projects: 0,
     total_concepts: 0,
@@ -76,10 +89,12 @@ export default function BrainDashboardPage() {
       // Auto-backfill initiative_ids for any unscoped concepts (fire-and-forget)
       api.post("/ontology/backfill-initiative-ids", {}).catch(() => {});
 
-      const [meta, brainRes] = await Promise.all([
+      const [meta, brainRes, qualityRes] = await Promise.all([
         api.get<MetaGraphData>("/ontology/graph/meta"),
         api.get<any>("/ontology/graph/brain"),
+        api.get<MappingQuality>("/ontology/mappings/stats").catch(() => null),
       ]);
+      setMappingQuality(qualityRes);
       setMetaData(meta);
       setStats({
         total_projects: meta.projects?.length ?? 0,
@@ -292,6 +307,56 @@ export default function BrainDashboardPage() {
           </div>
         </div>
       </div>
+
+      {/* Mapping Quality Summary (Level 5 only) */}
+      {drill.level === 5 && mappingQuality && mappingQuality.total_mappings > 0 && (
+        <div className="mb-6 rounded-lg border bg-white p-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Mapping Quality</h3>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
+              <div>
+                <p className="text-xs text-gray-500">Confirmed</p>
+                <p className="text-sm font-bold text-green-700">{mappingQuality.confirmed_mappings}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <HelpCircle className="h-4 w-4 text-amber-500" />
+              <div>
+                <p className="text-xs text-gray-500">Candidates</p>
+                <p className="text-sm font-bold text-amber-700">{mappingQuality.candidate_mappings}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <XCircle className="h-4 w-4 text-red-500" />
+              <div>
+                <p className="text-xs text-gray-500">Contradictions</p>
+                <p className="text-sm font-bold text-red-700">{mappingQuality.contradictions}</p>
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Confirmation Rate</p>
+              <div className="mt-1 flex items-center gap-2">
+                <div className="h-2 flex-1 rounded-full bg-gray-200">
+                  <div
+                    className="h-full rounded-full bg-green-500"
+                    style={{ width: `${mappingQuality.total_mappings > 0 ? (mappingQuality.confirmed_mappings / mappingQuality.total_mappings) * 100 : 0}%` }}
+                  />
+                </div>
+                <span className="text-xs font-medium text-gray-600">
+                  {mappingQuality.total_mappings > 0 ? Math.round((mappingQuality.confirmed_mappings / mappingQuality.total_mappings) * 100) : 0}%
+                </span>
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Doc / Code Concepts</p>
+              <p className="text-sm font-medium text-gray-700">
+                {mappingQuality.document_concepts} / {mappingQuality.code_concepts}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Breadcrumb */}
       {drill.level < 5 && (

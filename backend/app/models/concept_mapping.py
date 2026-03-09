@@ -18,6 +18,7 @@ Status Flow:
 from sqlalchemy import Integer, String, Text, DateTime, Float, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+from typing import Optional
 from app.db.base_class import Base
 
 
@@ -55,6 +56,13 @@ class ConceptMapping(Base):
 
     # AI reasoning (only populated for ai_validated mappings)
     ai_reasoning: Mapped[str] = mapped_column(Text, nullable=True)
+
+    # Feedback fields (Sprint 5 — human confirm/reject with comment)
+    feedback_by_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    feedback_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    feedback_at: Mapped[Optional[DateTime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Timestamps
     created_at: Mapped[DateTime] = mapped_column(

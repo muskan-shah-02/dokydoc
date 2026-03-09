@@ -80,7 +80,7 @@ class MappingService(LoggerMixin):
     Cost-optimized cross-graph mapping between document and code concepts.
     """
 
-    # Thresholds
+    # Thresholds (defaults — can be tuned from feedback data)
     FUZZY_HIGH_CONFIDENCE = 0.50   # Token overlap >= 50% → high confidence
     FUZZY_MEDIUM_CONFIDENCE = 0.25  # Token overlap 25-50% → medium (needs AI)
     LEVENSHTEIN_THRESHOLD = 0.70   # Normalized string similarity >= 70% → candidate
@@ -89,6 +89,55 @@ class MappingService(LoggerMixin):
     def __init__(self):
         super().__init__()
         self.logger.info("MappingService initialized")
+
+    def calibrate_thresholds(self, db: Session, *, tenant_id: int) -> Dict:
+        """
+        Adjust fuzzy matching thresholds based on accumulated feedback data.
+        If users consistently reject low-confidence fuzzy matches, raise the threshold.
+        If users confirm matches below the current threshold, lower it.
+        """
+        stats = crud.concept_mapping.get_feedback_stats(db=db, tenant_id=tenant_id)
+        adjustments = {}
+
+        fuzzy_stats = stats.get("by_method", {}).get("fuzzy", {})
+        if fuzzy_stats and fuzzy_stats.get("total", 0) >= 10:
+            avg_rejected = fuzzy_stats.get("avg_rejected_confidence")
+            avg_confirmed = fuzzy_stats.get("avg_confirmed_confidence")
+
+            if avg_rejected is not None and avg_confirmed is not None:
+                # Set high-confidence threshold midway between avg rejected and avg confirmed
+                new_high = round((avg_rejected + avg_confirmed) / 2, 3)
+                new_high = max(0.30, min(0.80, new_high))  # Clamp to reasonable range
+
+                old_high = self.FUZZY_HIGH_CONFIDENCE
+                self.FUZZY_HIGH_CONFIDENCE = new_high
+                adjustments["fuzzy_high_confidence"] = {
+                    "old": old_high, "new": new_high,
+                    "reason": f"Based on {fuzzy_stats['total']} feedback items"
+                }
+
+        ai_stats = stats.get("by_method", {}).get("ai_validated", {})
+        if ai_stats and ai_stats.get("total", 0) >= 5:
+            acceptance_rate = ai_stats.get("confirmed", 0) / ai_stats["total"]
+            if acceptance_rate < 0.3:
+                # AI mappings are mostly rejected — raise the bar
+                old_medium = self.FUZZY_MEDIUM_CONFIDENCE
+                self.FUZZY_MEDIUM_CONFIDENCE = min(0.40, old_medium + 0.05)
+                adjustments["fuzzy_medium_confidence"] = {
+                    "old": old_medium, "new": self.FUZZY_MEDIUM_CONFIDENCE,
+                    "reason": f"AI acceptance rate too low ({acceptance_rate:.0%})"
+                }
+
+        self.logger.info(f"Threshold calibration for tenant {tenant_id}: {adjustments or 'no changes'}")
+        return {
+            "feedback_stats": stats,
+            "adjustments": adjustments,
+            "current_thresholds": {
+                "fuzzy_high_confidence": self.FUZZY_HIGH_CONFIDENCE,
+                "fuzzy_medium_confidence": self.FUZZY_MEDIUM_CONFIDENCE,
+                "levenshtein_threshold": self.LEVENSHTEIN_THRESHOLD,
+            },
+        }
 
     def run_full_mapping(
         self, db: Session, *, tenant_id: int, use_ai_fallback: bool = True

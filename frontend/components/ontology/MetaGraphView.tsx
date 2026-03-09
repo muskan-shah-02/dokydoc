@@ -22,6 +22,9 @@ interface CrossEdge {
   target_id: number;
   relationship_count: number;
   relationship_types: string[];
+  avg_confidence?: number;
+  confirmed_count?: number;
+  candidate_count?: number;
 }
 
 interface Project {
@@ -297,25 +300,31 @@ export function MetaGraphView({
           const strokeWidth = 2 + normalizedWeight * 3;
           const isHighlighted = hoveredId === edge.source_id || hoveredId === edge.target_id;
 
+          // Confidence-based coloring
+          const avgConf = edge.avg_confidence ?? 0.5;
+          const confColor = avgConf >= 0.8 ? "#22c55e" : avgConf >= 0.5 ? "#f59e0b" : "#ef4444";
+          const confirmedRatio = edge.confirmed_count && weight > 0
+            ? edge.confirmed_count / weight : 0;
+
           return (
             <g key={`edge-${i}`}>
               <path
                 d={path}
                 fill="none"
-                stroke={isHighlighted ? "#f97316" : "#cbd5e1"}
+                stroke={isHighlighted ? "#f97316" : confColor}
                 strokeWidth={strokeWidth}
-                strokeOpacity={isHighlighted ? 0.8 : 0.4}
-                strokeDasharray="8 4"
+                strokeOpacity={isHighlighted ? 0.8 : 0.35 + confirmedRatio * 0.35}
+                strokeDasharray={confirmedRatio >= 0.8 ? "none" : "8 4"}
               />
               <g transform={`translate(${cpx}, ${cpy})`}>
                 <rect
-                  x={-16}
+                  x={-22}
                   y={-10}
-                  width={32}
+                  width={44}
                   height={20}
                   rx={10}
                   fill={isHighlighted ? "#f97316" : "#f8fafc"}
-                  stroke={isHighlighted ? "#f97316" : "#e2e8f0"}
+                  stroke={isHighlighted ? "#f97316" : confColor}
                   strokeWidth={1}
                 />
                 <text
@@ -326,6 +335,9 @@ export function MetaGraphView({
                   fontWeight={600}
                 >
                   {weight}
+                  {avgConf > 0 && (
+                    <tspan fontSize={8} opacity={0.7}> {Math.round(avgConf * 100)}%</tspan>
+                  )}
                 </text>
               </g>
             </g>
@@ -501,7 +513,12 @@ export function MetaGraphView({
       <div className="absolute bottom-3 left-3 rounded-md border bg-white/90 px-3 py-2 text-[10px] text-gray-500 backdrop-blur-sm">
         <p className="font-semibold text-gray-700">Level 5 — Organizational Overview</p>
         <p className="mt-0.5">Bubble size = concept count</p>
-        <p>Dashed edge = cross-project mapping</p>
+        <p>Edge color = mapping confidence:
+          <span className="ml-1 font-medium text-green-600">green</span> &ge;80%,
+          <span className="ml-0.5 font-medium text-amber-600">amber</span> &ge;50%,
+          <span className="ml-0.5 font-medium text-red-600">red</span> &lt;50%
+        </p>
+        <p>Solid edge = mostly confirmed · Dashed = candidates</p>
         <p className="mt-1 text-gray-400">Click a project to drill into L3 · Scroll to zoom · Drag to pan</p>
       </div>
 

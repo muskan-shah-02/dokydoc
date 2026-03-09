@@ -214,11 +214,33 @@ async def handle_git_webhook(
                 logger.error(f"Webhook: failed to dispatch promote task: {e}")
                 return {"status": "error", "reason": str(e)}
 
+            # Post analysis summary as PR comment (Sprint 5)
+            pr_comment_posted = False
+            if pr_data.get("pr_number"):
+                try:
+                    from app.services.pr_comment_service import pr_comment_service
+                    summary = pr_comment_service.build_analysis_summary(
+                        db=db,
+                        tenant_id=repo.tenant_id,
+                        repo_id=repo.id,
+                        changed_files=[],  # All files on merged branch
+                        branch=pr_data["head_branch"],
+                    )
+                    result = pr_comment_service.post_pr_comment_sync(
+                        repo_url=pr_data["repo_url"],
+                        pr_number=pr_data["pr_number"],
+                        body=summary,
+                    )
+                    pr_comment_posted = result is not None
+                except Exception as e:
+                    logger.warning(f"Webhook: PR comment failed (non-fatal): {e}")
+
             return {
                 "status": "accepted",
                 "action": "promote_preview",
                 "repo": repo.name,
                 "branch": pr_data["head_branch"],
+                "pr_comment_posted": pr_comment_posted,
             }
 
         return {"status": "ignored", "reason": "pr_not_merged"}
@@ -305,4 +327,47 @@ async def handle_git_webhook(
         "repo": repo.name,
         "branch": push_data["branch"],
         "files_queued": len(push_data["changed_files"]),
+    }
+
+
+@router.post("/pr-comment")
+def post_pr_analysis_comment(
+    *,
+    repo_id: int,
+    pr_number: int,
+    branch: str = "main",
+    db: Session = Depends(get_db),
+):
+    """
+    Manually trigger a PR analysis comment (Sprint 5).
+    Useful for testing or retroactively posting analysis summaries.
+    """
+    repo = db.query(crud.repository.model).filter(
+        crud.repository.model.id == repo_id
+    ).first()
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    from app.services.pr_comment_service import pr_comment_service
+
+    summary = pr_comment_service.build_analysis_summary(
+        db=db,
+        tenant_id=repo.tenant_id,
+        repo_id=repo.id,
+        changed_files=[],
+        branch=branch,
+    )
+
+    result = pr_comment_service.post_pr_comment_sync(
+        repo_url=repo.url,
+        pr_number=pr_number,
+        body=summary,
+    )
+
+    return {
+        "status": "posted" if result else "skipped",
+        "repo": repo.name,
+        "pr_number": pr_number,
+        "comment_id": result.get("id") if result else None,
+        "summary_preview": summary[:500],
     }

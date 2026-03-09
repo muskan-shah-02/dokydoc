@@ -62,6 +62,7 @@ class Settings(BaseSettings):
 
     # --- Git Webhook Settings (ADHOC-09) ---
     WEBHOOK_SECRET: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
+    GITHUB_TOKEN: Optional[str] = Field(default=None, env="GITHUB_TOKEN")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB

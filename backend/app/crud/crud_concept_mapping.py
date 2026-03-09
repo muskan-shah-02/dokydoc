@@ -5,9 +5,10 @@ Provides data access for the ConceptMapping table which stores
 explicit links between document-graph and code-graph concepts.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 
 from app.crud.base import CRUDBase
 from app.models.concept_mapping import ConceptMapping
@@ -201,6 +202,72 @@ class CRUDConceptMapping(CRUDBase[ConceptMapping, ConceptMappingCreate, ConceptM
             db.commit()
             db.refresh(mapping)
         return mapping
+
+    def submit_feedback(
+        self, db: Session, *,
+        mapping_id: int,
+        tenant_id: int,
+        action: str,
+        user_id: int,
+        comment: Optional[str] = None,
+    ) -> Optional[ConceptMapping]:
+        """Submit feedback (confirm/reject) with optional comment and user tracking."""
+        mapping = self.get(db=db, id=mapping_id, tenant_id=tenant_id)
+        if not mapping:
+            return None
+
+        if action == "confirm":
+            mapping.status = "confirmed"
+        elif action == "reject":
+            mapping.status = "rejected"
+        else:
+            return None
+
+        mapping.feedback_by_id = user_id
+        mapping.feedback_comment = comment
+        mapping.feedback_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(mapping)
+        return mapping
+
+    def get_feedback_stats(
+        self, db: Session, *, tenant_id: int
+    ) -> Dict:
+        """Get aggregated feedback statistics for threshold tuning."""
+        if not tenant_id:
+            raise ValueError("tenant_id is REQUIRED")
+
+        all_with_feedback = db.query(self.model).filter(
+            self.model.tenant_id == tenant_id,
+            self.model.feedback_by_id.isnot(None),
+        ).all()
+
+        total_feedback = len(all_with_feedback)
+        confirmed_count = sum(1 for m in all_with_feedback if m.status == "confirmed")
+        rejected_count = sum(1 for m in all_with_feedback if m.status == "rejected")
+
+        # Avg confidence by method for confirmed vs rejected
+        stats_by_method = {}
+        for method in ("exact", "fuzzy", "ai_validated"):
+            method_mappings = [m for m in all_with_feedback if m.mapping_method == method]
+            if method_mappings:
+                confirmed_scores = [m.confidence_score for m in method_mappings if m.status == "confirmed"]
+                rejected_scores = [m.confidence_score for m in method_mappings if m.status == "rejected"]
+                stats_by_method[method] = {
+                    "total": len(method_mappings),
+                    "confirmed": len(confirmed_scores),
+                    "rejected": len(rejected_scores),
+                    "avg_confirmed_confidence": round(sum(confirmed_scores) / len(confirmed_scores), 3) if confirmed_scores else None,
+                    "avg_rejected_confidence": round(sum(rejected_scores) / len(rejected_scores), 3) if rejected_scores else None,
+                }
+
+        return {
+            "total_feedback": total_feedback,
+            "confirmed": confirmed_count,
+            "rejected": rejected_count,
+            "acceptance_rate": round(confirmed_count / total_feedback, 3) if total_feedback > 0 else None,
+            "by_method": stats_by_method,
+        }
 
     def count_by_tenant(self, db: Session, *, tenant_id: int) -> int:
         if not tenant_id:
