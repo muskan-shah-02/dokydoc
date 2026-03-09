@@ -36,6 +36,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 
 interface User {
   id: number;
@@ -55,7 +62,6 @@ export default function UserManagementPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
-  const [actionMenuOpen, setActionMenuOpen] = useState<number | null>(null);
 
   // Check access
   const canAccess = isCXO() || isAdmin() || hasPermission(Permission.USER_MANAGE);
@@ -280,64 +286,44 @@ export default function UserManagementPage() {
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                         {!isSelf && (
-                          <div className="relative">
-                            <button
-                              onClick={() => setActionMenuOpen(actionMenuOpen === user.id ? null : user.id)}
-                              className="rounded p-1 hover:bg-gray-100"
-                            >
-                              <MoreVertical className="h-5 w-5 text-gray-500" />
-                            </button>
-
-                            {actionMenuOpen === user.id && (
-                              <>
-                                <div
-                                  className="fixed inset-0 z-10"
-                                  onClick={() => setActionMenuOpen(null)}
-                                />
-                                <div className="absolute right-0 z-20 mt-1 w-48 rounded-md border bg-white shadow-lg">
-                                  <button
-                                    onClick={() => {
-                                      setEditingUser(user);
-                                      setActionMenuOpen(null);
-                                    }}
-                                    className="flex w-full items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                  >
-                                    <Edit className="mr-2 h-4 w-4" />
-                                    Edit Roles
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      handleToggleActive(user.id, !user.is_active);
-                                      setActionMenuOpen(null);
-                                    }}
-                                    className="flex w-full items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                                  >
-                                    {user.is_active ? (
-                                      <>
-                                        <X className="mr-2 h-4 w-4" />
-                                        Deactivate
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Check className="mr-2 h-4 w-4" />
-                                        Activate
-                                      </>
-                                    )}
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      handleDeleteUser(user.id);
-                                      setActionMenuOpen(null);
-                                    }}
-                                    className="flex w-full items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50"
-                                  >
-                                    <Trash2 className="mr-2 h-4 w-4" />
-                                    Delete
-                                  </button>
-                                </div>
-                              </>
-                            )}
-                          </div>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button className="rounded p-1 hover:bg-gray-100">
+                                <MoreVertical className="h-5 w-5 text-gray-500" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                              <DropdownMenuItem
+                                onClick={() => setEditingUser(user)}
+                              >
+                                <Edit className="mr-2 h-4 w-4" />
+                                Edit Roles
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => handleToggleActive(user.id, !user.is_active)}
+                              >
+                                {user.is_active ? (
+                                  <>
+                                    <X className="mr-2 h-4 w-4" />
+                                    Deactivate
+                                  </>
+                                ) : (
+                                  <>
+                                    <Check className="mr-2 h-4 w-4" />
+                                    Activate
+                                  </>
+                                )}
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onClick={() => handleDeleteUser(user.id)}
+                              >
+                                <Trash2 className="mr-2 h-4 w-4" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
                       </td>
                     </tr>

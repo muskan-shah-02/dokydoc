@@ -84,12 +84,16 @@ export default function CXODashboardPage() {
   // Fetch real data from APIs
   const fetchDashboardData = useCallback(async () => {
     try {
+      // Add timeout to prevent hanging forever
+      const withTimeout = <T,>(promise: Promise<T>, fallback: T, ms = 10000): Promise<T> =>
+        Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+
       // Fetch billing data, documents, and tasks in parallel
       const [billingData, documentsData, tasksData, usersData] = await Promise.all([
-        api.get<BillingUsageResponse>("/billing/usage").catch(() => null),
-        api.get<DocumentsResponse>("/documents").catch(() => ({ items: [], total: 0 })),
-        api.get<TasksResponse>("/tasks").catch(() => ({ items: [], total: 0 })),
-        api.get<any[]>("/users").catch(() => []),
+        withTimeout(api.get<BillingUsageResponse>("/billing/usage").catch(() => null), null),
+        withTimeout(api.get<DocumentsResponse>("/documents").catch(() => ({ items: [], total: 0 })), { items: [], total: 0 }),
+        withTimeout(api.get<TasksResponse>("/tasks").catch(() => ({ items: [], total: 0 })), { items: [], total: 0 }),
+        withTimeout(api.get<any[]>("/users").catch(() => []), []),
       ]);
 
       // Calculate task stats
@@ -154,8 +158,12 @@ export default function CXODashboardPage() {
 
   // Load dashboard data
   useEffect(() => {
-    if (user && !isLoading) {
-      fetchDashboardData();
+    if (!isLoading) {
+      if (user) {
+        fetchDashboardData();
+      } else {
+        setDataLoading(false);
+      }
     }
   }, [user, isLoading, fetchDashboardData]);
 

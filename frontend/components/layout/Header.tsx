@@ -140,7 +140,7 @@ export function Header({ onMenuToggle }: HeaderProps) {
           </button>
 
           {bellOpen && (
-            <div className="absolute right-0 z-20 mt-2 w-80 rounded-lg border bg-white shadow-lg">
+            <div className="absolute right-0 z-50 mt-2 w-80 rounded-lg border bg-white shadow-lg">
               <div className="flex items-center justify-between border-b px-4 py-3">
                 <h3 className="text-sm font-semibold text-gray-900">Notifications</h3>
                 <div className="flex items-center gap-2">
@@ -251,12 +251,12 @@ export function Header({ onMenuToggle }: HeaderProps) {
             <>
               {/* Backdrop */}
               <div
-                className="fixed inset-0 z-10"
+                className="fixed inset-0 z-40"
                 onClick={() => setUserMenuOpen(false)}
               />
 
               {/* Menu */}
-              <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border bg-white shadow-lg">
+              <div className="absolute right-0 z-50 mt-2 w-64 rounded-lg border bg-white shadow-lg">
                 {/* User Info */}
                 <div className="border-b p-4">
                   <div className="flex items-center space-x-3">

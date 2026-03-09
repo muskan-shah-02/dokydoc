@@ -106,24 +106,13 @@ export default function AuditTrailPage() {
         params.set("search", searchTerm);
       }
 
-      const fetches: Promise<Response>[] = [
-        fetch(`http://localhost:8000/api/v1/audit/logs?${params}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ];
+      const headers = { Authorization: `Bearer ${token}` };
+      const logsPromise = fetch(`http://localhost:8000/api/v1/audit/logs?${params}`, { headers });
+      const statsPromise = !isAppend
+        ? fetch(`http://localhost:8000/api/v1/audit/stats?days=${days}`, { headers })
+        : Promise.resolve(null);
 
-      // Only fetch stats on initial load (not on "load more")
-      if (!isAppend) {
-        fetches.push(
-          fetch(`http://localhost:8000/api/v1/audit/stats?days=${days}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-        );
-      }
-
-      const results = await Promise.all(fetches);
-      const logsRes = results[0];
-      const statsRes = results[1];
+      const [logsRes, statsRes] = await Promise.all([logsPromise, statsPromise]);
 
       if (logsRes.ok) {
         const data = await logsRes.json();

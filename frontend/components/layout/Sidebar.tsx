@@ -59,7 +59,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { user, tenant, isCXO, isAdmin, hasPermission, logout } = useAuth();
   const { selectedProject, setSelectedProject, projects, refreshProjects } = useProject();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const [settingsExpanded, setSettingsExpanded] = useState(pathname.startsWith("/settings"));
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
 
   // Check if user can access management features
