@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -83,11 +83,13 @@ export function RequirementTraceabilityPanel({
   const [building, setBuilding] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>("all");
 
+  const hasLoadedRef = useRef(false);
+
   /* ---- Fetch traces ---- */
 
   const fetchTraces = useCallback(
     async (force = false) => {
-      if (traces.length > 0 && !force) return;
+      if (hasLoadedRef.current && !force) return;
       setLoading(true);
       setError("");
       try {
@@ -96,6 +98,7 @@ export function RequirementTraceabilityPanel({
         );
         setTraces(data.traces);
         setTotal(data.total);
+        hasLoadedRef.current = true;
       } catch {
         setError("Failed to load traceability data");
         setTraces([]);
@@ -104,7 +107,7 @@ export function RequirementTraceabilityPanel({
         setLoading(false);
       }
     },
-    [initiativeId, traces.length]
+    [initiativeId]
   );
 
   /* ---- Build traces ---- */

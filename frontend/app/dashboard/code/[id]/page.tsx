@@ -37,6 +37,9 @@ import {
   Network,
   History,
   GitBranch,
+  Sparkles,
+  Play,
+  BrainCircuit,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -83,6 +86,43 @@ export default function CodeComponentDetailPage() {
   const [branchList, setBranchList] = useState<any[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [branchLoading, setBranchLoading] = useState(false);
+  const [synthesisData, setSynthesisData] = useState<any>(null);
+  const [synthesisLoading, setSynthesisLoading] = useState(false);
+  const [synthesisTriggering, setSynthesisTriggering] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+
+  const fetchSynthesis = async (repoId: string) => {
+    setSynthesisLoading(true);
+    try {
+      const data = await api.get<any>(`/repositories/${repoId}/synthesis`);
+      setSynthesisData(data);
+    } catch { setSynthesisData(null); }
+    finally { setSynthesisLoading(false); }
+  };
+
+  const triggerSynthesis = async (repoId: string) => {
+    setSynthesisTriggering(true);
+    try {
+      await api.post(`/repositories/${repoId}/synthesize`, {});
+      // Poll for completion
+      setTimeout(() => fetchSynthesis(repoId), 3000);
+    } catch { /* ignore */ }
+    finally { setSynthesisTriggering(false); }
+  };
+
+  const triggerExtraction = async (compId: string, compType: string) => {
+    setExtracting(true);
+    try {
+      const endpoint = compType === "Repository"
+        ? `/ontology/extract/repository/${compId}`
+        : `/ontology/extract/repository/${compId}`;
+      await api.post(endpoint, {});
+      setTimeout(() => {
+        fetchGraph(compId);
+        setExtracting(false);
+      }, 3000);
+    } catch { setExtracting(false); }
+  };
 
   const fetchBranches = async (repoId: string) => {
     try {
@@ -350,6 +390,8 @@ export default function CodeComponentDetailPage() {
           fetchSystemGraph(Number(id));
         if (v === "branches" && branchList.length === 0 && component?.component_type === "Repository")
           fetchBranches(String(id));
+        if (v === "synthesis" && !synthesisData && component?.component_type === "Repository")
+          fetchSynthesis(String(id));
       }}>
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start">
           <TabsTrigger value="analysis" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6">
@@ -368,6 +410,9 @@ export default function CodeComponentDetailPage() {
               </TabsTrigger>
               <TabsTrigger value="branches" className="data-[state=active]:bg-cyan-50 data-[state=active]:text-cyan-700 h-10 px-6">
                 <GitBranch className="w-4 h-4 mr-2" /> Branch Preview
+              </TabsTrigger>
+              <TabsTrigger value="synthesis" className="data-[state=active]:bg-pink-50 data-[state=active]:text-pink-700 h-10 px-6">
+                <Sparkles className="w-4 h-4 mr-2" /> Synthesis
               </TabsTrigger>
             </>
           )}
@@ -411,8 +456,22 @@ export default function CodeComponentDetailPage() {
         </TabsContent>
 
         <TabsContent value="graph">
-          {/* Version History button */}
-          <div className="flex justify-end mb-3">
+          {/* Extraction + Version History buttons */}
+          <div className="flex justify-end gap-2 mb-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => id && component && triggerExtraction(String(id), component.component_type)}
+              disabled={extracting}
+              className="gap-1.5 text-xs"
+            >
+              {extracting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <BrainCircuit className="w-3.5 h-3.5" />
+              )}
+              {extracting ? "Extracting..." : "Extract BOE"}
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -580,6 +639,96 @@ export default function CodeComponentDetailPage() {
                     <GitBranch className="w-12 h-12 mb-3" />
                     <p className="text-sm font-medium">Select a branch to preview its impact</p>
                     <p className="text-xs mt-1">Branch previews show how code changes affect the knowledge graph</p>
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="synthesis">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold">Repository Synthesis</h3>
+                    <p className="text-xs text-muted-foreground">AI-generated cross-file synthesis of your repository&apos;s architecture and patterns</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => triggerSynthesis(String(id))}
+                    disabled={synthesisTriggering}
+                    className="gap-1.5"
+                  >
+                    {synthesisTriggering ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    {synthesisTriggering ? "Running..." : "Run Synthesis"}
+                  </Button>
+                </div>
+                {synthesisLoading ? (
+                  <div className="flex items-center justify-center h-64">
+                    <Loader2 className="w-6 h-6 animate-spin text-pink-600" />
+                    <span className="ml-2 text-sm text-gray-500">Loading synthesis...</span>
+                  </div>
+                ) : synthesisData?.synthesis ? (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Badge variant={synthesisData.synthesis_status === "completed" ? "default" : "secondary"}>
+                        {synthesisData.synthesis_status || "unknown"}
+                      </Badge>
+                    </div>
+                    {synthesisData.synthesis.architecture_summary && (
+                      <Card>
+                        <CardHeader><CardTitle className="text-sm">Architecture Summary</CardTitle></CardHeader>
+                        <CardContent><p className="text-sm text-muted-foreground whitespace-pre-wrap">{synthesisData.synthesis.architecture_summary}</p></CardContent>
+                      </Card>
+                    )}
+                    {synthesisData.synthesis.key_patterns && synthesisData.synthesis.key_patterns.length > 0 && (
+                      <Card>
+                        <CardHeader><CardTitle className="text-sm">Key Patterns</CardTitle></CardHeader>
+                        <CardContent>
+                          <div className="space-y-2">
+                            {synthesisData.synthesis.key_patterns.map((p: any, i: number) => (
+                              <div key={i} className="flex items-start gap-2 text-sm">
+                                <span className="mt-1 w-1.5 h-1.5 rounded-full bg-pink-500 flex-shrink-0" />
+                                <span>{typeof p === "string" ? p : p.name || p.description || JSON.stringify(p)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+                    {synthesisData.synthesis.cross_cutting_concerns && synthesisData.synthesis.cross_cutting_concerns.length > 0 && (
+                      <Card>
+                        <CardHeader><CardTitle className="text-sm">Cross-Cutting Concerns</CardTitle></CardHeader>
+                        <CardContent>
+                          <div className="flex flex-wrap gap-2">
+                            {synthesisData.synthesis.cross_cutting_concerns.map((c: string, i: number) => (
+                              <Badge key={i} variant="outline">{c}</Badge>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+                    {/* Render any other synthesis sections generically */}
+                    {Object.entries(synthesisData.synthesis)
+                      .filter(([k]) => !["architecture_summary", "key_patterns", "cross_cutting_concerns"].includes(k))
+                      .map(([key, value]) => (
+                        <Card key={key}>
+                          <CardHeader><CardTitle className="text-sm capitalize">{key.replace(/_/g, " ")}</CardTitle></CardHeader>
+                          <CardContent>
+                            <pre className="text-xs text-muted-foreground whitespace-pre-wrap overflow-auto max-h-64">
+                              {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+                            </pre>
+                          </CardContent>
+                        </Card>
+                      ))}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                    <Sparkles className="w-12 h-12 mb-3" />
+                    <p className="text-sm font-medium">No synthesis available</p>
+                    <p className="text-xs mt-1">Click &quot;Run Synthesis&quot; to generate a cross-file analysis</p>
                   </div>
                 )}
               </div>

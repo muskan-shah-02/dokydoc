@@ -29,8 +29,10 @@ import {
   Zap,
   ArrowUpRight,
   RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
 
 export default function DeveloperDashboardPage() {
   const router = useRouter();
@@ -53,34 +55,72 @@ export default function DeveloperDashboardPage() {
     }
   }, [user, isLoading, hasPermission, router, permissionChecked, getPrimaryDashboardUrl]);
 
-  // Load dashboard data
+  // Load dashboard data from real APIs
   useEffect(() => {
-    // Simulated data - in production, fetch from API
-    setDashboardData({
-      myTasks: [],
-      codeMismatches: {
-        total: 0,
-        critical: 0,
-        warning: 0,
-      },
-      recentCode: [],
-      stats: {
-        tasksAssigned: 0,
-        tasksCompleted: 0,
-        codeComponents: 0,
-        avgResolutionTime: "N/A",
-      },
-    });
-    setDataLoading(false);
+    const loadDashboard = async () => {
+      try {
+        const [mismatches, codeComponents] = await Promise.allSettled([
+          api.get<any[]>("/validation/mismatches?limit=100"),
+          api.get<any[]>("/code-components/?limit=10"),
+        ]);
+
+        const mismatchList = mismatches.status === "fulfilled" ? mismatches.value : [];
+        const codeList = codeComponents.status === "fulfilled" ? codeComponents.value : [];
+
+        const criticalCount = mismatchList.filter((m: any) => m.severity === "critical" || m.severity === "high").length;
+        const warningCount = mismatchList.filter((m: any) => m.severity === "medium" || m.severity === "warning").length;
+
+        setDashboardData({
+          myTasks: [],
+          codeMismatches: {
+            total: mismatchList.length,
+            critical: criticalCount,
+            warning: warningCount,
+          },
+          recentCode: codeList.slice(0, 5).map((c: any) => ({
+            id: c.id,
+            name: c.name,
+            language: c.component_type || "Unknown",
+            updatedAt: c.updated_at ? new Date(c.updated_at).toLocaleDateString() : "",
+          })),
+          stats: {
+            tasksAssigned: 0,
+            tasksCompleted: 0,
+            codeComponents: codeList.length,
+            avgResolutionTime: "N/A",
+          },
+        });
+      } catch {
+        setDashboardData({
+          myTasks: [],
+          codeMismatches: { total: 0, critical: 0, warning: 0 },
+          recentCode: [],
+          stats: { tasksAssigned: 0, tasksCompleted: 0, codeComponents: 0, avgResolutionTime: "N/A" },
+        });
+      } finally {
+        setDataLoading(false);
+      }
+    };
+    loadDashboard();
   }, []);
 
   const handleQuickValidation = async () => {
     setValidationRunning(true);
-    // Simulate validation run
-    setTimeout(() => {
+    try {
+      // Fetch user's documents to validate against
+      const docs = await api.get<any[]>("/documents/?limit=100");
+      const docIds = docs.map((d: any) => d.id);
+      if (docIds.length === 0) {
+        alert("No documents found to validate. Upload documents first.");
+        return;
+      }
+      await api.post("/validation/run-scan", { document_ids: docIds });
+      alert(`Validation scan started for ${docIds.length} document(s). Check back shortly for results.`);
+    } catch {
+      alert("Failed to start validation scan. Please try again.");
+    } finally {
       setValidationRunning(false);
-      alert("Validation complete! No new mismatches found.");
-    }, 2000);
+    }
   };
 
   if (isLoading || dataLoading) {

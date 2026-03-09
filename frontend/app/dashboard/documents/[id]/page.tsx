@@ -847,6 +847,21 @@ export default function DocumentDetailPage() {
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
   const [versionPanelOpen, setVersionPanelOpen] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+
+  const triggerExtraction = useCallback(async (docId: string) => {
+    setExtracting(true);
+    try {
+      await api.post(`/ontology/extract/document/${docId}`, {});
+      // Wait a bit, then refresh graph data
+      setTimeout(() => {
+        fetchGraphData(docId);
+        setExtracting(false);
+      }, 3000);
+    } catch {
+      setExtracting(false);
+    }
+  }, []);
 
   const fetchGraphData = useCallback(async (docId: string) => {
     setGraphLoading(true);
@@ -1120,8 +1135,24 @@ export default function DocumentDetailPage() {
         </TabsContent>
 
         <TabsContent value="graph">
-          {/* Version History button */}
-          <div className="flex justify-end mb-3">
+          {/* Extraction + Version History buttons */}
+          <div className="flex justify-end gap-2 mb-3">
+            {doc && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => triggerExtraction(String(doc.id))}
+                disabled={extracting}
+                className="gap-1.5 text-xs"
+              >
+                {extracting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <BrainCircuit className="w-3.5 h-3.5" />
+                )}
+                {extracting ? "Extracting..." : "Extract BOE"}
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"

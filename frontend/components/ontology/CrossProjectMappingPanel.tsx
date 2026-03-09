@@ -13,7 +13,7 @@ import {
   X,
   BarChart3,
   GitCompare,
-  Brain,
+  BrainCircuit,
   Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -514,7 +514,7 @@ export function CrossProjectMappingPanel({ projects }: CrossProjectMappingPanelP
                     {m.ai_reasoning && (
                       <div className="mt-3 rounded-md border border-purple-200 bg-purple-50 p-3">
                         <div className="flex items-center gap-1.5">
-                          <Brain className="h-3.5 w-3.5 text-purple-500" />
+                          <BrainCircuit className="h-3.5 w-3.5 text-purple-500" />
                           <span className="text-xs font-medium text-purple-700">AI Reasoning</span>
                         </div>
                         <p className="mt-1.5 text-xs leading-relaxed text-purple-900">
