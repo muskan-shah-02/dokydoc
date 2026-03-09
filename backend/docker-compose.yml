@@ -1,7 +1,7 @@
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: dokydoc_db
     # ... (rest of db config is unchanged)
     restart: unless-stopped
