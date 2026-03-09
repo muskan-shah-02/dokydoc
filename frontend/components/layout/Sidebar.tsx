@@ -43,6 +43,7 @@ import {
   Plus,
   Check,
   BrainCircuit,
+  Search,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -107,6 +108,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       icon: BrainCircuit,
       text: "Brain",
       href: "/dashboard/brain",
+      badge: "New",
+    },
+    {
+      icon: Search,
+      text: "Search",
+      href: "/dashboard/search",
       badge: "New",
     },
     {

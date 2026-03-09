@@ -19,6 +19,7 @@ from app.api.endpoints import (
     repositories,  # SPRINT 3: Code Analysis Engine
     webhooks,  # SPRINT 4: Git Webhook Integration (ADHOC-09)
     audit, notifications, exports,  # SPRINT 5: Audit Trail, Notifications, Exports
+    search,  # SPRINT 5: Unified Semantic Search
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -381,6 +382,13 @@ app.include_router(
     exports.router,
     prefix=f"/api/{settings.API_VERSION}/exports",
     tags=["Exports"]
+)
+
+# SPRINT 5: Unified Semantic Search
+app.include_router(
+    search.router,
+    prefix=f"/api/{settings.API_VERSION}/search",
+    tags=["Search"]
 )
 
 # --- Startup Event (Legacy support) ---

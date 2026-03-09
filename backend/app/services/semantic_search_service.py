@@ -1,11 +1,12 @@
 """
 Sprint 4: Semantic Search Service
+Sprint 5: Unified Search — search across concepts, documents, and code components.
 
 Provides vector-similarity search across ontology concepts and knowledge graphs.
 Falls back to text-based search when pgvector is not available.
 """
 
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from sqlalchemy import text as sql_text
 
 from app.core.logging import logger
@@ -13,7 +14,7 @@ from app.services.embedding_service import embedding_service, _check_pgvector_av
 
 
 class SemanticSearchService:
-    """Search across ontology concepts using vector similarity + text matching."""
+    """Unified search across ontology concepts, documents, code, and graphs."""
 
     def search_concepts(
         self,
@@ -375,6 +376,241 @@ class SemanticSearchService:
                 logger.warning(f"Vector similarity lookup failed: {e}")
 
         return results
+
+    # ============================================================
+    # SPRINT 5: Document Search
+    # ============================================================
+
+    def search_documents(
+        self,
+        db,
+        query: str,
+        tenant_id: int,
+        *,
+        document_type: Optional[str] = None,
+        limit: int = 10,
+    ) -> list:
+        """
+        Search documents by filename, raw_text content, and document_type.
+        Returns list of dicts with document metadata and match highlights.
+        """
+        conditions = ["d.tenant_id = :tid"]
+        params: Dict[str, Any] = {"tid": tenant_id, "q": f"%{query}%", "lim": limit}
+
+        conditions.append(
+            "(d.filename ILIKE :q OR d.raw_text ILIKE :q OR d.document_type ILIKE :q)"
+        )
+
+        if document_type:
+            conditions.append("d.document_type = :dtype")
+            params["dtype"] = document_type
+
+        where_clause = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT d.id, d.filename, d.document_type, d.status,
+                   d.file_size_kb, d.created_at,
+                   CASE WHEN d.filename ILIKE :q THEN 1.0
+                        WHEN d.document_type ILIKE :q THEN 0.8
+                        ELSE 0.6
+                   END AS relevance,
+                   SUBSTRING(d.raw_text FROM 1 FOR 200) AS snippet
+            FROM documents d
+            WHERE {where_clause}
+            ORDER BY
+                CASE WHEN d.filename ILIKE :q THEN 0 ELSE 1 END,
+                d.created_at DESC
+            LIMIT :lim
+        """
+
+        try:
+            rows = db.execute(sql_text(sql), params).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "document_type": row[2],
+                    "status": row[3],
+                    "file_size_kb": row[4],
+                    "created_at": str(row[5]) if row[5] else None,
+                    "relevance": round(float(row[6]), 2) if row[6] else 0,
+                    "snippet": row[7],
+                    "category": "document",
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"Document search failed: {e}")
+            return []
+
+    # ============================================================
+    # SPRINT 5: Code Component Search
+    # ============================================================
+
+    def search_code_components(
+        self,
+        db,
+        query: str,
+        tenant_id: int,
+        *,
+        component_type: Optional[str] = None,
+        analysis_status: Optional[str] = None,
+        limit: int = 10,
+    ) -> list:
+        """
+        Search code components by name, summary, and location.
+        Returns list of dicts with code component metadata.
+        """
+        conditions = ["cc.tenant_id = :tid"]
+        params: Dict[str, Any] = {"tid": tenant_id, "q": f"%{query}%", "lim": limit}
+
+        conditions.append(
+            "(cc.name ILIKE :q OR cc.summary ILIKE :q OR cc.location ILIKE :q)"
+        )
+
+        if component_type:
+            conditions.append("cc.component_type = :ctype")
+            params["ctype"] = component_type
+        if analysis_status:
+            conditions.append("cc.analysis_status = :astatus")
+            params["astatus"] = analysis_status
+
+        where_clause = " AND ".join(conditions)
+
+        sql = f"""
+            SELECT cc.id, cc.name, cc.component_type, cc.location,
+                   cc.analysis_status, cc.summary, cc.created_at,
+                   r.name AS repo_name,
+                   CASE WHEN cc.name ILIKE :q THEN 1.0
+                        WHEN cc.summary ILIKE :q THEN 0.7
+                        ELSE 0.5
+                   END AS relevance
+            FROM code_components cc
+            LEFT JOIN repositories r ON cc.repository_id = r.id
+            WHERE {where_clause}
+            ORDER BY
+                CASE WHEN cc.name ILIKE :q THEN 0 ELSE 1 END,
+                cc.created_at DESC
+            LIMIT :lim
+        """
+
+        try:
+            rows = db.execute(sql_text(sql), params).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "component_type": row[2],
+                    "location": row[3],
+                    "analysis_status": row[4],
+                    "summary": (row[5] or "")[:200],
+                    "created_at": str(row[6]) if row[6] else None,
+                    "repo_name": row[7],
+                    "relevance": round(float(row[8]), 2) if row[8] else 0,
+                    "category": "code",
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"Code component search failed: {e}")
+            return []
+
+    # ============================================================
+    # SPRINT 5: Unified Search
+    # ============================================================
+
+    def unified_search(
+        self,
+        db,
+        query: str,
+        tenant_id: int,
+        *,
+        categories: Optional[List[str]] = None,
+        initiative_id: Optional[int] = None,
+        limit: int = 30,
+    ) -> dict:
+        """
+        Search across all entity types: concepts, documents, code, and graphs.
+
+        Args:
+            categories: Filter to specific categories. Options:
+                        ["concepts", "documents", "code", "graphs"].
+                        None = search all.
+            initiative_id: Filter concepts by initiative.
+            limit: Max total results (distributed across categories).
+
+        Returns:
+            {
+                "query": str,
+                "total_count": int,
+                "results": [{category, ...}],
+                "facets": {"concepts": N, "documents": N, "code": N, "graphs": N}
+            }
+        """
+        search_all = not categories
+        per_category = max(5, limit // 4)
+
+        all_results: List[Dict[str, Any]] = []
+        facets = {"concepts": 0, "documents": 0, "code": 0, "graphs": 0}
+
+        # 1. Search ontology concepts
+        if search_all or "concepts" in categories:
+            concept_results = self.search_concepts(
+                db, query, tenant_id,
+                initiative_id=initiative_id,
+                limit=per_category,
+            )
+            for r in concept_results:
+                r["category"] = "concept"
+                r["relevance"] = r.get("similarity") or 0.5
+            all_results.extend(concept_results)
+            facets["concepts"] = len(concept_results)
+
+        # 2. Search documents
+        if search_all or "documents" in categories:
+            doc_results = self.search_documents(
+                db, query, tenant_id,
+                limit=per_category,
+            )
+            all_results.extend(doc_results)
+            facets["documents"] = len(doc_results)
+
+        # 3. Search code components
+        if search_all or "code" in categories:
+            code_results = self.search_code_components(
+                db, query, tenant_id,
+                limit=per_category,
+            )
+            all_results.extend(code_results)
+            facets["code"] = len(code_results)
+
+        # 4. Search knowledge graphs
+        if search_all or "graphs" in categories:
+            graph_results = self.search_graphs(
+                db, query, tenant_id,
+                limit=per_category,
+            )
+            for r in graph_results:
+                r["category"] = "graph"
+                r["relevance"] = r.get("similarity") or 0.3
+            all_results.extend(graph_results)
+            facets["graphs"] = len(graph_results)
+
+        # Sort by relevance (higher first), then by category priority
+        category_priority = {"concept": 0, "document": 1, "code": 2, "graph": 3}
+        all_results.sort(
+            key=lambda r: (
+                -float(r.get("relevance") or r.get("similarity") or 0),
+                category_priority.get(r.get("category", ""), 9),
+            )
+        )
+
+        return {
+            "query": query,
+            "total_count": len(all_results[:limit]),
+            "results": all_results[:limit],
+            "facets": facets,
+        }
 
 
 # Singleton
