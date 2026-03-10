@@ -36,3 +36,6 @@ from .crud_audit_log import audit_log
 
 # Sprint 5: Notifications
 from .crud_notification import notification
+
+# Sprint 6: Approval Workflow
+from .crud_approval import approval

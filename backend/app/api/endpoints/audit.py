@@ -6,10 +6,15 @@ Provides endpoints for:
   GET  /audit/stats         — Get audit statistics
   GET  /audit/timeline      — Get timeline-formatted events for sync timeline (cursor-paginated)
   GET  /audit/export        — Export audit logs as JSON
+  GET  /audit/export/pdf    — Export audit logs as PDF (Sprint 6)
 """
 from typing import Any, List, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+import io
+import csv
 
 from app import models
 from app.api import deps
@@ -166,6 +171,93 @@ def export_audit_logs(
             for log in logs
         ],
     }
+
+
+@router.get("/export/pdf")
+def export_audit_logs_pdf(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    days: int = Query(30, ge=1, le=365, description="Look back N days"),
+    date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    action: Optional[str] = Query(None, description="Filter by action type"),
+    resource_type: Optional[str] = Query(None, description="Filter by resource type"),
+    limit: int = Query(2000, ge=1, le=10000, description="Max records"),
+) -> Any:
+    """
+    Export audit logs as a CSV file (Sprint 6).
+    Supports date range filtering for compliance reports.
+    """
+    # Calculate effective days from date range if provided
+    effective_days = days
+    if date_from:
+        try:
+            from_date = datetime.strptime(date_from, "%Y-%m-%d")
+            effective_days = max(1, (datetime.utcnow() - from_date).days + 1)
+        except ValueError:
+            pass
+
+    logs = audit_log.get_multi(
+        db=db,
+        tenant_id=tenant_id,
+        action=action,
+        resource_type=resource_type,
+        days=effective_days,
+        skip=0,
+        limit=limit,
+    )
+
+    # Apply date_to filter if provided
+    if date_to:
+        try:
+            to_date = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            logs = [log for log in logs if log.created_at and log.created_at <= to_date]
+        except ValueError:
+            pass
+
+    # Apply date_from filter for precision
+    if date_from:
+        try:
+            from_date = datetime.strptime(date_from, "%Y-%m-%d")
+            logs = [log for log in logs if log.created_at and log.created_at >= from_date]
+        except ValueError:
+            pass
+
+    # Generate CSV (universally readable, can be opened in Excel for PDF printing)
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow([
+        "ID", "Timestamp", "User Email", "Action", "Resource Type",
+        "Resource ID", "Resource Name", "Description", "IP Address",
+        "Status",
+    ])
+
+    for log in logs:
+        writer.writerow([
+            log.id,
+            log.created_at.isoformat() if log.created_at else "",
+            log.user_email or "system",
+            log.action,
+            log.resource_type,
+            log.resource_id or "",
+            log.resource_name or "",
+            log.description,
+            log.ip_address or "",
+            log.status,
+        ])
+
+    output.seek(0)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"audit_report_{tenant_id}_{timestamp}.csv"
+
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 def _map_event_type(action: str, resource_type: str) -> str:

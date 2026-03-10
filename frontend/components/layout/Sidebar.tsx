@@ -131,6 +131,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       text: "Audit Trail",
       href: "/dashboard/audit-trail",
     },
+    {
+      icon: CheckSquare,
+      text: "Approvals",
+      href: "/dashboard/approvals",
+      badge: "New",
+    },
   ];
 
   // Settings submenu items - role-based

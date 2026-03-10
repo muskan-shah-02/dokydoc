@@ -72,6 +72,11 @@ class Permission(str, Enum):
     COMPLIANCE_VIEW = "compliance:view"  # View compliance status
     COMPLIANCE_REPORT = "compliance:report"  # Generate compliance reports
 
+    # Approval Permissions (Sprint 6)
+    APPROVAL_REQUEST = "approval:request"  # Request approvals
+    APPROVAL_VIEW = "approval:view"  # View approvals
+    APPROVAL_RESOLVE = "approval:resolve"  # Approve/reject/request revision
+
 
 # Role-to-Permissions Mapping
 ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
@@ -116,6 +121,10 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.AUDIT_EXPORT,
         Permission.COMPLIANCE_VIEW,
         Permission.COMPLIANCE_REPORT,
+        # Approval Permissions - Full access (Sprint 6)
+        Permission.APPROVAL_REQUEST,
+        Permission.APPROVAL_VIEW,
+        Permission.APPROVAL_RESOLVE,
     },
 
     Role.ADMIN: {
@@ -130,6 +139,9 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.TENANT_VIEW,
         Permission.TENANT_MANAGE,
         Permission.DASHBOARD_ADMIN,
+        # Approval - can view and resolve level 1-2 (Sprint 6)
+        Permission.APPROVAL_VIEW,
+        Permission.APPROVAL_RESOLVE,
     },
 
     Role.BA: {
@@ -152,6 +164,10 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,  # Can see other users
         Permission.TENANT_VIEW,  # Can view tenant info
         Permission.DASHBOARD_BA,
+        # Approval - can request and view (Sprint 6)
+        Permission.APPROVAL_REQUEST,
+        Permission.APPROVAL_VIEW,
+        Permission.APPROVAL_RESOLVE,
     },
 
     Role.DEVELOPER: {
@@ -175,6 +191,10 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
         Permission.DASHBOARD_DEVELOPER,
+        # Approval - can request, view, and resolve level 1 (Sprint 6)
+        Permission.APPROVAL_REQUEST,
+        Permission.APPROVAL_VIEW,
+        Permission.APPROVAL_RESOLVE,
     },
 
     Role.PRODUCT_MANAGER: {
@@ -193,6 +213,9 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
         Permission.DASHBOARD_PM,
+        # Approval - can request and view (Sprint 6)
+        Permission.APPROVAL_REQUEST,
+        Permission.APPROVAL_VIEW,
     },
 
     Role.AUDITOR: {
@@ -217,6 +240,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.COMPLIANCE_REPORT,
         # Auditor dashboard
         Permission.DASHBOARD_AUDITOR,
+        # Approval - view only for audit purposes (Sprint 6)
+        Permission.APPROVAL_VIEW,
     },
 }
 

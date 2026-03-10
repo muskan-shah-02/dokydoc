@@ -21,3 +21,4 @@ from .knowledge_graph_version import KnowledgeGraphVersion  # Graph versioning
 from .requirement_trace import RequirementTrace  # BRD-to-Code traceability
 from .audit_log import AuditLog  # Sprint 5: Audit Trail
 from .notification import Notification  # Sprint 5: Notifications
+from .approval import Approval  # Sprint 6: Approval Workflow

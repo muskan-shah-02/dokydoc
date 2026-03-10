@@ -20,6 +20,7 @@ from app.api.endpoints import (
     webhooks,  # SPRINT 4: Git Webhook Integration (ADHOC-09)
     audit, notifications, exports,  # SPRINT 5: Audit Trail, Notifications, Exports
     search,  # SPRINT 5: Unified Semantic Search
+    approvals,  # SPRINT 6: Approval Workflow
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -41,10 +42,15 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Database initialization failed")
     
     logger.info("✅ Database initialized successfully")
+
+    # Sprint 6: Initialize field encryption listeners
+    from app.services.field_encryption import register_encryption_listeners
+    register_encryption_listeners()
+
     logger.info(f"🌍 Environment: {settings.ENVIRONMENT}")
     logger.info(f"🔧 Debug mode: {settings.DEBUG}")
     logger.info(f"📊 API Version: {settings.API_VERSION}")
-    
+
     yield
     
     # Shutdown
@@ -389,6 +395,13 @@ app.include_router(
     search.router,
     prefix=f"/api/{settings.API_VERSION}/search",
     tags=["Search"]
+)
+
+# SPRINT 6: Approval Workflow
+app.include_router(
+    approvals.router,
+    prefix=f"/api/{settings.API_VERSION}/approvals",
+    tags=["Approvals"]
 )
 
 # --- Startup Event (Legacy support) ---

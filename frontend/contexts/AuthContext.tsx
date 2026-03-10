@@ -58,6 +58,16 @@ export enum Permission {
   DASHBOARD_CXO = 'dashboard:cxo',
   DASHBOARD_ADMIN = 'dashboard:admin',
   DASHBOARD_PM = 'dashboard:pm',
+  DASHBOARD_AUDITOR = 'dashboard:auditor',
+  // Audit & Compliance
+  AUDIT_VIEW = 'audit:view',
+  AUDIT_EXPORT = 'audit:export',
+  COMPLIANCE_VIEW = 'compliance:view',
+  COMPLIANCE_REPORT = 'compliance:report',
+  // Approval Permissions (Sprint 6)
+  APPROVAL_REQUEST = 'approval:request',
+  APPROVAL_VIEW = 'approval:view',
+  APPROVAL_RESOLVE = 'approval:resolve',
 }
 
 // Role priority for determining primary dashboard
