@@ -526,6 +526,143 @@ class RAGService:
             logger.warning(f"RAG requirement trace fetch failed: {e}")
             return []
 
+    # ------------------------------------------------------------------
+    # Role-Aware Prompt Intelligence (Task 4)
+    # ------------------------------------------------------------------
+
+    # Role → communication style mapping
+    ROLE_INSTRUCTIONS = {
+        "CXO": {
+            "persona": "strategic advisor to a C-level executive",
+            "style": (
+                "Focus on business impact, ROI, strategic implications, and high-level trends. "
+                "Use executive-friendly language. Lead with insights and recommendations. "
+                "Quantify impact where possible (costs, coverage %, risk levels). "
+                "Avoid deep technical jargon unless specifically asked."
+            ),
+            "priority_context": ["analysis_summaries", "requirement_traces", "cross_graph_links"],
+        },
+        "ADMIN": {
+            "persona": "operations and compliance advisor",
+            "style": (
+                "Focus on operational status, user activity, billing, and system health. "
+                "Be precise with numbers, dates, and statuses. "
+                "Highlight anything requiring administrative action."
+            ),
+            "priority_context": ["analysis_summaries", "requirement_traces"],
+        },
+        "DEVELOPER": {
+            "persona": "senior technical architect and code expert",
+            "style": (
+                "Provide deep technical detail — code structures, function signatures, "
+                "architecture patterns, and implementation specifics. "
+                "Use code snippets and technical terminology freely. "
+                "Reference file paths, function names, and component locations. "
+                "Highlight code-document mismatches and technical debt."
+            ),
+            "priority_context": ["code_summaries", "cross_graph_links", "requirement_traces"],
+        },
+        "BA": {
+            "persona": "business analysis and requirements expert",
+            "style": (
+                "Focus on requirements coverage, business rules, process flows, and gaps. "
+                "Map business concepts to their implementation status. "
+                "Highlight requirements that are not covered or contradicted. "
+                "Use structured formats: tables, numbered lists, coverage matrices."
+            ),
+            "priority_context": ["requirement_traces", "analysis_summaries", "cross_graph_links"],
+        },
+        "PRODUCT_MANAGER": {
+            "persona": "product strategy and feature analysis expert",
+            "style": (
+                "Focus on feature completeness, user impact, and product roadmap alignment. "
+                "Connect business requirements to implementation status. "
+                "Highlight gaps between what's documented and what's built. "
+                "Use clear, non-technical language with structured summaries."
+            ),
+            "priority_context": ["requirement_traces", "analysis_summaries", "document_segments"],
+        },
+        "AUDITOR": {
+            "persona": "compliance and audit specialist",
+            "style": (
+                "Focus on compliance status, audit trails, requirement traceability, and risk. "
+                "Be precise and factual — cite sources for every claim. "
+                "Flag contradictions, gaps, and non-compliance. "
+                "Use formal, evidence-based language. Structure as findings."
+            ),
+            "priority_context": ["requirement_traces", "cross_graph_links", "analysis_summaries"],
+        },
+    }
+
+    def _get_org_context(self, db: Session, tenant_id: int) -> str:
+        """Fetch organization profile from Tenant.settings for prompt context."""
+        try:
+            tenant = crud.tenant.get(db, id=tenant_id)
+            if not tenant or not tenant.settings:
+                return ""
+
+            profile = tenant.settings.get("org_profile", {})
+            if not profile:
+                return ""
+
+            parts = []
+            if profile.get("company_description"):
+                parts.append(f"Company: {profile['company_description'][:300]}")
+            if profile.get("mission"):
+                parts.append(f"Mission: {profile['mission'][:200]}")
+            if profile.get("industry"):
+                parts.append(f"Industry: {profile['industry']}")
+            if profile.get("products_services"):
+                items = ", ".join(str(p) for p in profile["products_services"][:8])
+                parts.append(f"Products/Services: {items}")
+            if profile.get("key_objectives"):
+                items = ", ".join(str(o) for o in profile["key_objectives"][:5])
+                parts.append(f"Key Objectives: {items}")
+            if profile.get("tech_stack"):
+                items = ", ".join(str(t) for t in profile["tech_stack"][:10])
+                parts.append(f"Tech Stack: {items}")
+            if profile.get("team_size"):
+                parts.append(f"Team Size: {profile['team_size']}")
+
+            return "\n".join(parts) if parts else ""
+        except Exception as e:
+            logger.warning(f"Failed to fetch org context: {e}")
+            return ""
+
+    def _get_role_instructions(self, user_roles: List[str]) -> Dict[str, str]:
+        """
+        Map user roles to communication directives.
+
+        Returns dict with 'persona' and 'style' for prompt injection.
+        Uses the highest-priority role when user has multiple roles.
+        """
+        # Priority order: CXO > ADMIN > DEVELOPER > BA > PRODUCT_MANAGER > AUDITOR
+        role_priority = ["CXO", "ADMIN", "DEVELOPER", "BA", "PRODUCT_MANAGER", "AUDITOR"]
+
+        primary_role = None
+        for role in role_priority:
+            if role in user_roles:
+                primary_role = role
+                break
+
+        if primary_role and primary_role in self.ROLE_INSTRUCTIONS:
+            return self.ROLE_INSTRUCTIONS[primary_role]
+
+        # Default: general-purpose assistant
+        return {
+            "persona": "knowledgeable AI assistant",
+            "style": (
+                "Provide clear, well-structured answers. "
+                "Balance technical depth with accessibility. "
+                "Use markdown formatting for readability."
+            ),
+            "priority_context": [],
+        }
+
+    # ------------------------------------------------------------------
+    # Answer generation (Task 4: role-aware)
+    # ------------------------------------------------------------------
+
     async def generate_answer(
         self,
         query: str,
@@ -534,24 +671,46 @@ class RAGService:
         *,
         tenant_id: int,
         user_id: int,
+        user_roles: Optional[List[str]] = None,
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """
-        Generate an AI answer using retrieved context.
+        Generate an AI answer using retrieved context with role-aware prompting.
+
+        Args:
+            query: User's question
+            context: Retrieved context from 6-stage pipeline
+            conversation_history: Recent messages for multi-turn
+            tenant_id: Organization ID
+            user_id: User ID
+            user_roles: User's roles (e.g., ["CXO"], ["DEVELOPER", "BA"])
+            db: Database session (needed for org context fetch)
 
         Returns dict with: answer, input_tokens, output_tokens, cost_usd, model_used
         """
-        # Build prompt
+        # Fetch org context and role instructions
+        org_context = ""
+        if db:
+            org_context = self._get_org_context(db, tenant_id)
+
+        role_info = self._get_role_instructions(user_roles or [])
+
+        # Build prompt with role awareness
         system_context = context.to_prompt_text()
 
         history_text = ""
         if conversation_history:
             history_lines = []
-            for msg in conversation_history[-6:]:  # Last 6 messages
+            for msg in conversation_history[-6:]:
                 role_label = "User" if msg["role"] == "user" else "Assistant"
                 history_lines.append(f"{role_label}: {msg['content'][:300]}")
             history_text = "\n".join(history_lines)
 
-        prompt = self._build_prompt(query, system_context, history_text)
+        prompt = self._build_prompt(
+            query, system_context, history_text,
+            org_context=org_context,
+            role_info=role_info,
+        )
 
         # Call AI provider
         start_time = time.time()
@@ -596,24 +755,61 @@ class RAGService:
                 "elapsed_seconds": 0,
             }
 
-    def _build_prompt(self, query: str, context: str, history: str) -> str:
-        """Build the RAG prompt with context and conversation history."""
+    def _build_prompt(self, query: str, context: str, history: str, *,
+                      org_context: str = "", role_info: Optional[Dict] = None) -> str:
+        """
+        Build the role-aware RAG prompt with org context, role instructions, and citation rules.
+
+        Structure:
+          1. AskyDoc persona + role-specific communication style
+          2. Organization context (mission, industry, products)
+          3. Citation rules
+          4. Retrieved context
+          5. Conversation history
+          6. User question
+        """
+        persona = (role_info or {}).get("persona", "knowledgeable AI assistant")
+        style = (role_info or {}).get("style", "Provide clear, well-structured answers.")
+
         parts = [
-            "You are DokyDoc AI Assistant — an expert on the user's documents, code, and knowledge graphs.",
-            "Answer questions accurately using ONLY the provided context. If the context doesn't contain enough information, say so clearly.",
-            "When referencing specific concepts, documents, or code files, mention them by name.",
-            "Keep answers concise but thorough. Use markdown formatting for code snippets and lists.",
+            f"You are AskyDoc — your organization's personal AI expert, acting as a {persona}.",
+            "",
+            "COMMUNICATION STYLE:",
+            style,
         ]
 
+        # Organization context
+        if org_context:
+            parts.append("")
+            parts.append("--- ORGANIZATION CONTEXT ---")
+            parts.append(org_context)
+            parts.append("--- END ORGANIZATION CONTEXT ---")
+            parts.append("")
+            parts.append(
+                "Use the organization context above to ground your answers in the company's "
+                "specific domain, products, and objectives. Tailor terminology and examples accordingly."
+            )
+
+        # Citation and formatting rules
+        parts.append("")
+        parts.append("RESPONSE RULES:")
+        parts.append("- Answer using ONLY the provided context. If context is insufficient, say so clearly.")
+        parts.append("- When referencing sources, use citation tags: [Doc: filename], [Code: component_name], [Concept: concept_name].")
+        parts.append("- Use markdown formatting: headers for sections, code blocks for code, tables for comparisons.")
+        parts.append("- Be specific — mention exact names, file paths, requirement keys, and coverage statuses.")
+        parts.append("- If multiple sources agree, synthesize them into a cohesive answer rather than listing each separately.")
+
+        # Retrieved context
         if context and context != "No relevant context found in the knowledge base.":
             parts.append(f"\n--- RETRIEVED CONTEXT ---\n{context}\n--- END CONTEXT ---")
 
+        # Conversation history
         if history:
             parts.append(f"\n--- CONVERSATION HISTORY ---\n{history}\n--- END HISTORY ---")
 
         parts.append(f"\nUser question: {query}")
 
-        return "\n\n".join(parts)
+        return "\n".join(parts)
 
 
 # Module-level singleton

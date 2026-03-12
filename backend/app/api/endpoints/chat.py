@@ -183,11 +183,13 @@ async def send_message(
         if m.id != user_msg.id  # Exclude the message we just saved
     ]
 
-    # 4. Generate AI answer
+    # 4. Generate AI answer (role-aware: passes user roles + db for org context)
     result = await rag_service.generate_answer(
         payload.content, context, history,
         tenant_id=tenant_id,
         user_id=current_user.id,
+        user_roles=current_user.roles,
+        db=db,
     )
 
     # 5. Save assistant message
