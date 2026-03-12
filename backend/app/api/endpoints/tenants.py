@@ -311,6 +311,87 @@ def update_tenant_settings(
     return updated_tenant
 
 
+@router.get("/org-profile", response_model=schemas.tenant.OrgProfileResponse)
+def get_org_profile(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Get the organization profile used by AskyDoc for context.
+
+    Any authenticated user in the tenant can view the org profile.
+    """
+    tenant = db.query(crud.tenant.model).filter(crud.tenant.model.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    org_profile = (tenant.settings or {}).get("org_profile", {})
+
+    return schemas.tenant.OrgProfileResponse(
+        mission=org_profile.get("mission"),
+        company_description=org_profile.get("company_description"),
+        industry=org_profile.get("industry"),
+        products_services=org_profile.get("products_services", []),
+        key_objectives=org_profile.get("key_objectives", []),
+        tech_stack=org_profile.get("tech_stack", []),
+        team_size=org_profile.get("team_size"),
+        founded_year=org_profile.get("founded_year"),
+        is_configured=bool(org_profile),
+    )
+
+
+@router.put("/org-profile", response_model=schemas.tenant.OrgProfileResponse)
+def update_org_profile(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user_with_role(schemas.user.Role.CXO)),
+    profile_in: schemas.tenant.OrgProfileUpdate
+) -> Any:
+    """
+    Update the organization profile for AskyDoc context.
+
+    Only CXO/Admin can update the org profile. This data is used by AskyDoc
+    to provide organization-aware answers.
+    """
+    tenant = db.query(crud.tenant.model).filter(crud.tenant.model.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    # Merge with existing settings
+    current_settings = dict(tenant.settings or {})
+    current_profile = current_settings.get("org_profile", {})
+
+    # Only update provided fields
+    update_data = profile_in.model_dump(exclude_unset=True)
+    current_profile.update(update_data)
+    current_settings["org_profile"] = current_profile
+
+    # Update tenant settings
+    from sqlalchemy import update as sql_update
+    from app.models.tenant import Tenant
+    db.execute(
+        sql_update(Tenant).where(Tenant.id == tenant_id).values(settings=current_settings)
+    )
+    db.commit()
+    db.refresh(tenant)
+
+    org_profile = current_settings.get("org_profile", {})
+    return schemas.tenant.OrgProfileResponse(
+        mission=org_profile.get("mission"),
+        company_description=org_profile.get("company_description"),
+        industry=org_profile.get("industry"),
+        products_services=org_profile.get("products_services", []),
+        key_objectives=org_profile.get("key_objectives", []),
+        tech_stack=org_profile.get("tech_stack", []),
+        team_size=org_profile.get("team_size"),
+        founded_year=org_profile.get("founded_year"),
+        is_configured=bool(org_profile),
+    )
+
+
 @router.get("/check-subdomain/{subdomain}")
 @limiter.limit("30/minute")  # Allow frequent checks during registration form
 def check_subdomain_availability(

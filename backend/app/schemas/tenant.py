@@ -157,6 +157,33 @@ class TenantDetailResponse(TenantResponse):
     storage_used_mb: Optional[float] = Field(None, description="Storage used in MB")
 
 
+# --- Organization Profile Schemas (AskyDoc) ---
+
+class OrgProfileUpdate(BaseModel):
+    """Schema for updating organization profile used by AskyDoc for context."""
+    mission: Optional[str] = Field(None, max_length=1000, description="Organization's mission statement")
+    company_description: Optional[str] = Field(None, max_length=2000, description="Brief description of the organization")
+    industry: Optional[str] = Field(None, max_length=200, description="Industry/sector (e.g., 'FinTech', 'Healthcare')")
+    products_services: Optional[list[str]] = Field(None, description="List of products or services offered")
+    key_objectives: Optional[list[str]] = Field(None, description="Key business objectives or goals")
+    tech_stack: Optional[list[str]] = Field(None, description="Primary technologies used")
+    team_size: Optional[str] = Field(None, max_length=50, description="Approximate team size (e.g., '50-100')")
+    founded_year: Optional[int] = Field(None, ge=1800, le=2100, description="Year the organization was founded")
+
+
+class OrgProfileResponse(BaseModel):
+    """Response schema for organization profile."""
+    mission: Optional[str] = None
+    company_description: Optional[str] = None
+    industry: Optional[str] = None
+    products_services: list[str] = []
+    key_objectives: list[str] = []
+    tech_stack: list[str] = []
+    team_size: Optional[str] = None
+    founded_year: Optional[int] = None
+    is_configured: bool = False
+
+
 class TenantRegistrationResponse(BaseModel):
     """
     Response after successful tenant registration.
