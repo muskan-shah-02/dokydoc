@@ -72,6 +72,9 @@ class Permission(str, Enum):
     COMPLIANCE_VIEW = "compliance:view"  # View compliance status
     COMPLIANCE_REPORT = "compliance:report"  # Generate compliance reports
 
+    # Chat/AskyDoc Permissions (Sprint 7)
+    CHAT_USE = "chat:use"  # Use the AI chat assistant
+
     # Approval Permissions (Sprint 6)
     APPROVAL_REQUEST = "approval:request"  # Request approvals
     APPROVAL_VIEW = "approval:view"  # View approvals
@@ -121,6 +124,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.AUDIT_EXPORT,
         Permission.COMPLIANCE_VIEW,
         Permission.COMPLIANCE_REPORT,
+        # Chat/AskyDoc (Sprint 7)
+        Permission.CHAT_USE,
         # Approval Permissions - Full access (Sprint 6)
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,
@@ -164,6 +169,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,  # Can see other users
         Permission.TENANT_VIEW,  # Can view tenant info
         Permission.DASHBOARD_BA,
+        # Chat/AskyDoc (Sprint 7)
+        Permission.CHAT_USE,
         # Approval - can request and view (Sprint 6)
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,
@@ -191,6 +198,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
         Permission.DASHBOARD_DEVELOPER,
+        # Chat/AskyDoc (Sprint 7)
+        Permission.CHAT_USE,
         # Approval - can request, view, and resolve level 1 (Sprint 6)
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,
@@ -213,6 +222,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.USER_VIEW,
         Permission.TENANT_VIEW,
         Permission.DASHBOARD_PM,
+        # Chat/AskyDoc (Sprint 7)
+        Permission.CHAT_USE,
         # Approval - can request and view (Sprint 6)
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,

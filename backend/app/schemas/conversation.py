@@ -75,6 +75,7 @@ class ChatMessageResponse(BaseModel):
     output_tokens: int
     cost_usd: float
     model_used: Optional[str] = None
+    feedback_rating: Optional[int] = None
     created_at: datetime
 
     class Config:

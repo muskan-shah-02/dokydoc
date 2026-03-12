@@ -79,6 +79,9 @@ class ChatMessage(Base):
 
     model_used: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # Feedback: -1 (thumbs down), 0 (neutral), 1 (thumbs up), None (no feedback yet)
+    feedback_rating: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False, index=True
     )

@@ -1,5 +1,6 @@
 """
 Sprint 7: Chat / RAG Assistant API Endpoints
+Phase 2: Backend Hardening (Tasks 8-12)
 
 Provides conversational AI over documents, code, and knowledge graphs.
 
@@ -11,13 +12,20 @@ Endpoints:
   GET    /chat/conversations/{id}/messages     -> message history
   PUT    /chat/conversations/{id}              -> update title
   DELETE /chat/conversations/{id}              -> delete conversation
+  PUT    /chat/conversations/{id}/model        -> switch AI model
+  GET    /chat/suggested-prompts               -> role-based starter prompts (Task 10)
+  POST   /chat/messages/{id}/feedback          -> thumbs up/down (Task 11)
+  GET    /chat/conversations/search            -> search conversations (Task 12)
+  GET    /chat/conversations/{id}/export       -> export conversation (Task 12)
 """
 
-import asyncio
-from typing import Any, Optional
+import time
+from typing import Any, Optional, List
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, desc
 
 from app import crud, models
 from app.api import deps
@@ -33,8 +41,85 @@ from app.schemas.conversation import (
     ModelPreferenceUpdate,
 )
 from app.core.logging import logger
+from app.core.permissions import Permission
+from app.middleware.rate_limiter import limiter, RateLimits
 
 router = APIRouter()
+
+# Chat-specific rate limit: 20 messages per minute (Task 12)
+CHAT_MESSAGE_RATE = "20/minute;200/hour"
+# Max messages per conversation before warning (Task 12)
+MAX_CONVERSATION_MESSAGES = 500
+
+
+def _check_billing(db: Session, tenant_id: int, estimated_cost_inr: float = 1.0) -> None:
+    """Pre-check billing before AI operations (Task 8)."""
+    from app.services.billing_enforcement_service import (
+        billing_enforcement_service,
+        InsufficientBalanceException,
+        MonthlyLimitExceededException,
+    )
+    try:
+        billing_enforcement_service.check_can_afford_analysis(
+            db, tenant_id=tenant_id, estimated_cost_inr=estimated_cost_inr,
+        )
+    except InsufficientBalanceException as e:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "INSUFFICIENT_BALANCE",
+                "message": str(e),
+                "required_inr": e.required,
+                "available_inr": e.available,
+            },
+        )
+    except MonthlyLimitExceededException as e:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "MONTHLY_LIMIT_EXCEEDED",
+                "message": str(e),
+                "monthly_limit_inr": e.limit,
+                "current_month_cost": e.current,
+            },
+        )
+
+
+def _log_chat_usage(
+    db: Session, *, tenant_id: int, user_id: int,
+    input_tokens: int, output_tokens: int,
+    cost_usd: float, model_used: str,
+    processing_time: Optional[float] = None,
+    conversation_id: Optional[int] = None,
+) -> None:
+    """Log chat usage for billing analytics (Task 8)."""
+    usd_to_inr = 85.0
+    cost_inr = cost_usd * usd_to_inr
+    crud.usage_log.log_usage(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        feature_type="chat",
+        operation="chat_response",
+        model_used=model_used,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+        cost_inr=cost_inr,
+        processing_time_seconds=processing_time,
+        extra_data={"conversation_id": conversation_id} if conversation_id else None,
+    )
+
+    # Deduct cost from billing
+    if cost_inr > 0:
+        from app.services.billing_enforcement_service import billing_enforcement_service
+        try:
+            billing_enforcement_service.deduct_cost(
+                db, tenant_id=tenant_id, cost_inr=cost_inr,
+                description=f"Chat response ({model_used})",
+            )
+        except Exception:
+            logger.warning(f"Billing deduction failed for tenant {tenant_id}, cost_inr={cost_inr}")
 
 
 # -------------------------------------------------------------------
@@ -46,7 +131,7 @@ def create_conversation(
     payload: ConversationCreate,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Create a new chat conversation."""
     conv = crud.conversation.create(
@@ -67,7 +152,7 @@ def list_conversations(
     limit: int = Query(50, ge=1, le=100),
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """List the current user's conversations."""
     convs = crud.conversation.get_by_user(
@@ -80,12 +165,33 @@ def list_conversations(
     return {"conversations": convs, "total": total}
 
 
+@router.get("/conversations/search")
+def search_conversations(
+    q: str = Query(..., min_length=1, max_length=200),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=50),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
+) -> Any:
+    """Search conversations by title (Task 12)."""
+    query = db.query(models.Conversation).filter(
+        models.Conversation.tenant_id == tenant_id,
+        models.Conversation.user_id == current_user.id,
+        models.Conversation.title.ilike(f"%{q}%"),
+    ).order_by(desc(models.Conversation.updated_at))
+
+    total = query.count()
+    conversations = query.offset(skip).limit(limit).all()
+    return {"conversations": conversations, "total": total}
+
+
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse)
 def get_conversation(
     conversation_id: int,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Get a single conversation."""
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
@@ -102,7 +208,7 @@ def update_conversation(
     title: str = Query(..., min_length=1, max_length=500),
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Update conversation title."""
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
@@ -118,7 +224,7 @@ def delete_conversation(
     conversation_id: int,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Delete a conversation and all its messages."""
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
@@ -135,29 +241,47 @@ def delete_conversation(
 # -------------------------------------------------------------------
 
 @router.post("/conversations/{conversation_id}/messages", response_model=ChatSendResponse)
+@limiter.limit(CHAT_MESSAGE_RATE)
 async def send_message(
+    request: Request,
     conversation_id: int,
     payload: ChatMessageCreate,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """
     Send a user message and get an AI response.
 
     Pipeline:
-      1. Save user message
-      2. Retrieve relevant context (semantic search + graph)
-      3. Build prompt with conversation history
-      4. Generate AI answer
-      5. Save assistant message with context metadata
+      1. Billing pre-check (Task 8)
+      2. Rate + conversation length check (Task 12)
+      3. Save user message
+      4. Retrieve relevant context (semantic search + graph)
+      5. Build prompt with conversation history
+      6. Generate AI answer
+      7. Save assistant message with context metadata
+      8. Log usage for billing analytics (Task 8)
     """
+    start_time = time.time()
+
     # Validate conversation
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conv.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your conversation")
+
+    # Task 8: Billing pre-check (estimated ₹1 per chat message)
+    _check_billing(db, tenant_id, estimated_cost_inr=1.0)
+
+    # Task 12: Conversation length check
+    if conv.message_count >= MAX_CONVERSATION_MESSAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Conversation has reached the maximum of {MAX_CONVERSATION_MESSAGES} messages. "
+                   "Please start a new conversation.",
+        )
 
     # 1. Save user message
     user_msg = crud.chat_message.create(
@@ -224,6 +348,20 @@ async def send_message(
 
     db.commit()
 
+    # Task 8: Log usage for billing analytics
+    processing_time = time.time() - start_time
+    _log_chat_usage(
+        db,
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+        cost_usd=result["cost_usd"],
+        model_used=result["model_used"],
+        processing_time=processing_time,
+        conversation_id=conversation_id,
+    )
+
     return {
         "user_message": user_msg,
         "assistant_message": assistant_msg,
@@ -239,7 +377,7 @@ def list_messages(
     limit: int = Query(100, ge=1, le=500),
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Get message history for a conversation."""
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
@@ -267,7 +405,7 @@ def update_model_preference(
     payload: ModelPreferenceUpdate,
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
 ) -> Any:
     """Switch AI model mid-conversation (gemini / claude / auto)."""
     conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
@@ -280,3 +418,181 @@ def update_model_preference(
     db.commit()
     db.refresh(conv)
     return conv
+
+
+# -------------------------------------------------------------------
+# Suggested Prompts (Task 10)
+# -------------------------------------------------------------------
+
+ROLE_SUGGESTED_PROMPTS = {
+    "CXO": [
+        "What's the overall health of our documentation vs codebase alignment?",
+        "Show me the top compliance risks across all projects.",
+        "Summarize cost trends for AI usage this month.",
+        "Which initiatives have the most requirement gaps?",
+        "Give me a strategic overview of our technical debt.",
+    ],
+    "ADMIN": [
+        "How many users are active this month?",
+        "What's our current billing usage summary?",
+        "Show me the audit trail for recent changes.",
+        "Which teams are using the most AI credits?",
+        "What system health issues should I be aware of?",
+    ],
+    "DEVELOPER": [
+        "Explain the architecture of the authentication module.",
+        "Find all API endpoints that lack input validation.",
+        "What code components have the most mismatches with requirements?",
+        "Show me the dependency graph for this repository.",
+        "Which functions have the highest complexity scores?",
+    ],
+    "BA": [
+        "What requirements are missing traceability to code?",
+        "Compare the PRD with the actual implementation.",
+        "Show me all validation mismatches for this document.",
+        "What are the key findings from the latest analysis?",
+        "Which requirements have partial or no coverage?",
+    ],
+    "PRODUCT_MANAGER": [
+        "What's the feature coverage status for the current initiative?",
+        "Show me requirements that changed in the last sprint.",
+        "Which features are at risk based on code analysis?",
+        "Summarize the gap between PRD and implementation.",
+        "What are the top user-facing issues from code analysis?",
+    ],
+    "AUDITOR": [
+        "Show me the compliance status across all documents.",
+        "What changes were made to critical components this week?",
+        "List all requirement traces with failed coverage.",
+        "Generate an audit summary for recent document analyses.",
+        "What are the top security-related findings?",
+    ],
+}
+
+# Default prompts for users without specific role matches
+DEFAULT_SUGGESTED_PROMPTS = [
+    "What documents have been analyzed recently?",
+    "Show me an overview of the knowledge graph.",
+    "What are the most common validation issues?",
+    "Explain the relationship between these components.",
+    "What insights can you share about our codebase?",
+]
+
+
+@router.get("/suggested-prompts")
+def get_suggested_prompts(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
+) -> Any:
+    """Get role-based suggested starter prompts (Task 10)."""
+    prompts = []
+    matched_role = None
+
+    # Priority order for role matching
+    role_priority = ["CXO", "ADMIN", "DEVELOPER", "BA", "PRODUCT_MANAGER", "AUDITOR"]
+
+    for role in role_priority:
+        if role in (current_user.roles or []):
+            prompts = ROLE_SUGGESTED_PROMPTS[role]
+            matched_role = role
+            break
+
+    if not prompts:
+        prompts = DEFAULT_SUGGESTED_PROMPTS
+        matched_role = "default"
+
+    return {
+        "prompts": prompts,
+        "role": matched_role,
+        "total": len(prompts),
+    }
+
+
+# -------------------------------------------------------------------
+# Message Feedback (Task 11)
+# -------------------------------------------------------------------
+
+@router.post("/messages/{message_id}/feedback")
+def submit_feedback(
+    message_id: int,
+    rating: int = Query(..., ge=-1, le=1),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
+) -> Any:
+    """
+    Submit feedback for an assistant message (Task 11).
+
+    rating: -1 (thumbs down), 0 (neutral/reset), 1 (thumbs up)
+    """
+    msg = db.query(models.ChatMessage).filter(
+        models.ChatMessage.id == message_id,
+    ).first()
+
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # Verify ownership via conversation
+    conv = crud.conversation.get(db, id=msg.conversation_id, tenant_id=tenant_id)
+    if not conv or conv.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your message")
+
+    if msg.role != "assistant":
+        raise HTTPException(status_code=400, detail="Can only rate assistant messages")
+
+    msg.feedback_rating = rating
+    db.commit()
+
+    return {"detail": "Feedback recorded", "message_id": message_id, "rating": rating}
+
+
+# -------------------------------------------------------------------
+# Conversation Export (Task 12)
+# -------------------------------------------------------------------
+
+@router.get("/conversations/{conversation_id}/export")
+def export_conversation(
+    conversation_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
+) -> Any:
+    """Export a conversation as structured JSON (Task 12)."""
+    conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+
+    messages = crud.chat_message.get_by_conversation(
+        db, conversation_id=conversation_id, skip=0, limit=10000,
+    )
+
+    return {
+        "conversation": {
+            "id": conv.id,
+            "title": conv.title,
+            "context_type": conv.context_type,
+            "model_preference": conv.model_preference,
+            "message_count": conv.message_count,
+            "total_tokens": conv.total_tokens,
+            "total_cost_usd": float(conv.total_cost_usd or 0),
+            "created_at": conv.created_at.isoformat(),
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        },
+        "messages": [
+            {
+                "role": m.role,
+                "content": m.content,
+                "model_used": m.model_used,
+                "input_tokens": m.input_tokens,
+                "output_tokens": m.output_tokens,
+                "cost_usd": float(m.cost_usd or 0),
+                "feedback_rating": m.feedback_rating,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in messages
+        ],
+        "exported_at": datetime.utcnow().isoformat(),
+    }

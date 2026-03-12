@@ -23,6 +23,7 @@ TRACKED_PREFIXES = [
     "/api/v1/users",
     "/api/v1/webhooks",
     "/api/v1/tasks",
+    "/api/v1/chat",
     "/api/login",
 ]
 
@@ -44,6 +45,8 @@ def _extract_resource_info(path: str) -> tuple:
         "users": "user",
         "webhooks": "system",
         "tasks": "task",
+        "chat": "chat",
+        "conversations": "conversation",
         "login": "auth",
     }
 
