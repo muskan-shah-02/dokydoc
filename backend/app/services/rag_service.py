@@ -661,7 +661,7 @@ class RAGService:
         }
 
     # ------------------------------------------------------------------
-    # Answer generation (Task 4: role-aware)
+    # Answer generation (Task 4: role-aware, Task 6: model selection)
     # ------------------------------------------------------------------
 
     async def generate_answer(
@@ -673,10 +673,12 @@ class RAGService:
         tenant_id: int,
         user_id: int,
         user_roles: Optional[List[str]] = None,
+        model_preference: str = "gemini",
         db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """
-        Generate an AI answer using retrieved context with role-aware prompting.
+        Generate an AI answer using retrieved context with role-aware prompting
+        and user-selected model routing.
 
         Args:
             query: User's question
@@ -685,9 +687,10 @@ class RAGService:
             tenant_id: Organization ID
             user_id: User ID
             user_roles: User's roles (e.g., ["CXO"], ["DEVELOPER", "BA"])
+            model_preference: "gemini" (default) | "claude" | "auto"
             db: Database session (needed for org context fetch)
 
-        Returns dict with: answer, input_tokens, output_tokens, cost_usd, model_used
+        Returns dict with: answer, input_tokens, output_tokens, cost_usd, model_used, citations
         """
         # Fetch org context and role instructions
         org_context = ""
@@ -713,39 +716,36 @@ class RAGService:
             role_info=role_info,
         )
 
-        # Call AI provider
+        # Resolve model selection (Task 7: auto-detection)
+        effective_model = self._resolve_model(model_preference, query, context)
+
+        # Route to selected provider
         start_time = time.time()
         try:
             from app.services.ai.provider_router import provider_router
-            response = await provider_router.gemini.generate_content(
-                prompt,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                operation="chat_response",
-            )
+
+            if effective_model == "claude" and provider_router.claude_available:
+                result = await self._call_claude(provider_router, prompt, tenant_id, user_id)
+            else:
+                result = await self._call_gemini(provider_router, prompt, tenant_id, user_id)
+
             elapsed = time.time() - start_time
 
-            from app.services.ai.gemini import GeminiService
-            tokens = GeminiService.extract_token_usage(response)
-            answer_text = response.text if response.text else "I couldn't generate a response. Please try rephrasing your question."
-
-            # Calculate cost (Gemini 2.5 Flash pricing)
-            from app.services.cost_service import cost_service
-            cost_data = cost_service.calculate_cost_from_actual_tokens(
-                input_tokens=tokens.get("input_tokens", 0),
-                output_tokens=tokens.get("output_tokens", 0),
-                thinking_tokens=tokens.get("thinking_tokens", 0),
-            )
+            answer_text = result["answer_text"]
+            input_tokens = result["input_tokens"]
+            output_tokens = result["output_tokens"]
+            cost_usd = result["cost_usd"]
+            model_used = result["model_used"]
 
             # Extract citations from AI response (Task 5)
             citations = self._extract_citations(answer_text, context)
 
             return {
                 "answer": answer_text,
-                "input_tokens": tokens.get("input_tokens", 0),
-                "output_tokens": tokens.get("output_tokens", 0),
-                "cost_usd": float(cost_data.get("total_cost_usd", 0)),
-                "model_used": "gemini-2.5-flash",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": cost_usd,
+                "model_used": model_used,
                 "elapsed_seconds": round(elapsed, 2),
                 "citations": citations,
             }
@@ -760,6 +760,106 @@ class RAGService:
                 "elapsed_seconds": 0,
                 "citations": [],
             }
+
+    async def _call_gemini(self, provider_router, prompt: str,
+                           tenant_id: int, user_id: int) -> Dict[str, Any]:
+        """Call Gemini and return normalized result."""
+        response = await provider_router.gemini.generate_content(
+            prompt,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            operation="chat_response",
+        )
+        from app.services.ai.gemini import GeminiService
+        tokens = GeminiService.extract_token_usage(response)
+        answer_text = response.text if response.text else "I couldn't generate a response. Please try rephrasing your question."
+
+        from app.services.cost_service import cost_service
+        cost_data = cost_service.calculate_cost_from_actual_tokens(
+            input_tokens=tokens.get("input_tokens", 0),
+            output_tokens=tokens.get("output_tokens", 0),
+            thinking_tokens=tokens.get("thinking_tokens", 0),
+        )
+        return {
+            "answer_text": answer_text,
+            "input_tokens": tokens.get("input_tokens", 0),
+            "output_tokens": tokens.get("output_tokens", 0),
+            "cost_usd": float(cost_data.get("total_cost_usd", 0)),
+            "model_used": "gemini-2.5-flash",
+        }
+
+    async def _call_claude(self, provider_router, prompt: str,
+                           tenant_id: int, user_id: int) -> Dict[str, Any]:
+        """Call Claude and return normalized result. Falls back to Gemini on failure."""
+        try:
+            response = await provider_router.claude.generate_content(prompt)
+            # Claude returns dict: {"text": ..., "input_tokens": ..., "output_tokens": ...}
+            answer_text = response.get("text", "") or "I couldn't generate a response."
+            input_tokens = response.get("input_tokens", 0)
+            output_tokens = response.get("output_tokens", 0)
+
+            cost_data = provider_router.calculate_claude_cost(input_tokens, output_tokens)
+            return {
+                "answer_text": answer_text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": float(cost_data.get("cost_usd", 0)),
+                "model_used": cost_data.get("model", "claude-sonnet"),
+            }
+        except Exception as e:
+            logger.warning(f"Claude call failed, falling back to Gemini: {e}")
+            return await self._call_gemini(provider_router, prompt, tenant_id, user_id)
+
+    # ------------------------------------------------------------------
+    # Model selection logic (Task 7: smart auto-routing)
+    # ------------------------------------------------------------------
+
+    # Keywords that suggest code-heavy questions → Claude excels
+    _CODE_KEYWORDS = re.compile(
+        r'\b(function|class|method|endpoint|api|code|implement|bug|error|exception|'
+        r'refactor|debug|stack trace|import|module|package|repository|commit|'
+        r'pull request|merge|branch|deploy|architecture|struct|interface)\b',
+        re.IGNORECASE,
+    )
+
+    def _resolve_model(self, preference: str, query: str, context: RetrievedContext) -> str:
+        """
+        Resolve effective model from preference.
+
+        "gemini" / "claude" → use directly
+        "auto" → smart detection based on query + context
+        """
+        if preference in ("gemini", "claude"):
+            return preference
+        # Auto mode: detect best model
+        return self._auto_select_model(query, context)
+
+    def _auto_select_model(self, query: str, context: RetrievedContext) -> str:
+        """
+        Auto-select the best model based on question type and context.
+
+        Claude is better for: code understanding, technical architecture, debugging
+        Gemini is better for: general business Q&A, document analysis, speed, cost
+
+        Returns "gemini" or "claude".
+        """
+        # Heuristic 1: Code keyword density in query
+        code_matches = len(self._CODE_KEYWORDS.findall(query))
+        if code_matches >= 2:
+            return "claude"
+
+        # Heuristic 2: Context is code-heavy (more code than docs)
+        code_count = len(context.code_summaries)
+        doc_count = len(context.document_segments) + len(context.analysis_summaries)
+        if code_count > 0 and code_count > doc_count:
+            return "claude"
+
+        # Heuristic 3: Cross-graph links present (code-doc bridging = complex)
+        if len(context.cross_graph_links) > 3:
+            return "claude"
+
+        # Default: Gemini (faster + cheaper)
+        return "gemini"
 
     # ------------------------------------------------------------------
     # Citation extraction (Task 5)

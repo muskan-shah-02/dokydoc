@@ -32,6 +32,9 @@ class Conversation(Base):
     context_type: Mapped[str] = mapped_column(String(50), nullable=False, default="general")
     context_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Model selection (Task 6): "gemini" (default) | "claude" | "auto"
+    model_preference: Mapped[str] = mapped_column(String(50), nullable=False, default="gemini")
+
     # Aggregate stats
     message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

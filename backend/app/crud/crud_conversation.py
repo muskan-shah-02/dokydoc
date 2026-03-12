@@ -13,13 +13,15 @@ class CRUDConversation:
     """CRUD for Conversation model."""
 
     def create(self, db: Session, *, tenant_id: int, user_id: int, title: str = "New Conversation",
-               context_type: str = "general", context_id: Optional[int] = None) -> Conversation:
+               context_type: str = "general", context_id: Optional[int] = None,
+               model_preference: str = "gemini") -> Conversation:
         obj = Conversation(
             tenant_id=tenant_id,
             user_id=user_id,
             title=title,
             context_type=context_type,
             context_id=context_id,
+            model_preference=model_preference,
         )
         db.add(obj)
         db.commit()

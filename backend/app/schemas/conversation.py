@@ -24,6 +24,12 @@ class ConversationCreate(BaseModel):
     title: Optional[str] = "New Conversation"
     context_type: str = "general"  # "general" | "document" | "repository" | "initiative"
     context_id: Optional[int] = None
+    model_preference: str = "gemini"  # "gemini" | "claude" | "auto"
+
+
+class ModelPreferenceUpdate(BaseModel):
+    """Switch AI model mid-conversation."""
+    model_preference: str = Field(..., pattern="^(gemini|claude|auto)$")
 
 
 class ConversationResponse(BaseModel):
@@ -34,6 +40,7 @@ class ConversationResponse(BaseModel):
     title: str
     context_type: str
     context_id: Optional[int] = None
+    model_preference: str = "gemini"
     message_count: int
     total_tokens: int
     total_cost_usd: float

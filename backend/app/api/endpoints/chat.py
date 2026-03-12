@@ -30,6 +30,7 @@ from app.schemas.conversation import (
     ChatMessageResponse,
     ChatSendResponse,
     ChatMessageListResponse,
+    ModelPreferenceUpdate,
 )
 from app.core.logging import logger
 
@@ -55,6 +56,7 @@ def create_conversation(
         title=payload.title or "New Conversation",
         context_type=payload.context_type,
         context_id=payload.context_id,
+        model_preference=payload.model_preference,
     )
     return conv
 
@@ -183,12 +185,13 @@ async def send_message(
         if m.id != user_msg.id  # Exclude the message we just saved
     ]
 
-    # 4. Generate AI answer (role-aware: passes user roles + db for org context)
+    # 4. Generate AI answer (role-aware + model selection)
     result = await rag_service.generate_answer(
         payload.content, context, history,
         tenant_id=tenant_id,
         user_id=current_user.id,
         user_roles=current_user.roles,
+        model_preference=conv.model_preference,
         db=db,
     )
 
@@ -252,3 +255,28 @@ def list_messages(
         db, conversation_id=conversation_id,
     )
     return {"messages": messages, "total": total}
+
+
+# -------------------------------------------------------------------
+# Model Selection (Task 6)
+# -------------------------------------------------------------------
+
+@router.put("/conversations/{conversation_id}/model", response_model=ConversationResponse)
+def update_model_preference(
+    conversation_id: int,
+    payload: ModelPreferenceUpdate,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Switch AI model mid-conversation (gemini / claude / auto)."""
+    conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+
+    conv.model_preference = payload.model_preference
+    db.commit()
+    db.refresh(conv)
+    return conv
