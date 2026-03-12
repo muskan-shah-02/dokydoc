@@ -16,6 +16,7 @@ Enhanced 6-Stage Pipeline:
 """
 
 import json
+import re
 import time
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
@@ -736,6 +737,9 @@ class RAGService:
                 thinking_tokens=tokens.get("thinking_tokens", 0),
             )
 
+            # Extract citations from AI response (Task 5)
+            citations = self._extract_citations(answer_text, context)
+
             return {
                 "answer": answer_text,
                 "input_tokens": tokens.get("input_tokens", 0),
@@ -743,6 +747,7 @@ class RAGService:
                 "cost_usd": float(cost_data.get("total_cost_usd", 0)),
                 "model_used": "gemini-2.5-flash",
                 "elapsed_seconds": round(elapsed, 2),
+                "citations": citations,
             }
         except Exception as e:
             logger.error(f"RAG generation failed: {e}")
@@ -753,7 +758,104 @@ class RAGService:
                 "cost_usd": 0.0,
                 "model_used": None,
                 "elapsed_seconds": 0,
+                "citations": [],
             }
+
+    # ------------------------------------------------------------------
+    # Citation extraction (Task 5)
+    # ------------------------------------------------------------------
+
+    # Regex patterns for citation tags: [Doc: name], [Code: name], [Concept: name]
+    _CITATION_PATTERN = re.compile(
+        r'\[(Doc|Code|Concept|Req):\s*([^\]]+)\]',
+        re.IGNORECASE,
+    )
+
+    # Map citation tag prefix → (citation_type, entity_type)
+    _CITATION_TYPE_MAP = {
+        "doc": ("document", "document_segment"),
+        "code": ("code", "code_component"),
+        "concept": ("concept", "ontology_concept"),
+        "req": ("requirement", "requirement_trace"),
+    }
+
+    def _extract_citations(self, answer_text: str, context: RetrievedContext) -> List[Dict]:
+        """
+        Parse citation tags from AI response and map to entity IDs.
+
+        Scans for patterns like [Doc: filename], [Code: component_name],
+        [Concept: concept_name], [Req: REQ-001] and resolves each to an
+        entity ID from the retrieved context for clickable frontend links.
+
+        Returns list of citation dicts with: citation_type, name, entity_id, entity_type
+        """
+        if not answer_text:
+            return []
+
+        matches = self._CITATION_PATTERN.findall(answer_text)
+        if not matches:
+            return []
+
+        # Build lookup indexes from retrieved context for fast resolution
+        concept_index = {}
+        for c in context.concepts:
+            concept_index[c.get("name", "").lower()] = c.get("id")
+
+        doc_index = {}
+        for seg in context.document_segments:
+            title = seg.get("title", "").lower()
+            if title:
+                doc_index[title] = seg.get("id")
+
+        code_index = {}
+        for cs in context.code_summaries:
+            name = cs.get("name", "").lower()
+            if name:
+                code_index[name] = cs.get("id")
+
+        req_index = {}
+        for rt in context.requirement_traces:
+            key = rt.get("requirement_key", "").lower()
+            if key:
+                req_index[key] = rt.get("document_id")  # link to parent document
+
+        # Deduplicate and resolve
+        seen = set()
+        citations = []
+        for tag_type, name in matches:
+            tag_lower = tag_type.lower()
+            name_clean = name.strip()
+            dedup_key = (tag_lower, name_clean.lower())
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            type_info = self._CITATION_TYPE_MAP.get(tag_lower, ("unknown", None))
+            entity_id = None
+
+            # Resolve entity ID from context indexes
+            name_lower = name_clean.lower()
+            if tag_lower == "doc":
+                entity_id = doc_index.get(name_lower)
+            elif tag_lower == "code":
+                entity_id = code_index.get(name_lower)
+            elif tag_lower == "concept":
+                entity_id = concept_index.get(name_lower)
+            elif tag_lower == "req":
+                entity_id = req_index.get(name_lower)
+
+            citations.append({
+                "citation_type": type_info[0],
+                "name": name_clean,
+                "entity_id": entity_id,
+                "entity_type": type_info[1],
+            })
+
+        return citations
+
+    # ------------------------------------------------------------------
+    # Prompt builder (Task 4: role-aware)
+    # ------------------------------------------------------------------
 
     def _build_prompt(self, query: str, context: str, history: str, *,
                       org_context: str = "", role_info: Optional[Dict] = None) -> str:

@@ -192,13 +192,17 @@ async def send_message(
         db=db,
     )
 
-    # 5. Save assistant message
+    # 5. Save assistant message (include citations in context_used)
+    context_summary = context.to_summary_dict()
+    citations = result.get("citations", [])
+    if citations:
+        context_summary["citations"] = citations
     assistant_msg = crud.chat_message.create(
         db,
         conversation_id=conversation_id,
         role="assistant",
         content=result["answer"],
-        context_used=context.to_summary_dict(),
+        context_used=context_summary,
         input_tokens=result["input_tokens"],
         output_tokens=result["output_tokens"],
         cost_usd=result["cost_usd"],
@@ -220,7 +224,8 @@ async def send_message(
     return {
         "user_message": user_msg,
         "assistant_message": assistant_msg,
-        "context_summary": context.to_summary_dict(),
+        "context_summary": context_summary,
+        "citations": citations,
     }
 
 

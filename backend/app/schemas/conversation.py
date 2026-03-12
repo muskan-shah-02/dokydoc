@@ -7,6 +7,16 @@ from typing import Optional, List
 from datetime import datetime
 
 
+# --- Citation Schema (Task 5) ---
+
+class CitationItem(BaseModel):
+    """A source citation extracted from an AI response."""
+    citation_type: str  # "document" | "code" | "concept" | "requirement"
+    name: str           # Display name (filename, component name, concept name)
+    entity_id: Optional[int] = None   # DB ID for clickable frontend link
+    entity_type: Optional[str] = None  # Model type for routing (e.g., "document_segment", "code_component")
+
+
 # --- Conversation Schemas ---
 
 class ConversationCreate(BaseModel):
@@ -69,6 +79,7 @@ class ChatSendResponse(BaseModel):
     user_message: ChatMessageResponse
     assistant_message: ChatMessageResponse
     context_summary: Optional[dict] = None
+    citations: Optional[List[CitationItem]] = None
 
 
 class ChatMessageListResponse(BaseModel):
