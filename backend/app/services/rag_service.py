@@ -3,13 +3,16 @@ Sprint 7: RAG (Retrieval-Augmented Generation) Service
 
 Enables natural-language Q&A over documents, code, and knowledge graphs.
 
-Pipeline:
+Enhanced 6-Stage Pipeline:
   1. Semantic search → top-K relevant ontology concepts
-  2. Graph expansion → walk edges from matched concepts
-  3. Fetch relevant document segments / code component summaries
-  4. Assemble context window (respecting token limits)
-  5. Generate answer via AI provider (Gemini/Claude)
-  6. Track cost via UsageLog
+  2. Graph expansion + cross-graph links via ConceptMapping
+  3. Analysis result retrieval from consolidated_analyses
+  4. Document segment search with relevance scoring
+  5. Code component search including structured_analysis JSONB
+  6. Requirement trace retrieval
+  7. Assemble context window (respecting token limits)
+  8. Generate answer via AI provider (Gemini/Claude)
+  9. Track cost via UsageLog
 """
 
 import json
@@ -34,6 +37,9 @@ class RetrievedContext:
     relationships: List[Dict] = field(default_factory=list)
     document_segments: List[Dict] = field(default_factory=list)
     code_summaries: List[Dict] = field(default_factory=list)
+    analysis_summaries: List[Dict] = field(default_factory=list)
+    cross_graph_links: List[Dict] = field(default_factory=list)
+    requirement_traces: List[Dict] = field(default_factory=list)
     token_estimate: int = 0
 
     def to_prompt_text(self) -> str:
@@ -54,6 +60,21 @@ class RetrievedContext:
             ]
             sections.append("CONCEPT RELATIONSHIPS:\n" + "\n".join(lines))
 
+        if self.cross_graph_links:
+            lines = []
+            for link in self.cross_graph_links[:10]:
+                lines.append(
+                    f"  - [Doc] {link['doc_concept']} --[{link['relationship_type']}]--> "
+                    f"[Code] {link['code_concept']} (confidence: {link.get('confidence', '?')})"
+                )
+            sections.append("CROSS-GRAPH LINKS (Document ↔ Code):\n" + "\n".join(lines))
+
+        if self.analysis_summaries:
+            for a in self.analysis_summaries[:3]:
+                doc_name = a.get("document_name", "Document")
+                summary = a.get("summary", "")[:500]
+                sections.append(f"ANALYSIS SUMMARY: {doc_name}\n{summary}")
+
         if self.document_segments:
             for seg in self.document_segments[:5]:
                 title = seg.get("title", "Document Segment")
@@ -64,7 +85,18 @@ class RetrievedContext:
             for cs in self.code_summaries[:5]:
                 name = cs.get("name", "File")
                 summary = cs.get("summary", "")[:400]
-                sections.append(f"CODE FILE: {name}\n{summary}")
+                structured = cs.get("structured_analysis_summary", "")
+                text = summary
+                if structured:
+                    text += f"\n  Key elements: {structured[:200]}"
+                sections.append(f"CODE FILE: {name}\n{text}")
+
+        if self.requirement_traces:
+            lines = []
+            for rt in self.requirement_traces[:8]:
+                status_icon = {"fully_covered": "✓", "partially_covered": "◐", "not_covered": "✗", "contradicted": "⚠"}.get(rt.get("coverage_status", ""), "?")
+                lines.append(f"  - [{status_icon}] {rt['requirement_key']}: {rt.get('requirement_text', '')[:100]} ({rt.get('coverage_status', 'unknown')})")
+            sections.append("REQUIREMENT COVERAGE:\n" + "\n".join(lines))
 
         return "\n\n".join(sections) if sections else "No relevant context found in the knowledge base."
 
@@ -75,6 +107,9 @@ class RetrievedContext:
             "relationship_count": len(self.relationships),
             "document_segment_count": len(self.document_segments),
             "code_summary_count": len(self.code_summaries),
+            "analysis_summary_count": len(self.analysis_summaries),
+            "cross_graph_link_count": len(self.cross_graph_links),
+            "requirement_trace_count": len(self.requirement_traces),
             "token_estimate": self.token_estimate,
             "top_concepts": [c["name"] for c in self.concepts[:5]],
         }
@@ -87,7 +122,7 @@ class RetrievedContext:
 class RAGService:
     """Retrieval-Augmented Generation service for DokyDoc chat."""
 
-    MAX_CONTEXT_TOKENS = 6000  # Reserve space for query + history + generation
+    MAX_CONTEXT_TOKENS = 8000  # Raised from 6000 for richer 6-stage context
 
     def retrieve_context(
         self,
@@ -99,17 +134,19 @@ class RAGService:
         context_id: Optional[int] = None,
     ) -> RetrievedContext:
         """
-        Retrieve relevant context from the knowledge base.
+        Retrieve relevant context from the knowledge base via 6-stage pipeline.
 
-        Steps:
-          1. Semantic search across ontology concepts
-          2. Expand matched concepts via graph edges
-          3. Fetch related document segments
-          4. Fetch related code component summaries
+        Stages:
+          1. Semantic concept search (vector + text hybrid)
+          2. Graph expansion + cross-graph links via ConceptMapping
+          3. Analysis result retrieval from consolidated_analyses
+          4. Document segment search with relevance scoring
+          5. Code component search including structured_analysis JSONB
+          6. Requirement trace retrieval
         """
         ctx = RetrievedContext()
 
-        # 1. Semantic concept search
+        # --- Stage 1: Semantic concept search ---
         try:
             from app.services.semantic_search_service import semantic_search_service
             ctx.concepts = semantic_search_service.search_concepts(
@@ -118,40 +155,79 @@ class RAGService:
                 limit=15,
             )
         except Exception as e:
-            logger.warning(f"RAG concept search failed: {e}")
+            logger.warning(f"RAG Stage 1 (concept search) failed: {e}")
 
-        # 2. Expand via graph relationships
-        if ctx.concepts:
-            ctx.relationships = self._expand_relationships(
-                db, tenant_id, [c["id"] for c in ctx.concepts[:10]]
-            )
+        concept_ids = [c["id"] for c in ctx.concepts[:10]] if ctx.concepts else []
 
-        # 3. Fetch document segments matching concepts
+        # --- Stage 2: Graph expansion + cross-graph links ---
+        if concept_ids:
+            ctx.relationships = self._expand_relationships(db, tenant_id, concept_ids)
+            ctx.cross_graph_links = self._fetch_cross_graph_links(db, tenant_id, concept_ids)
+
+        # --- Stage 3: Consolidated analysis retrieval ---
+        # Gather document_ids from concept search and document segments
+        doc_ids = set()
+        if context_type == "document" and context_id:
+            doc_ids.add(context_id)
+        ctx.analysis_summaries = self._fetch_analysis_summaries(db, tenant_id, query, doc_ids)
+
+        # --- Stage 4: Document segment search (enhanced with relevance scoring) ---
         ctx.document_segments = self._fetch_document_segments(
             db, tenant_id, query, context_type, context_id
         )
+        # Collect doc_ids from segments for Stage 6
+        for seg in ctx.document_segments:
+            if seg.get("document_id"):
+                doc_ids.add(seg["document_id"])
 
-        # 4. Fetch code component summaries
+        # --- Stage 5: Code component search (with structured_analysis) ---
         ctx.code_summaries = self._fetch_code_summaries(
             db, tenant_id, query, context_type, context_id
         )
 
+        # --- Stage 6: Requirement trace retrieval ---
+        if doc_ids:
+            ctx.requirement_traces = self._fetch_requirement_traces(db, tenant_id, doc_ids)
+
         # Estimate tokens
         ctx.token_estimate = len(ctx.to_prompt_text()) // 4
 
-        # Trim if over budget
-        while ctx.token_estimate > self.MAX_CONTEXT_TOKENS and (ctx.concepts or ctx.code_summaries or ctx.document_segments):
-            if len(ctx.code_summaries) > 2:
-                ctx.code_summaries.pop()
-            elif len(ctx.document_segments) > 2:
-                ctx.document_segments.pop()
-            elif len(ctx.concepts) > 5:
-                ctx.concepts.pop()
-            else:
-                break
-            ctx.token_estimate = len(ctx.to_prompt_text()) // 4
+        # Priority-based trimming (lowest priority trimmed first)
+        self._trim_context(ctx)
 
         return ctx
+
+    def _trim_context(self, ctx: RetrievedContext) -> None:
+        """Trim context to fit within token budget using priority-based ordering."""
+        while ctx.token_estimate > self.MAX_CONTEXT_TOKENS:
+            trimmed = False
+            # Priority order: trim lowest-value items first
+            if len(ctx.requirement_traces) > 3:
+                ctx.requirement_traces.pop()
+                trimmed = True
+            elif len(ctx.analysis_summaries) > 2:
+                ctx.analysis_summaries.pop()
+                trimmed = True
+            elif len(ctx.code_summaries) > 2:
+                ctx.code_summaries.pop()
+                trimmed = True
+            elif len(ctx.document_segments) > 2:
+                ctx.document_segments.pop()
+                trimmed = True
+            elif len(ctx.cross_graph_links) > 5:
+                ctx.cross_graph_links.pop()
+                trimmed = True
+            elif len(ctx.concepts) > 5:
+                ctx.concepts.pop()
+                trimmed = True
+            else:
+                break
+            if trimmed:
+                ctx.token_estimate = len(ctx.to_prompt_text()) // 4
+
+    # ------------------------------------------------------------------
+    # Stage 2 helpers
+    # ------------------------------------------------------------------
 
     def _expand_relationships(self, db: Session, tenant_id: int, concept_ids: List[int]) -> List[Dict]:
         """Get relationships connecting the retrieved concepts."""
@@ -183,42 +259,176 @@ class RAGService:
             logger.warning(f"RAG relationship expansion failed: {e}")
             return []
 
+    def _fetch_cross_graph_links(self, db: Session, tenant_id: int, concept_ids: List[int]) -> List[Dict]:
+        """Fetch cross-graph links (doc ↔ code) for matched concepts via ConceptMapping."""
+        if not concept_ids:
+            return []
+        try:
+            placeholders = ", ".join([f":cid{i}" for i in range(len(concept_ids))])
+            params = {f"cid{i}": cid for i, cid in enumerate(concept_ids)}
+            params["tid"] = tenant_id
+
+            sql = f"""
+                SELECT
+                    dc.name AS doc_concept_name,
+                    cc.name AS code_concept_name,
+                    cm.relationship_type,
+                    cm.confidence_score,
+                    cm.mapping_method
+                FROM concept_mappings cm
+                JOIN ontology_concepts dc ON cm.document_concept_id = dc.id
+                JOIN ontology_concepts cc ON cm.code_concept_id = cc.id
+                WHERE cm.tenant_id = :tid
+                  AND cm.status != 'rejected'
+                  AND (cm.document_concept_id IN ({placeholders}) OR cm.code_concept_id IN ({placeholders}))
+                ORDER BY cm.confidence_score DESC
+                LIMIT 10
+            """
+            rows = db.execute(sql_text(sql), params).fetchall()
+            return [
+                {
+                    "doc_concept": row[0],
+                    "code_concept": row[1],
+                    "relationship_type": row[2],
+                    "confidence": round(float(row[3]), 2) if row[3] else 0,
+                    "method": row[4],
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.warning(f"RAG cross-graph link fetch failed: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Stage 3 helper
+    # ------------------------------------------------------------------
+
+    def _fetch_analysis_summaries(self, db: Session, tenant_id: int, query: str,
+                                   doc_ids: set) -> List[Dict]:
+        """Fetch consolidated analysis summaries for relevant documents."""
+        try:
+            # If we have specific doc_ids, use them; otherwise search by query
+            if doc_ids:
+                placeholders = ", ".join([f":did{i}" for i in range(len(doc_ids))])
+                params = {f"did{i}": did for i, did in enumerate(doc_ids)}
+                params["tid"] = tenant_id
+                sql = f"""
+                    SELECT ca.document_id, d.filename, ca.data
+                    FROM consolidated_analyses ca
+                    JOIN documents d ON ca.document_id = d.id
+                    WHERE ca.tenant_id = :tid
+                      AND ca.document_id IN ({placeholders})
+                    LIMIT 3
+                """
+            else:
+                # Fall back to searching documents matching the query
+                params = {"tid": tenant_id, "q": f"%{query[:100]}%"}
+                sql = """
+                    SELECT ca.document_id, d.filename, ca.data
+                    FROM consolidated_analyses ca
+                    JOIN documents d ON ca.document_id = d.id
+                    WHERE ca.tenant_id = :tid
+                      AND d.filename ILIKE :q
+                    LIMIT 3
+                """
+            rows = db.execute(sql_text(sql), params).fetchall()
+            results = []
+            for row in rows:
+                data = row[2] if row[2] else {}
+                # Extract key summary from JSONB data
+                summary = self._extract_analysis_summary(data)
+                results.append({
+                    "document_id": row[0],
+                    "document_name": row[1] or "Unknown Document",
+                    "summary": summary,
+                })
+            return results
+        except Exception as e:
+            logger.warning(f"RAG analysis summary fetch failed: {e}")
+            return []
+
+    def _extract_analysis_summary(self, data: Any) -> str:
+        """Extract a concise summary from consolidated analysis JSONB data."""
+        if not data:
+            return ""
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                return data[:500]
+        if isinstance(data, dict):
+            parts = []
+            # Look for common summary keys in the analysis data
+            for key in ("executive_summary", "summary", "overview", "key_findings",
+                        "document_type", "purpose", "scope"):
+                val = data.get(key)
+                if val:
+                    if isinstance(val, str):
+                        parts.append(f"{key}: {val[:200]}")
+                    elif isinstance(val, list):
+                        items = ", ".join(str(v)[:50] for v in val[:5])
+                        parts.append(f"{key}: {items}")
+            if parts:
+                return "; ".join(parts)[:500]
+            # Fallback: serialize first 500 chars of JSON
+            return json.dumps(data, default=str)[:500]
+        return str(data)[:500]
+
+    # ------------------------------------------------------------------
+    # Stage 4 helper (enhanced)
+    # ------------------------------------------------------------------
+
     def _fetch_document_segments(self, db: Session, tenant_id: int, query: str,
                                   context_type: str, context_id: Optional[int]) -> List[Dict]:
-        """Fetch relevant document segments via text search."""
+        """Fetch relevant document segments with relevance scoring."""
         try:
             conditions = ["ds.tenant_id = :tid"]
             params: Dict[str, Any] = {"tid": tenant_id, "lim": 5}
 
-            # Scope to specific document if context_type is "document"
             if context_type == "document" and context_id:
                 conditions.append("ds.document_id = :did")
                 params["did"] = context_id
 
-            # Text match in segment content
             conditions.append("(ds.content ILIKE :q OR ds.title ILIKE :q)")
             params["q"] = f"%{query[:100]}%"
+            params["q_exact"] = query[:100]
 
             where = " AND ".join(conditions)
+            # Relevance scoring: title exact > title partial > content match
             sql = f"""
-                SELECT ds.id, ds.title, ds.content, ds.document_id
+                SELECT ds.id, ds.title, ds.content, ds.document_id,
+                    CASE
+                        WHEN ds.title ILIKE :q_exact THEN 3
+                        WHEN ds.title ILIKE :q THEN 2
+                        ELSE 1
+                    END AS relevance
                 FROM document_segments ds
                 WHERE {where}
-                ORDER BY ds.id DESC
+                ORDER BY relevance DESC, ds.id DESC
                 LIMIT :lim
             """
             rows = db.execute(sql_text(sql), params).fetchall()
             return [
-                {"id": row[0], "title": row[1] or "Segment", "text": (row[2] or "")[:500], "document_id": row[3]}
+                {
+                    "id": row[0],
+                    "title": row[1] or "Segment",
+                    "text": (row[2] or "")[:500],
+                    "document_id": row[3],
+                    "relevance": row[4],
+                }
                 for row in rows
             ]
         except Exception as e:
             logger.warning(f"RAG document segment fetch failed: {e}")
             return []
 
+    # ------------------------------------------------------------------
+    # Stage 5 helper (enhanced)
+    # ------------------------------------------------------------------
+
     def _fetch_code_summaries(self, db: Session, tenant_id: int, query: str,
                                context_type: str, context_id: Optional[int]) -> List[Dict]:
-        """Fetch code component summaries relevant to the query."""
+        """Fetch code component summaries with structured_analysis JSONB."""
         try:
             conditions = ["cc.tenant_id = :tid", "cc.summary IS NOT NULL"]
             params: Dict[str, Any] = {"tid": tenant_id, "lim": 5}
@@ -232,19 +442,88 @@ class RAGService:
 
             where = " AND ".join(conditions)
             sql = f"""
-                SELECT cc.id, cc.name, cc.summary, cc.location
+                SELECT cc.id, cc.name, cc.summary, cc.location, cc.structured_analysis
                 FROM code_components cc
                 WHERE {where}
                 ORDER BY cc.id DESC
                 LIMIT :lim
             """
             rows = db.execute(sql_text(sql), params).fetchall()
+            results = []
+            for row in rows:
+                structured_summary = self._extract_structured_analysis(row[4])
+                results.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "summary": (row[2] or "")[:400],
+                    "location": row[3],
+                    "structured_analysis_summary": structured_summary,
+                })
+            return results
+        except Exception as e:
+            logger.warning(f"RAG code summary fetch failed: {e}")
+            return []
+
+    def _extract_structured_analysis(self, data: Any) -> str:
+        """Extract key elements from code component structured_analysis JSONB."""
+        if not data:
+            return ""
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                return ""
+        if isinstance(data, dict):
+            parts = []
+            for key in ("functions", "classes", "endpoints", "imports", "exports"):
+                val = data.get(key)
+                if val and isinstance(val, list):
+                    names = [v.get("name", str(v)) if isinstance(v, dict) else str(v) for v in val[:5]]
+                    parts.append(f"{key}: {', '.join(names)}")
+            return "; ".join(parts)[:200] if parts else ""
+        return ""
+
+    # ------------------------------------------------------------------
+    # Stage 6 helper
+    # ------------------------------------------------------------------
+
+    def _fetch_requirement_traces(self, db: Session, tenant_id: int, doc_ids: set) -> List[Dict]:
+        """Fetch requirement traces for documents found in earlier stages."""
+        if not doc_ids:
+            return []
+        try:
+            placeholders = ", ".join([f":did{i}" for i in range(len(doc_ids))])
+            params = {f"did{i}": did for i, did in enumerate(doc_ids)}
+            params["tid"] = tenant_id
+
+            sql = f"""
+                SELECT rt.requirement_key, rt.requirement_text, rt.coverage_status,
+                       rt.validation_status, rt.document_id
+                FROM requirement_traces rt
+                WHERE rt.tenant_id = :tid
+                  AND rt.document_id IN ({placeholders})
+                ORDER BY CASE rt.coverage_status
+                    WHEN 'contradicted' THEN 1
+                    WHEN 'not_covered' THEN 2
+                    WHEN 'partially_covered' THEN 3
+                    WHEN 'fully_covered' THEN 4
+                    ELSE 5
+                END
+                LIMIT 10
+            """
+            rows = db.execute(sql_text(sql), params).fetchall()
             return [
-                {"id": row[0], "name": row[1], "summary": (row[2] or "")[:400], "location": row[3]}
+                {
+                    "requirement_key": row[0],
+                    "requirement_text": (row[1] or "")[:150],
+                    "coverage_status": row[2],
+                    "validation_status": row[3],
+                    "document_id": row[4],
+                }
                 for row in rows
             ]
         except Exception as e:
-            logger.warning(f"RAG code summary fetch failed: {e}")
+            logger.warning(f"RAG requirement trace fetch failed: {e}")
             return []
 
     async def generate_answer(
