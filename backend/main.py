@@ -21,6 +21,7 @@ from app.api.endpoints import (
     audit, notifications, exports,  # SPRINT 5: Audit Trail, Notifications, Exports
     search,  # SPRINT 5: Unified Semantic Search
     approvals,  # SPRINT 6: Approval Workflow
+    chat,  # SPRINT 7: RAG/Chat Assistant
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -402,6 +403,13 @@ app.include_router(
     approvals.router,
     prefix=f"/api/{settings.API_VERSION}/approvals",
     tags=["Approvals"]
+)
+
+# SPRINT 7: RAG/Chat Assistant
+app.include_router(
+    chat.router,
+    prefix=f"/api/{settings.API_VERSION}/chat",
+    tags=["Chat"]
 )
 
 # --- Startup Event (Legacy support) ---

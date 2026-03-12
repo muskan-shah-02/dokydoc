@@ -39,3 +39,6 @@ from .crud_notification import notification
 
 # Sprint 6: Approval Workflow
 from .crud_approval import approval
+
+# Sprint 7: RAG/Chat Assistant
+from .crud_conversation import conversation, chat_message

@@ -22,3 +22,4 @@ from .requirement_trace import RequirementTrace  # BRD-to-Code traceability
 from .audit_log import AuditLog  # Sprint 5: Audit Trail
 from .notification import Notification  # Sprint 5: Notifications
 from .approval import Approval  # Sprint 6: Approval Workflow
+from .conversation import Conversation, ChatMessage  # Sprint 7: RAG/Chat Assistant
