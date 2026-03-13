@@ -31,6 +31,7 @@ import {
   Code,
   AlertTriangle,
   Info,
+  Sparkles,
 } from "lucide-react";
 
 interface HeaderProps {
@@ -93,7 +94,10 @@ export function Header({ onMenuToggle }: HeaderProps) {
           </div>
           <div className="hidden md:block">
             <div className="flex items-center space-x-2">
-              <h1 className="text-lg font-bold text-gray-900">DokyDoc</h1>
+              <h1 className="text-lg font-bold text-gray-900">
+                DokyDoc
+                <span className="ml-1 text-[10px] font-medium text-purple-500 bg-purple-50 px-1.5 py-0.5 rounded-full align-middle">+ AskyDoc</span>
+              </h1>
               {tenant && (
                 <>
                   <span className="text-gray-400">|</span>
@@ -123,6 +127,15 @@ export function Header({ onMenuToggle }: HeaderProps) {
             </span>
           </div>
         )}
+
+        {/* AskyDoc Quick Access */}
+        <Link
+          href="/dashboard/chat"
+          className="relative rounded-lg p-2 hover:bg-purple-50 transition-colors group"
+          title="AskyDoc AI Assistant"
+        >
+          <Sparkles className="h-5 w-5 text-purple-500 group-hover:text-purple-600" />
+        </Link>
 
         {/* Notification Bell */}
         <div className="relative" ref={bellRef}>

@@ -1,13 +1,16 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import {
   MessageCircle,
   Plus,
   Send,
   Loader2,
   Trash2,
-  ChevronLeft,
   Bot,
   User,
   Sparkles,
@@ -15,23 +18,41 @@ import {
   Code,
   Brain,
   FolderKanban,
-  Info,
   PanelLeftClose,
   PanelLeftOpen,
+  ThumbsUp,
+  ThumbsDown,
+  Search,
+  ChevronDown,
+  Zap,
+  ExternalLink,
+  Download,
+  Copy,
+  Check,
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+// --- Types ---
 
 interface Conversation {
   id: number;
   title: string;
   context_type: string;
   context_id: number | null;
+  model_preference: string;
   message_count: number;
   total_tokens: number;
   total_cost_usd: number;
   created_at: string;
   updated_at: string | null;
+}
+
+interface Citation {
+  citation_type: string;
+  name: string;
+  entity_id: number | null;
+  entity_type: string | null;
 }
 
 interface ChatMessage {
@@ -44,8 +65,16 @@ interface ChatMessage {
   output_tokens: number;
   cost_usd: number;
   model_used: string | null;
+  feedback_rating: number | null;
   created_at: string;
 }
+
+interface SuggestedPrompt {
+  text: string;
+  category: string;
+}
+
+// --- Helpers ---
 
 function getHeaders() {
   const token = localStorage.getItem("accessToken");
@@ -62,7 +91,42 @@ const CONTEXT_ICONS: Record<string, React.ElementType> = {
   initiative: FolderKanban,
 };
 
+const CONTEXT_LABELS: Record<string, string> = {
+  general: "General",
+  document: "Document",
+  repository: "Repository",
+  initiative: "Initiative",
+};
+
+const MODEL_OPTIONS = [
+  { value: "gemini", label: "Gemini 2.5 Flash", subtitle: "Fast", cost: "~$0.001/query" },
+  { value: "claude", label: "Claude Sonnet", subtitle: "Deep Reasoning", cost: "~$0.01/query" },
+  { value: "auto", label: "Auto", subtitle: "Smart Routing", cost: "varies" },
+];
+
+function getCitationUrl(citation: Citation): string | null {
+  if (!citation.entity_id) return null;
+  switch (citation.citation_type) {
+    case "document": return `/dashboard/documents?highlight=${citation.entity_id}`;
+    case "code": return `/dashboard/code?highlight=${citation.entity_id}`;
+    case "concept": return `/dashboard/ontology?concept=${citation.entity_id}`;
+    default: return null;
+  }
+}
+
+// --- Query Plan Steps ---
+
+const QUERY_STEPS = [
+  "Analyzing query...",
+  "Searching knowledge base...",
+  "Retrieving relevant context...",
+  "Synthesizing answer...",
+];
+
+// --- Main Component ---
+
 export default function ChatPage() {
+  const searchParams = useSearchParams();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -70,14 +134,22 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [suggestedPrompts, setSuggestedPrompts] = useState<SuggestedPrompt[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
+  const [queryStep, setQueryStep] = useState(0);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
-  // Load conversations
+  // --- Data Loading ---
+
   const loadConversations = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/chat/conversations?limit=50`, { headers: getHeaders() });
@@ -91,7 +163,6 @@ export default function ChatPage() {
     }
   }, []);
 
-  // Load messages for a conversation
   const loadMessages = useCallback(async (convId: number) => {
     try {
       const res = await fetch(`${API_BASE}/chat/conversations/${convId}/messages?limit=200`, {
@@ -106,23 +177,71 @@ export default function ChatPage() {
     }
   }, [scrollToBottom]);
 
-  useEffect(() => {
-    loadConversations();
+  const loadSuggestedPrompts = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/chat/suggested-prompts`, { headers: getHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      setSuggestedPrompts(data.prompts || []);
+    } catch (e) {
+      console.error("Failed to load suggested prompts:", e);
+    }
+  }, []);
+
+  const searchConversations = useCallback(async (q: string) => {
+    if (!q.trim()) {
+      loadConversations();
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/chat/conversations/search?q=${encodeURIComponent(q)}&limit=20`,
+        { headers: getHeaders() }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setConversations(data.conversations || []);
+    } catch (e) {
+      console.error("Failed to search conversations:", e);
+    }
   }, [loadConversations]);
 
   useEffect(() => {
-    if (activeConv) {
-      loadMessages(activeConv.id);
-    }
+    loadConversations();
+    loadSuggestedPrompts();
+  }, [loadConversations, loadSuggestedPrompts]);
+
+  useEffect(() => {
+    if (activeConv) loadMessages(activeConv.id);
   }, [activeConv, loadMessages]);
 
-  // Create new conversation
-  const createConversation = async () => {
+  // Handle URL params for contextual entry (e.g., /chat?doc=123)
+  useEffect(() => {
+    const docId = searchParams.get("doc");
+    const repoId = searchParams.get("repo");
+    const conceptId = searchParams.get("concept");
+
+    if (docId || repoId || conceptId) {
+      const contextType = docId ? "document" : repoId ? "repository" : "initiative";
+      const contextId = parseInt(docId || repoId || conceptId || "0");
+      createConversation(contextType, contextId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Actions ---
+
+  const createConversation = async (contextType: string = "general", contextId?: number) => {
     try {
       const res = await fetch(`${API_BASE}/chat/conversations`, {
         method: "POST",
         headers: getHeaders(),
-        body: JSON.stringify({ title: "New Conversation", context_type: "general" }),
+        body: JSON.stringify({
+          title: "New Conversation",
+          context_type: contextType,
+          context_id: contextId || null,
+          model_preference: "auto",
+        }),
       });
       if (!res.ok) return;
       const conv = await res.json();
@@ -135,7 +254,6 @@ export default function ChatPage() {
     }
   };
 
-  // Delete conversation
   const deleteConversation = async (convId: number) => {
     try {
       await fetch(`${API_BASE}/chat/conversations/${convId}`, {
@@ -152,19 +270,99 @@ export default function ChatPage() {
     }
   };
 
-  // Send message
+  const updateModelPreference = async (model: string) => {
+    if (!activeConv) return;
+    try {
+      const res = await fetch(`${API_BASE}/chat/conversations/${activeConv.id}/model`, {
+        method: "PUT",
+        headers: getHeaders(),
+        body: JSON.stringify({ model_preference: model }),
+      });
+      if (!res.ok) return;
+      const updated = await res.json();
+      setActiveConv(updated);
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+    } catch (e) {
+      console.error("Failed to update model:", e);
+    }
+    setModelDropdownOpen(false);
+  };
+
+  const submitFeedback = async (messageId: number, rating: number) => {
+    try {
+      await fetch(`${API_BASE}/chat/messages/${messageId}/feedback?rating=${rating}`, {
+        method: "POST",
+        headers: getHeaders(),
+      });
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, feedback_rating: rating } : m))
+      );
+    } catch (e) {
+      console.error("Failed to submit feedback:", e);
+    }
+  };
+
+  const exportConversation = async (convId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/chat/conversations/${convId}/export?format=json`, {
+        headers: getHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `conversation-${convId}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Failed to export:", e);
+    }
+  };
+
+  const copyMessage = async (content: string, msgId: number) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedId(msgId);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (e) {
+      console.error("Failed to copy:", e);
+    }
+  };
+
+  // Query plan animation during sending
+  useEffect(() => {
+    if (!sending) {
+      setQueryStep(0);
+      return;
+    }
+    let step = 0;
+    setQueryStep(0);
+    const interval = setInterval(() => {
+      step++;
+      if (step < QUERY_STEPS.length) {
+        setQueryStep(step);
+      }
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [sending]);
+
   const sendMessage = async () => {
     if (!input.trim() || sending) return;
 
     let conv = activeConv;
 
-    // Auto-create conversation if none active
     if (!conv) {
       try {
         const res = await fetch(`${API_BASE}/chat/conversations`, {
           method: "POST",
           headers: getHeaders(),
-          body: JSON.stringify({ title: "New Conversation", context_type: "general" }),
+          body: JSON.stringify({
+            title: "New Conversation",
+            context_type: "general",
+            model_preference: "auto",
+          }),
         });
         if (!res.ok) return;
         conv = await res.json();
@@ -180,7 +378,6 @@ export default function ChatPage() {
     setInput("");
     setSending(true);
 
-    // Optimistic user message
     const optimisticMsg: ChatMessage = {
       id: Date.now(),
       conversation_id: conv!.id,
@@ -191,6 +388,7 @@ export default function ChatPage() {
       output_tokens: 0,
       cost_usd: 0,
       model_used: null,
+      feedback_rating: null,
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimisticMsg]);
@@ -205,7 +403,6 @@ export default function ChatPage() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Failed to send message" }));
-        // Replace optimistic with error
         setMessages((prev) => [
           ...prev.filter((m) => m.id !== optimisticMsg.id),
           optimisticMsg,
@@ -221,14 +418,12 @@ export default function ChatPage() {
 
       const data = await res.json();
 
-      // Replace optimistic message with real ones
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== optimisticMsg.id),
         data.user_message,
         data.assistant_message,
       ]);
 
-      // Update conversation in sidebar
       setConversations((prev) =>
         prev.map((c) =>
           c.id === conv!.id
@@ -267,6 +462,23 @@ export default function ChatPage() {
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
+  const filteredConversations = searchQuery.trim()
+    ? conversations
+    : conversations;
+
+  const currentModel = MODEL_OPTIONS.find((m) => m.value === (activeConv?.model_preference || "auto"));
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   return (
     <div className="flex h-[calc(100vh-4rem)] bg-gray-50">
       {/* Conversation Sidebar */}
@@ -278,16 +490,33 @@ export default function ChatPage() {
         {/* Sidebar Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-100">
           <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-            <MessageCircle className="h-5 w-5 text-blue-600" />
-            Conversations
+            <Sparkles className="h-5 w-5 text-purple-600" />
+            AskyDoc
           </h2>
           <button
-            onClick={createConversation}
-            className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+            onClick={() => createConversation()}
+            className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
             title="New conversation"
           >
             <Plus className="h-5 w-5" />
           </button>
+        </div>
+
+        {/* Conversation Search */}
+        <div className="px-3 py-2 border-b border-gray-100">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search conversations..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                searchConversations(e.target.value);
+              }}
+              className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent placeholder-gray-400"
+            />
+          </div>
         </div>
 
         {/* Conversation List */}
@@ -297,25 +526,25 @@ export default function ChatPage() {
               <Loader2 className="h-5 w-5 animate-spin mr-2" />
               Loading...
             </div>
-          ) : conversations.length === 0 ? (
+          ) : filteredConversations.length === 0 ? (
             <div className="p-8 text-center text-gray-400 text-sm">
-              No conversations yet. Start a new one!
+              {searchQuery ? "No matching conversations." : "No conversations yet. Start a new one!"}
             </div>
           ) : (
-            conversations.map((conv) => {
+            filteredConversations.map((conv) => {
               const isActive = activeConv?.id === conv.id;
               const CtxIcon = CONTEXT_ICONS[conv.context_type] || Brain;
               return (
                 <div
                   key={conv.id}
                   className={`group flex items-center px-4 py-3 cursor-pointer border-b border-gray-50 transition-colors ${
-                    isActive ? "bg-blue-50 border-l-2 border-l-blue-500" : "hover:bg-gray-50"
+                    isActive ? "bg-purple-50 border-l-2 border-l-purple-500" : "hover:bg-gray-50"
                   }`}
                   onClick={() => setActiveConv(conv)}
                 >
-                  <CtxIcon className={`h-4 w-4 flex-shrink-0 mr-3 ${isActive ? "text-blue-600" : "text-gray-400"}`} />
+                  <CtxIcon className={`h-4 w-4 flex-shrink-0 mr-3 ${isActive ? "text-purple-600" : "text-gray-400"}`} />
                   <div className="flex-1 min-w-0">
-                    <p className={`text-sm font-medium truncate ${isActive ? "text-blue-700" : "text-gray-700"}`}>
+                    <p className={`text-sm font-medium truncate ${isActive ? "text-purple-700" : "text-gray-700"}`}>
                       {conv.title || "New Conversation"}
                     </p>
                     <p className="text-xs text-gray-400 mt-0.5">
@@ -349,19 +578,107 @@ export default function ChatPage() {
           >
             {sidebarOpen ? <PanelLeftClose className="h-5 w-5" /> : <PanelLeftOpen className="h-5 w-5" />}
           </button>
+
           {activeConv ? (
-            <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-semibold text-gray-800 truncate">
-                {activeConv.title}
-              </h3>
-              <p className="text-xs text-gray-400">
-                {activeConv.message_count} messages &middot; {activeConv.total_tokens.toLocaleString()} tokens
-                {activeConv.total_cost_usd > 0 && ` \u00b7 $${activeConv.total_cost_usd.toFixed(4)}`}
-              </p>
-            </div>
+            <>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-gray-800 truncate">
+                    {activeConv.title}
+                  </h3>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                    {CONTEXT_LABELS[activeConv.context_type] || "General"}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400">
+                  {activeConv.message_count} messages &middot; {activeConv.total_tokens.toLocaleString()} tokens
+                  {activeConv.total_cost_usd > 0 && ` \u00b7 $${activeConv.total_cost_usd.toFixed(4)}`}
+                </p>
+              </div>
+
+              {/* Model Selector Dropdown */}
+              <div className="relative ml-3" ref={modelDropdownRef}>
+                <button
+                  onClick={() => setModelDropdownOpen(!modelDropdownOpen)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                >
+                  <Zap className="h-3.5 w-3.5 text-purple-500" />
+                  <span className="font-medium">{currentModel?.label || "Auto"}</span>
+                  <ChevronDown className={`h-3 w-3 text-gray-400 transition-transform ${modelDropdownOpen ? "rotate-180" : ""}`} />
+                </button>
+
+                {modelDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                    <div className="p-2 border-b border-gray-100">
+                      <p className="text-xs font-semibold text-gray-500 px-2">AI Model</p>
+                    </div>
+                    {MODEL_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => updateModelPreference(opt.value)}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 text-sm hover:bg-gray-50 transition-colors ${
+                          activeConv.model_preference === opt.value ? "bg-purple-50" : ""
+                        }`}
+                      >
+                        <div>
+                          <p className={`font-medium ${activeConv.model_preference === opt.value ? "text-purple-700" : "text-gray-700"}`}>
+                            {opt.label}
+                          </p>
+                          <p className="text-xs text-gray-400">{opt.subtitle}</p>
+                        </div>
+                        <span className="text-xs text-gray-400">{opt.cost}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Context Type Selector */}
+              <div className="relative ml-2">
+                <button
+                  onClick={() => setContextDropdownOpen(!contextDropdownOpen)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                >
+                  {React.createElement(CONTEXT_ICONS[activeConv.context_type] || Brain, { className: "h-3.5 w-3.5 text-gray-500" })}
+                  <span className="font-medium">{CONTEXT_LABELS[activeConv.context_type]}</span>
+                </button>
+
+                {contextDropdownOpen && (
+                  <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                    {Object.entries(CONTEXT_LABELS).map(([key, label]) => {
+                      const Icon = CONTEXT_ICONS[key] || Brain;
+                      return (
+                        <button
+                          key={key}
+                          onClick={() => setContextDropdownOpen(false)}
+                          className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 ${
+                            activeConv.context_type === key ? "bg-purple-50 text-purple-700" : "text-gray-700"
+                          }`}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Export */}
+              <button
+                onClick={() => exportConversation(activeConv.id)}
+                className="ml-2 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                title="Export conversation"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+            </>
           ) : (
             <div className="flex-1">
-              <h3 className="text-sm font-semibold text-gray-800">DokyDoc AI Assistant</h3>
+              <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-purple-500" />
+                AskyDoc
+              </h3>
               <p className="text-xs text-gray-400">Ask questions about your documents, code, and knowledge graphs</p>
             </div>
           )}
@@ -371,30 +688,33 @@ export default function ChatPage() {
         <div className="flex-1 overflow-y-auto px-4 py-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center mb-4">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center mb-4">
                 <Sparkles className="h-8 w-8 text-white" />
               </div>
-              <h3 className="text-xl font-semibold text-gray-800 mb-2">DokyDoc AI Assistant</h3>
+              <h3 className="text-xl font-semibold text-gray-800 mb-2">AskyDoc</h3>
               <p className="text-gray-500 max-w-md mb-6">
-                Ask questions about your documents, code repositories, and business knowledge graphs.
-                I use RAG to find relevant context from your knowledge base.
+                Your AI assistant for documents, code repositories, and business knowledge graphs.
+                Powered by RAG with role-aware intelligence.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg">
-                {[
-                  "What are the main business concepts in my knowledge base?",
-                  "Summarize the authentication architecture in my code",
-                  "What documents mention billing or payment?",
-                  "What are the relationships between my top concepts?",
-                ].map((suggestion) => (
+                {(suggestedPrompts.length > 0
+                  ? suggestedPrompts.slice(0, 4)
+                  : [
+                      { text: "What are the main business concepts in my knowledge base?", category: "general" },
+                      { text: "Summarize the authentication architecture in my code", category: "technical" },
+                      { text: "What documents mention billing or payment?", category: "document" },
+                      { text: "What are the relationships between my top concepts?", category: "ontology" },
+                    ]
+                ).map((prompt) => (
                   <button
-                    key={suggestion}
+                    key={prompt.text}
                     onClick={() => {
-                      setInput(suggestion);
+                      setInput(prompt.text);
                       inputRef.current?.focus();
                     }}
-                    className="text-left text-sm px-4 py-3 rounded-xl border border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition-colors"
+                    className="text-left text-sm px-4 py-3 rounded-xl border border-gray-200 text-gray-600 hover:bg-purple-50 hover:border-purple-200 hover:text-purple-700 transition-colors"
                   >
-                    {suggestion}
+                    {prompt.text}
                   </button>
                 ))}
               </div>
@@ -407,43 +727,139 @@ export default function ChatPage() {
                   className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   {msg.role === "assistant" && (
-                    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center">
                       <Bot className="h-4 w-4 text-white" />
                     </div>
                   )}
                   <div
                     className={`max-w-[80%] rounded-2xl px-4 py-3 ${
                       msg.role === "user"
-                        ? "bg-blue-600 text-white"
+                        ? "bg-purple-600 text-white"
                         : "bg-white border border-gray-200 text-gray-800"
                     }`}
                   >
-                    <div className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-                      {msg.content}
-                    </div>
+                    {msg.role === "assistant" ? (
+                      <div className="text-sm prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-a:text-purple-600 prose-code:text-purple-700 prose-code:bg-purple-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
+                        <ReactMarkdown
+                          components={{
+                            code({ className, children, ...props }) {
+                              const match = /language-(\w+)/.exec(className || "");
+                              const codeString = String(children).replace(/\n$/, "");
+                              if (match) {
+                                return (
+                                  <SyntaxHighlighter
+                                    style={oneLight}
+                                    language={match[1]}
+                                    PreTag="div"
+                                    className="rounded-lg text-xs !my-2"
+                                  >
+                                    {codeString}
+                                  </SyntaxHighlighter>
+                                );
+                              }
+                              return (
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
+                              );
+                            },
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <div className="text-sm whitespace-pre-wrap break-words leading-relaxed">
+                        {msg.content}
+                      </div>
+                    )}
+
+                    {/* Source Citations */}
                     {msg.role === "assistant" && msg.context_used && (
-                      <div className="mt-2 pt-2 border-t border-gray-100 flex items-center gap-3 text-xs text-gray-400">
-                        {msg.context_used.concept_count > 0 && (
-                          <span className="flex items-center gap-1">
-                            <Brain className="h-3 w-3" />
-                            {msg.context_used.concept_count} concepts
-                          </span>
-                        )}
-                        {msg.context_used.document_segment_count > 0 && (
-                          <span className="flex items-center gap-1">
-                            <FileText className="h-3 w-3" />
-                            {msg.context_used.document_segment_count} docs
-                          </span>
-                        )}
-                        {msg.context_used.code_summary_count > 0 && (
-                          <span className="flex items-center gap-1">
-                            <Code className="h-3 w-3" />
-                            {msg.context_used.code_summary_count} files
-                          </span>
-                        )}
-                        {msg.model_used && (
-                          <span className="ml-auto">{msg.model_used}</span>
-                        )}
+                      <div className="mt-2 pt-2 border-t border-gray-100">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                          {msg.context_used.concept_count > 0 && (
+                            <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-purple-50 text-purple-600">
+                              <Brain className="h-3 w-3" />
+                              {msg.context_used.concept_count} concepts
+                            </span>
+                          )}
+                          {msg.context_used.document_segment_count > 0 && (
+                            <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-blue-50 text-blue-600">
+                              <FileText className="h-3 w-3" />
+                              {msg.context_used.document_segment_count} docs
+                            </span>
+                          )}
+                          {msg.context_used.code_summary_count > 0 && (
+                            <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-green-50 text-green-600">
+                              <Code className="h-3 w-3" />
+                              {msg.context_used.code_summary_count} files
+                            </span>
+                          )}
+                          {/* Clickable citation chips */}
+                          {msg.context_used.citations?.map((c: Citation, i: number) => {
+                            const url = getCitationUrl(c);
+                            return url ? (
+                              <a
+                                key={i}
+                                href={url}
+                                className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-purple-100 hover:text-purple-700 transition-colors"
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                                {c.name}
+                              </a>
+                            ) : null;
+                          })}
+                        </div>
+
+                        {/* Model + cost info */}
+                        <div className="flex items-center justify-between mt-2 text-xs text-gray-400">
+                          {msg.model_used && (
+                            <span className="flex items-center gap-1">
+                              <Zap className="h-3 w-3" />
+                              {msg.model_used}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Feedback + Copy buttons for assistant messages */}
+                    {msg.role === "assistant" && (
+                      <div className="flex items-center gap-1 mt-2 pt-1">
+                        <button
+                          onClick={() => submitFeedback(msg.id, msg.feedback_rating === 1 ? 0 : 1)}
+                          className={`p-1.5 rounded-lg transition-colors ${
+                            msg.feedback_rating === 1
+                              ? "text-green-600 bg-green-50"
+                              : "text-gray-300 hover:text-green-500 hover:bg-green-50"
+                          }`}
+                          title="Helpful"
+                        >
+                          <ThumbsUp className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => submitFeedback(msg.id, msg.feedback_rating === -1 ? 0 : -1)}
+                          className={`p-1.5 rounded-lg transition-colors ${
+                            msg.feedback_rating === -1
+                              ? "text-red-600 bg-red-50"
+                              : "text-gray-300 hover:text-red-500 hover:bg-red-50"
+                          }`}
+                          title="Not helpful"
+                        >
+                          <ThumbsDown className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => copyMessage(msg.content, msg.id)}
+                          className="p-1.5 rounded-lg text-gray-300 hover:text-gray-500 hover:bg-gray-100 transition-colors ml-1"
+                          title="Copy"
+                        >
+                          {copiedId === msg.id ? (
+                            <Check className="h-3.5 w-3.5 text-green-500" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                        </button>
                       </div>
                     )}
                   </div>
@@ -454,15 +870,36 @@ export default function ChatPage() {
                   )}
                 </div>
               ))}
+
+              {/* Query Plan Animation */}
               {sending && (
                 <div className="flex gap-3 justify-start">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center">
                     <Bot className="h-4 w-4 text-white" />
                   </div>
                   <div className="bg-white border border-gray-200 rounded-2xl px-4 py-3">
-                    <div className="flex items-center gap-2 text-sm text-gray-500">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Searching knowledge base and generating response...
+                    <div className="space-y-2">
+                      {QUERY_STEPS.map((step, i) => (
+                        <div
+                          key={step}
+                          className={`flex items-center gap-2 text-sm transition-all duration-300 ${
+                            i < queryStep
+                              ? "text-green-600"
+                              : i === queryStep
+                              ? "text-purple-600"
+                              : "text-gray-300"
+                          }`}
+                        >
+                          {i < queryStep ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : i === queryStep ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <div className="h-3.5 w-3.5" />
+                          )}
+                          {step}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -481,9 +918,9 @@ export default function ChatPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about your documents, code, or knowledge graphs..."
+                placeholder="Ask AskyDoc about your documents, code, or knowledge graphs..."
                 rows={1}
-                className="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent placeholder-gray-400"
+                className="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent placeholder-gray-400"
                 style={{ maxHeight: "120px", minHeight: "44px" }}
                 onInput={(e) => {
                   const target = e.target as HTMLTextAreaElement;
@@ -496,13 +933,13 @@ export default function ChatPage() {
             <button
               onClick={sendMessage}
               disabled={!input.trim() || sending}
-              className="flex-shrink-0 p-3 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              className="flex-shrink-0 p-3 rounded-xl bg-purple-600 text-white hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
             >
               {sending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
             </button>
           </div>
           <p className="text-center text-xs text-gray-400 mt-2">
-            Answers are generated using RAG from your knowledge base. Press Shift+Enter for new line.
+            AskyDoc uses RAG from your knowledge base. Press Shift+Enter for new line.
           </p>
         </div>
       </div>

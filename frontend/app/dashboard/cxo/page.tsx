@@ -36,6 +36,7 @@ import {
   BarChart3,
   ArrowUpRight,
   RefreshCw,
+  Sparkles,
 } from "lucide-react";
 
 export default function CXODashboardPage() {
@@ -432,6 +433,28 @@ export default function CXODashboardPage() {
             <QuickActionButton href="/settings/billing" icon={<DollarSign className="h-5 w-5" />} label="View Billing" />
             <QuickActionButton href="/dashboard/documents" icon={<FileText className="h-5 w-5" />} label="View Documents" />
             <QuickActionButton href="/settings/organization" icon={<Shield className="h-5 w-5" />} label="Organization" />
+          </div>
+        </div>
+
+        {/* AskyDoc Widget */}
+        <div className="rounded-lg border bg-gradient-to-r from-purple-50 to-blue-50 p-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center">
+                <Sparkles className="h-5 w-5 text-white" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">AskyDoc</h2>
+                <p className="text-sm text-gray-500">Ask about costs, budgets, and business metrics</p>
+              </div>
+            </div>
+            <Link
+              href="/dashboard/chat"
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors"
+            >
+              <Sparkles className="h-4 w-4" />
+              Ask about costs
+            </Link>
           </div>
         </div>
       </div>

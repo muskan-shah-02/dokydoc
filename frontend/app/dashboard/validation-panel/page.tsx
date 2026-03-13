@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,7 @@ import {
   Users,
   Settings,
   Eye,
+  Sparkles,
 } from "lucide-react";
 import {
   Dialog,
@@ -334,12 +336,21 @@ export default function ValidationPanelPage() {
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/dashboard/chat"
+            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+          >
+            <Sparkles className="h-4 w-4" />
+            Explain mismatches
+          </Link>
         <Button variant="outline" onClick={fetchData} disabled={isLoading}>
           <RefreshCw
             className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
           />
           Refresh
         </Button>
+        </div>
       </div>
 
       {/* Statistics Cards */}

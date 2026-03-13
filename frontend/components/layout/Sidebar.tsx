@@ -44,6 +44,7 @@ import {
   Check,
   BrainCircuit,
   Search,
+  Sparkles,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -71,6 +72,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       icon: LayoutDashboard,
       text: "Dashboard",
       href: "/dashboard",
+    },
+    {
+      icon: Sparkles,
+      text: "AskyDoc",
+      href: "/dashboard/chat",
+      badge: "AI",
     },
     {
       icon: FileText,
@@ -224,6 +231,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
               {!isCollapsed && (
                 <span className="ml-2 text-xl font-bold text-gray-800">
                   DokyDoc
+                  <span className="ml-1.5 text-[10px] font-medium text-purple-500 bg-purple-50 px-1.5 py-0.5 rounded-full align-middle">+ AskyDoc</span>
                 </span>
               )}
             </Link>

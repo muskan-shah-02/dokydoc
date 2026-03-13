@@ -62,9 +62,11 @@ import {
   ChevronDown,
   FolderGit2,
   File,
+  Sparkles,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 // --- Types ---
 
@@ -609,6 +611,13 @@ export default function CodePage() {
           </div>
         </div>
         <div className="flex items-center space-x-2">
+          <Link
+            href="/dashboard/chat?repo=0"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+          >
+            <Sparkles className="w-4 h-4" />
+            Ask AI about code
+          </Link>
           <Button
             variant="outline"
             size="sm"

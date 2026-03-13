@@ -30,6 +30,7 @@ import {
   GitBranch,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import Link from "next/link";
 import { useProject } from "@/contexts/ProjectContext";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { ConceptDialog } from "@/components/ontology/ConceptDialog";
@@ -780,6 +781,13 @@ export default function OntologyDashboard() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/dashboard/chat?concept=0"
+            className="flex items-center gap-1.5 rounded-md border bg-purple-50 px-3 py-2 text-sm font-medium text-purple-600 hover:bg-purple-100 transition-colors"
+          >
+            <Sparkles className="h-4 w-4" />
+            Ask about concepts
+          </Link>
           <button onClick={handleRefresh} disabled={refreshing}
             className="flex items-center gap-1.5 rounded-md border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />

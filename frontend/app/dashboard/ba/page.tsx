@@ -28,6 +28,7 @@ import {
   Loader2,
   XCircle,
   FileUp,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -327,6 +328,11 @@ export default function BADashboardPage() {
               href="/tasks"
               icon={<Clock className="h-5 w-5" />}
               label="My Tasks"
+            />
+            <QuickActionButton
+              href="/dashboard/chat"
+              icon={<Sparkles className="h-5 w-5" />}
+              label="Ask about documents"
             />
           </div>
         </div>

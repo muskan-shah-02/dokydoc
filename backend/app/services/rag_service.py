@@ -121,7 +121,7 @@ class RetrievedContext:
 # -------------------------------------------------------------------
 
 class RAGService:
-    """Retrieval-Augmented Generation service for DokyDoc chat."""
+    """Retrieval-Augmented Generation service for AskyDoc chat."""
 
     MAX_CONTEXT_TOKENS = 8000  # Raised from 6000 for richer 6-stage context
 

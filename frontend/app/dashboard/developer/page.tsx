@@ -30,6 +30,7 @@ import {
   ArrowUpRight,
   RefreshCw,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -317,6 +318,11 @@ export default function DeveloperDashboardPage() {
                 href="/dashboard/documents"
                 icon={<GitBranch className="h-5 w-5" />}
                 label="View Docs"
+              />
+              <QuickActionButton
+                href="/dashboard/chat"
+                icon={<Sparkles className="h-5 w-5" />}
+                label="Ask about mismatches"
               />
             </div>
           </div>
