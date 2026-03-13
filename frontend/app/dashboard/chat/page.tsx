@@ -29,6 +29,10 @@ import {
   Download,
   Copy,
   Check,
+  BookOpen,
+  Settings,
+  ArrowRight,
+  Shield,
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
@@ -687,7 +691,7 @@ export default function ChatPage() {
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-6">
           {messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="flex flex-col items-center justify-center h-full text-center max-w-2xl mx-auto">
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center mb-4">
                 <Sparkles className="h-8 w-8 text-white" />
               </div>
@@ -696,7 +700,66 @@ export default function ChatPage() {
                 Your AI assistant for documents, code repositories, and business knowledge graphs.
                 Powered by RAG with role-aware intelligence.
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg">
+
+              {/* First-time onboarding card (shown when user has no conversations) */}
+              {conversations.length === 0 && !loading && (
+                <div className="w-full mb-6 rounded-xl border border-purple-200 bg-gradient-to-r from-purple-50 to-blue-50 p-5 text-left">
+                  <div className="flex items-start gap-3 mb-4">
+                    <BookOpen className="h-5 w-5 text-purple-600 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-800">Welcome to AskyDoc!</h4>
+                      <p className="text-xs text-gray-500 mt-1">
+                        AskyDoc searches your knowledge base — documents, code, and business concepts — to give you
+                        contextual, role-aware answers. Here&apos;s what you can do:
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                    <div className="flex items-start gap-2 text-left">
+                      <FileText className="h-4 w-4 text-blue-500 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs font-medium text-gray-700">Ask about documents</p>
+                        <p className="text-xs text-gray-400">PRDs, specs, requirements</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-2 text-left">
+                      <Code className="h-4 w-4 text-green-500 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs font-medium text-gray-700">Ask about code</p>
+                        <p className="text-xs text-gray-400">Architecture, components, patterns</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-2 text-left">
+                      <Brain className="h-4 w-4 text-purple-500 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs font-medium text-gray-700">Ask about concepts</p>
+                        <p className="text-xs text-gray-400">Business ontology, relationships</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Org profile prompt for CXO/Admin */}
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-white/60 border border-purple-100">
+                    <Shield className="h-4 w-4 text-purple-500 flex-shrink-0" />
+                    <p className="text-xs text-gray-600 flex-1">
+                      <span className="font-medium">CXO/Admin?</span> Set up your{" "}
+                      <a href="/settings/organization" className="text-purple-600 hover:text-purple-700 underline">
+                        org profile
+                      </a>{" "}
+                      for better, context-aware answers tailored to your organization.
+                    </p>
+                    <a
+                      href="/settings/organization"
+                      className="flex items-center gap-1 text-xs font-medium text-purple-600 hover:text-purple-700 whitespace-nowrap"
+                    >
+                      Set up <ArrowRight className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              {/* Suggested prompts */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg w-full">
                 {(suggestedPrompts.length > 0
                   ? suggestedPrompts.slice(0, 4)
                   : [

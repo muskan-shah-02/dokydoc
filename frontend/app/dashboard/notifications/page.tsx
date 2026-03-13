@@ -20,7 +20,9 @@ import {
   RefreshCw,
   Loader2,
   Inbox,
+  Sparkles,
 } from "lucide-react";
+import Link from "next/link";
 import { useNotifications } from "@/contexts/NotificationContext";
 
 function getNotificationIcon(type: string) {
@@ -138,6 +140,15 @@ export default function NotificationsPage() {
                       {getTypeBadge(n.type)}
                     </div>
                     <p className="text-sm text-gray-600">{n.message}</p>
+                    {n.type === "analysis_complete" && n.resource_id && (
+                      <Link
+                        href={`/dashboard/chat?${n.resource_type === "repository" ? "repo" : "doc"}=${n.resource_id}`}
+                        className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 text-xs font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Ask AskyDoc about it
+                      </Link>
+                    )}
                     {n.created_at && (
                       <p className="text-xs text-gray-400 mt-1">
                         {new Date(n.created_at).toLocaleString()}

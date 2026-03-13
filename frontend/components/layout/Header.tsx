@@ -196,6 +196,19 @@ export function Header({ onMenuToggle }: HeaderProps) {
                         <p className="text-xs text-gray-500 line-clamp-2 mt-0.5">
                           {n.message}
                         </p>
+                        {n.type === "analysis_complete" && n.resource_id && (
+                          <Link
+                            href={`/dashboard/chat?${n.resource_type === "repository" ? "repo" : "doc"}=${n.resource_id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setBellOpen(false);
+                            }}
+                            className="inline-flex items-center gap-1 mt-1 text-xs font-medium text-purple-600 hover:text-purple-700"
+                          >
+                            <Sparkles className="h-3 w-3" />
+                            Ask AskyDoc about it
+                          </Link>
+                        )}
                         {n.created_at && (
                           <p className="text-xs text-gray-400 mt-1">
                             {new Date(n.created_at).toLocaleString()}
