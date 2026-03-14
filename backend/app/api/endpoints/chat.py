@@ -23,7 +23,7 @@ import time
 from typing import Any, Optional, List
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc
 
@@ -244,6 +244,7 @@ def delete_conversation(
 @limiter.limit(CHAT_MESSAGE_RATE)
 async def send_message(
     request: Request,
+    response: Response,
     conversation_id: int,
     payload: ChatMessageCreate,
     tenant_id: int = Depends(deps.get_tenant_id),

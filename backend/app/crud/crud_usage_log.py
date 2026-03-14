@@ -574,7 +574,6 @@ class CRUDUsageLog:
         results = db.query(
             UsageLog.user_id,
             User.email,
-            User.full_name,
             func.count(UsageLog.id).label("total_calls"),
             func.coalesce(func.sum(UsageLog.input_tokens), 0).label("total_input_tokens"),
             func.coalesce(func.sum(UsageLog.output_tokens), 0).label("total_output_tokens"),
@@ -588,7 +587,7 @@ class CRUDUsageLog:
             UsageLog.created_at >= start,
             UsageLog.created_at <= end,
         ).group_by(
-            UsageLog.user_id, User.email, User.full_name
+            UsageLog.user_id, User.email
         ).order_by(desc("total_cost_inr")).all()
 
         summaries = []
@@ -597,7 +596,7 @@ class CRUDUsageLog:
             summaries.append({
                 "user_id": r.user_id,
                 "user_email": r.email or f"User #{r.user_id}" if r.user_id else "System/Unknown",
-                "user_name": r.full_name or "Unknown",
+                "user_name": r.email or "Unknown",
                 "total_calls": r.total_calls or 0,
                 "total_input_tokens": int(r.total_input_tokens or 0),
                 "total_output_tokens": int(r.total_output_tokens or 0),
@@ -640,7 +639,7 @@ class CRUDUsageLog:
         return {
             "user_id": user_id,
             "user_email": user.email if user else f"User #{user_id}",
-            "user_name": user.full_name if user else "Unknown",
+            "user_name": user.email if user else "Unknown",
             "total_calls": result.total_calls or 0,
             "total_input_tokens": int(result.total_input_tokens or 0),
             "total_output_tokens": int(result.total_output_tokens or 0),
