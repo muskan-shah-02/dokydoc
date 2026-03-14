@@ -157,6 +157,7 @@ class RAGService:
             )
         except Exception as e:
             logger.warning(f"RAG Stage 1 (concept search) failed: {e}")
+            db.rollback()
 
         concept_ids = [c["id"] for c in ctx.concepts[:10]] if ctx.concepts else []
 
@@ -258,6 +259,7 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG relationship expansion failed: {e}")
+            db.rollback()
             return []
 
     def _fetch_cross_graph_links(self, db: Session, tenant_id: int, concept_ids: List[int]) -> List[Dict]:
@@ -298,6 +300,7 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG cross-graph link fetch failed: {e}")
+            db.rollback()
             return []
 
     # ------------------------------------------------------------------
@@ -346,6 +349,7 @@ class RAGService:
             return results
         except Exception as e:
             logger.warning(f"RAG analysis summary fetch failed: {e}")
+            db.rollback()
             return []
 
     def _extract_analysis_summary(self, data: Any) -> str:
@@ -421,6 +425,7 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG document segment fetch failed: {e}")
+            db.rollback()
             return []
 
     # ------------------------------------------------------------------
@@ -463,6 +468,7 @@ class RAGService:
             return results
         except Exception as e:
             logger.warning(f"RAG code summary fetch failed: {e}")
+            db.rollback()
             return []
 
     def _extract_structured_analysis(self, data: Any) -> str:
@@ -525,6 +531,7 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG requirement trace fetch failed: {e}")
+            db.rollback()
             return []
 
     # ------------------------------------------------------------------
