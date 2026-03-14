@@ -10,6 +10,7 @@ CRITICAL SECURITY FEATURE:
 - Supports superuser override for debugging/support
 """
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from jose import jwt, JWTError
 
@@ -139,14 +140,20 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
             request.state.tenant_id = None
             request.state.is_tenant_override = False
 
-        except AuthenticationException:
-            # Re-raise authentication exceptions
-            raise
+        except AuthenticationException as e:
+            # Return 401 directly so CORSMiddleware can attach headers before responding
+            return JSONResponse(
+                status_code=401,
+                content={"detail": e.message if hasattr(e, "message") else str(e)},
+            )
 
         except Exception as e:
             # Unexpected errors in tenant context extraction
             logger.error(f"Unexpected error in tenant context middleware: {e}")
-            raise AuthenticationException("Failed to extract tenant context from request")
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Failed to extract tenant context from request"},
+            )
 
         # Continue with request processing
         response = await call_next(request)
