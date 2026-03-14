@@ -768,9 +768,9 @@ export default function ChatPage() {
                       { text: "What documents mention billing or payment?", category: "document" },
                       { text: "What are the relationships between my top concepts?", category: "ontology" },
                     ]
-                ).map((prompt) => (
+                ).map((prompt, index) => (
                   <button
-                    key={prompt.text}
+                    key={`prompt-${index}-${prompt.text}`}
                     onClick={() => {
                       setInput(prompt.text);
                       inputRef.current?.focus();
