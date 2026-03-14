@@ -864,7 +864,7 @@ export default function ChatPage() {
                             const url = getCitationUrl(c);
                             return url ? (
                               <a
-                                key={i}
+                                key={`${c.citation_type}-${c.entity_id ?? i}-${c.name}`}
                                 href={url}
                                 className="flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-purple-100 hover:text-purple-700 transition-colors"
                               >
