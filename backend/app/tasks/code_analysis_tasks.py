@@ -213,7 +213,19 @@ def static_analysis_worker(
             except Exception as ctx_err:
                 logger.warning(f"Context assembly failed (proceeding without): {ctx_err}")
 
-            if repo_name:
+            # Route markdown files to specialized documentation analysis
+            is_markdown = file_path.lower().endswith(".md")
+
+            if is_markdown:
+                analysis_result = _run_async(
+                    provider_router.analyze_markdown(
+                        code_content,
+                        repo_name=repo_name,
+                        file_path=file_path,
+                        tenant_id=tenant_id,
+                    )
+                )
+            elif repo_name:
                 # Enhanced analysis with business rules, API contracts, etc.
                 analysis_result = _run_async(
                     provider_router.analyze_code_enhanced(

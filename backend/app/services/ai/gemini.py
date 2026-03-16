@@ -292,6 +292,86 @@ class GeminiService(LoggerMixin):
             self.logger.error(f"Error in enhanced analysis for {file_path}: {e}")
             raise
 
+    async def call_gemini_for_markdown_analysis(
+        self, doc_content: str, repo_name: str = "", file_path: str = "",
+        tenant_id: int = None, user_id: int = None,
+    ) -> dict:
+        """
+        SPRINT 5: Specialized analysis for Markdown documentation files.
+        Extracts purpose, referenced code, business rules, architecture decisions,
+        and key concepts so they appear in the knowledge graph and RAG pipeline.
+        """
+        try:
+            self.logger.info(f"Markdown analysis for {file_path}")
+
+            prompt = prompt_manager.get_prompt(
+                PromptType.MARKDOWN_ANALYSIS,
+                repo_name=repo_name or "unknown",
+                file_path=file_path or "unknown",
+            )
+            full_prompt = f"{prompt}\n{doc_content}"
+
+            response = await self.generate_content(
+                full_prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation=f"markdown_analysis:{file_path}",
+            )
+            response_text = response.text
+            tokens = self.extract_token_usage(response)
+
+            try:
+                analysis_data = json.loads(response_text)
+            except json.JSONDecodeError:
+                cleaned = response_text.strip()
+                if cleaned.startswith("```json"):
+                    cleaned = cleaned[7:]
+                if cleaned.startswith("```"):
+                    cleaned = cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                try:
+                    analysis_data = json.loads(cleaned)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse markdown analysis JSON for {file_path}: {e}")
+                    analysis_data = {
+                        "summary": f"Markdown documentation file: {file_path}",
+                        "structured_analysis": {
+                            "language_info": {"primary_language": "Markdown", "file_type": "Documentation", "doc_type": "OTHER"},
+                            "purpose": f"Documentation file at {file_path}",
+                            "topics": [],
+                            "components": [],
+                            "referenced_code_files": [],
+                            "api_contracts": [],
+                            "business_rules": [],
+                            "architecture_decisions": [],
+                            "data_model_relationships": [],
+                            "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                            "setup_instructions": None,
+                            "quality_assessment": "Analysis failed due to response parsing error",
+                            "dependencies": [],
+                            "exports": [],
+                            "security_patterns": [],
+                            "component_interactions": [],
+                            "data_flows": [],
+                        }
+                    }
+
+            analysis_data["_token_usage"] = {
+                "input_tokens": tokens["input_tokens"],
+                "output_tokens": tokens["output_tokens"],
+                "thinking_tokens": tokens["thinking_tokens"],
+                "total_tokens": tokens["total_tokens"],
+                "prompt_length": len(full_prompt),
+                "response_length": len(response_text) if response_text else 0,
+            }
+            return analysis_data
+
+        except Exception as e:
+            self.logger.error(f"Error in markdown analysis for {file_path}: {e}")
+            raise
+
     async def call_gemini_for_delta_analysis(
         self, file_path: str, previous_analysis: dict, current_analysis: dict,
         tenant_id: int = None, user_id: int = None,

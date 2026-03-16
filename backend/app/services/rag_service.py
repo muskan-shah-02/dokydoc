@@ -161,6 +161,18 @@ class RAGService:
 
         concept_ids = [c["id"] for c in ctx.concepts[:10]] if ctx.concepts else []
 
+        # --- Stage 1b: Repository context fallback (when vector search finds nothing) ---
+        # For broad queries like "what is X", pull synthesis data from repositories
+        if not concept_ids:
+            try:
+                repo_ctx = self._fetch_repository_context(db, tenant_id, query, context_type, context_id)
+                if repo_ctx:
+                    # Inject as analysis summaries so they show up in context
+                    ctx.analysis_summaries.extend(repo_ctx)
+            except Exception as e:
+                logger.warning(f"RAG Stage 1b (repository context) failed: {e}")
+                db.rollback()
+
         # --- Stage 2: Graph expansion + cross-graph links ---
         if concept_ids:
             ctx.relationships = self._expand_relationships(db, tenant_id, concept_ids)
@@ -434,7 +446,11 @@ class RAGService:
 
     def _fetch_code_summaries(self, db: Session, tenant_id: int, query: str,
                                context_type: str, context_id: Optional[int]) -> List[Dict]:
-        """Fetch code component summaries with structured_analysis JSONB."""
+        """Fetch code component summaries with structured_analysis JSONB.
+
+        First tries an ILIKE match on name/summary. If nothing found, falls back
+        to the most recently analyzed files so broad queries always get context.
+        """
         try:
             conditions = ["cc.tenant_id = :tid", "cc.summary IS NOT NULL"]
             params: Dict[str, Any] = {"tid": tenant_id, "lim": 5}
@@ -455,6 +471,25 @@ class RAGService:
                 LIMIT :lim
             """
             rows = db.execute(sql_text(sql), params).fetchall()
+
+            # Broad fallback: if ILIKE returned nothing, grab the most recently
+            # analyzed files so broad/vague queries still get useful context
+            if not rows:
+                fallback_conditions = ["cc.tenant_id = :tid", "cc.summary IS NOT NULL"]
+                fallback_params: Dict[str, Any] = {"tid": tenant_id, "lim": 5}
+                if context_type == "repository" and context_id:
+                    fallback_conditions.append("cc.repository_id = :rid")
+                    fallback_params["rid"] = context_id
+                fallback_where = " AND ".join(fallback_conditions)
+                fallback_sql = f"""
+                    SELECT cc.id, cc.name, cc.summary, cc.location, cc.structured_analysis
+                    FROM code_components cc
+                    WHERE {fallback_where}
+                    ORDER BY cc.analysis_completed_at DESC NULLS LAST, cc.id DESC
+                    LIMIT :lim
+                """
+                rows = db.execute(sql_text(fallback_sql), fallback_params).fetchall()
+
             results = []
             for row in rows:
                 structured_summary = self._extract_structured_analysis(row[4])
@@ -531,6 +566,79 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG requirement trace fetch failed: {e}")
+            db.rollback()
+            return []
+
+    # ------------------------------------------------------------------
+    # Stage 1b helper: Repository-level context fallback
+    # ------------------------------------------------------------------
+
+    def _fetch_repository_context(
+        self, db: Session, tenant_id: int, query: str,
+        context_type: str, context_id: Optional[int],
+    ) -> List[Dict]:
+        """
+        Fallback: when semantic search returns no concepts, pull repository
+        synthesis data and description directly. This ensures broad queries
+        like "what is X" or "describe the project" always get a response.
+        """
+        try:
+            conditions = ["r.tenant_id = :tid"]
+            params: Dict[str, Any] = {"tid": tenant_id, "lim": 3}
+
+            if context_type == "repository" and context_id:
+                conditions.append("r.id = :rid")
+                params["rid"] = context_id
+            else:
+                # Only repos with completed synthesis — they have the richest context
+                conditions.append("r.synthesis_status = 'completed'")
+
+            # Also try text match on repo name/description if the query is long enough
+            if len(query.strip()) >= 3:
+                conditions.append(
+                    "(r.name ILIKE :q OR r.description ILIKE :q OR r.synthesis_status = 'completed')"
+                )
+                params["q"] = f"%{query[:80]}%"
+
+            where = " AND ".join(conditions)
+            sql = f"""
+                SELECT r.id, r.name, r.description, r.synthesis_data, r.analysis_status
+                FROM repositories r
+                WHERE {where}
+                ORDER BY
+                    CASE WHEN r.synthesis_status = 'completed' THEN 0 ELSE 1 END,
+                    r.id DESC
+                LIMIT :lim
+            """
+            rows = db.execute(sql_text(sql), params).fetchall()
+            results = []
+            for row in rows:
+                repo_id, repo_name, repo_desc, synthesis_data, status = row
+                summary_parts = []
+                if repo_desc:
+                    summary_parts.append(repo_desc[:300])
+                if synthesis_data:
+                    sd = synthesis_data if isinstance(synthesis_data, dict) else {}
+                    if sd.get("system_overview"):
+                        summary_parts.append(f"Overview: {sd['system_overview'][:400]}")
+                    if sd.get("technology_stack"):
+                        ts = sd["technology_stack"]
+                        langs = ", ".join(ts.get("languages", [])[:5])
+                        frameworks = ", ".join(ts.get("frameworks", [])[:5])
+                        if langs or frameworks:
+                            summary_parts.append(f"Tech stack: {langs} | {frameworks}")
+                    if sd.get("architecture", {}).get("style"):
+                        summary_parts.append(f"Architecture: {sd['architecture']['style']}")
+                if not summary_parts:
+                    summary_parts.append(f"Repository '{repo_name}' (status: {status})")
+                results.append({
+                    "document_id": None,
+                    "document_name": f"Repository: {repo_name}",
+                    "summary": " | ".join(summary_parts)[:600],
+                })
+            return results
+        except Exception as e:
+            logger.warning(f"RAG repository context fetch failed: {e}")
             db.rollback()
             return []
 
@@ -1002,11 +1110,14 @@ class RAGService:
         # Citation and formatting rules
         parts.append("")
         parts.append("RESPONSE RULES:")
-        parts.append("- Answer using ONLY the provided context. If context is insufficient, say so clearly.")
+        parts.append("- Answer using the provided context. Synthesize all available information into a clear, useful response.")
         parts.append("- When referencing sources, use citation tags: [Doc: filename], [Code: component_name], [Concept: concept_name].")
         parts.append("- Use markdown formatting: headers for sections, code blocks for code, tables for comparisons.")
         parts.append("- Be specific — mention exact names, file paths, requirement keys, and coverage statuses.")
         parts.append("- If multiple sources agree, synthesize them into a cohesive answer rather than listing each separately.")
+        parts.append("- If the query is vague or could mean multiple things, answer what you can AND ask 1-2 specific clarifying questions at the end to help the user get more precise information.")
+        parts.append("- If context is sparse, still provide whatever is available, then suggest 1-2 specific things the user could ask to get more detail (e.g., 'Try asking: How does the authentication flow work?' or 'Ask me about specific files like src/services/auth.py').")
+        parts.append("- NEVER just say 'I don't have context' — always tell the user what IS available and how to ask better questions.")
 
         # Retrieved context
         if context and context != "No relevant context found in the knowledge base.":

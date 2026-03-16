@@ -117,6 +117,20 @@ class ProviderRouter(LoggerMixin):
             product_context=product_context,
         )
 
+    async def analyze_markdown(
+        self, doc_content: str, repo_name: str = "", file_path: str = "",
+        tenant_id: int = None, user_id: int = None,
+    ) -> dict:
+        """
+        Route markdown documentation analysis.
+        Always uses Gemini — markdown analysis is document-style, not code-style.
+        """
+        self.logger.info(f"Routing markdown analysis → Gemini ({file_path})")
+        return await self.gemini.call_gemini_for_markdown_analysis(
+            doc_content, repo_name, file_path,
+            tenant_id=tenant_id, user_id=user_id,
+        )
+
     async def analyze_delta(
         self, file_path: str, previous_analysis: dict, current_analysis: dict,
         tenant_id: int = None, user_id: int = None,

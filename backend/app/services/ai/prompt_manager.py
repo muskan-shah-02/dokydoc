@@ -27,6 +27,8 @@ class PromptType(Enum):
     DELTA_ANALYSIS = "delta_analysis"
     # SPRINT 4: Repository Synthesis (Reduce Phase)
     REPOSITORY_SYNTHESIS = "repository_synthesis"
+    # SPRINT 5: Markdown / Documentation Analysis
+    MARKDOWN_ANALYSIS = "markdown_analysis"
 
 class PromptManager(LoggerMixin):
     """
@@ -1021,6 +1023,150 @@ CURRENT ANALYSIS:
             # SPRINT 4: Repository Synthesis — "Reduce Phase"
             # Combines per-file analyses into a System Architecture document
             # ============================================================
+
+            # ============================================================
+            # SPRINT 5: Markdown / Documentation Analysis
+            # ============================================================
+
+            PromptType.MARKDOWN_ANALYSIS.value: {
+                "version": "1.0",
+                "description": "Analyzes markdown documentation files to extract purpose, referenced code, business rules, architecture decisions, and relationships",
+                "prompt": """
+You are an expert technical writer and software architect. You are analyzing a Markdown documentation file from a code repository.
+
+CONTEXT:
+- Repository: {repo_name}
+- File path: {file_path}
+
+TASK:
+Analyze this markdown document deeply. Understand WHAT this document is about, WHAT code or systems it describes, and HOW it connects to the rest of the codebase.
+
+Extract all of the following:
+
+1. **PURPOSE** — What is this document about? What problem does it solve or describe?
+
+2. **REFERENCED CODE** — Which source files, modules, classes, functions, or APIs are mentioned or described?
+   - File paths like "src/services/auth.py", module names, class names, function signatures
+
+3. **BUSINESS RULES** — Any business rules, constraints, or domain logic described in prose
+   - Example: "Users must verify email before accessing premium features"
+
+4. **ARCHITECTURE DECISIONS** — Any architecture/design decisions documented
+   - Example: "We use PostgreSQL for its JSONB support for flexible schema evolution"
+
+5. **KEY CONCEPTS** — Domain entities, technical concepts, and their relationships described in the document
+
+6. **API DOCUMENTATION** — Any API endpoints, request/response formats described
+
+STRICT RESPONSE FORMAT:
+Return ONLY valid JSON:
+{{
+    "summary": "2-3 sentences describing what this markdown file is and what it documents",
+    "structured_analysis": {{
+        "language_info": {{
+            "primary_language": "Markdown",
+            "file_type": "Documentation",
+            "doc_type": "README|ARCHITECTURE|API_DOCS|CONTRIBUTING|CHANGELOG|SETUP|GUIDE|SPEC|ADR|OTHER"
+        }},
+        "purpose": "Single clear statement of what this document describes or enables",
+        "topics": ["main topic 1", "main topic 2"],
+        "components": [
+            {{
+                "name": "ComponentOrConceptName",
+                "type": "Entity|Service|Process|Module|Feature",
+                "purpose": "What this component/concept is or does according to the doc"
+            }}
+        ],
+        "referenced_code_files": ["path/to/file.py", "another/file.ts"],
+        "api_contracts": [
+            {{
+                "method": "GET|POST|PUT|DELETE|PATCH",
+                "path": "/api/endpoint",
+                "description": "What this endpoint does",
+                "request_schema": "Description of expected input",
+                "response_schema": "Description of output",
+                "auth_required": true,
+                "status_codes": [200, 400],
+                "rate_limited": false
+            }}
+        ],
+        "business_rules": [
+            {{
+                "rule_id": "BR-DOC-001",
+                "description": "Human-readable description of the business rule",
+                "code_location": "Section or function name in doc where this appears",
+                "rule_type": "validation|authorization|workflow|constraint|calculation",
+                "parameters": {{}},
+                "confidence": 0.8
+            }}
+        ],
+        "architecture_decisions": [
+            {{
+                "decision": "What was decided",
+                "rationale": "Why this decision was made",
+                "impact": "What code or behavior this affects",
+                "referenced_files": ["path/to/relevant/code.py"]
+            }}
+        ],
+        "data_model_relationships": [
+            {{
+                "source_entity": "Entity described in doc (e.g., User)",
+                "target_entity": "Related entity (e.g., Repository)",
+                "relationship_type": "has_many|belongs_to|uses|implements|extends",
+                "description": "How these entities relate according to the doc"
+            }}
+        ],
+        "patterns_and_architecture": {{
+            "design_patterns": ["Patterns mentioned or implied"],
+            "architectural_style": "Overall architecture style described (e.g., Microservices, Layered, Event-Driven)",
+            "key_concepts": ["Key domain or technical concepts referenced throughout"]
+        }},
+        "setup_instructions": "Brief summary of setup/installation steps if present, else null",
+        "quality_assessment": "Brief assessment: is this doc complete, up-to-date, and useful?",
+        "dependencies": [],
+        "exports": [],
+        "security_patterns": [],
+        "component_interactions": [],
+        "data_flows": []
+    }}
+}}
+
+CRITICAL:
+- For components: extract EVERY named entity (service, module, class, feature, concept) mentioned
+- For referenced_code_files: extract EVERY file path or module name explicitly mentioned
+- For business_rules: look for "must", "should", "required", "only if", "cannot", "always" — prose rules count
+- For architecture_decisions: look for "we use", "we chose", "because", "instead of", "the reason"
+- For data_model_relationships: if the doc says "User uploads Repository" → source=User, target=Repository, type=has_many
+- Return empty arrays [] for sections not applicable
+- The "components" array is the most important — populate it with everything this doc NAMES or DESCRIBES
+
+MARKDOWN TO ANALYZE:
+""",
+                "expected_schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "structured_analysis": {
+                            "type": "object",
+                            "properties": {
+                                "language_info": {"type": "object"},
+                                "purpose": {"type": "string"},
+                                "topics": {"type": "array"},
+                                "components": {"type": "array"},
+                                "referenced_code_files": {"type": "array"},
+                                "api_contracts": {"type": "array"},
+                                "business_rules": {"type": "array"},
+                                "architecture_decisions": {"type": "array"},
+                                "data_model_relationships": {"type": "array"},
+                                "patterns_and_architecture": {"type": "object"},
+                                "setup_instructions": {},
+                                "quality_assessment": {"type": "string"},
+                            }
+                        }
+                    },
+                    "required": ["summary", "structured_analysis"]
+                }
+            },
 
             PromptType.REPOSITORY_SYNTHESIS.value: {
                 "version": "1.0",
