@@ -489,11 +489,11 @@ export function MetaGraphView({
                 </div>
               </div>
             )}
-            {Object.keys(hoveredNode.type_distribution).length > 0 && (
+            {Object.keys(hoveredNode.type_distribution ?? {}).length > 0 && (
               <div className="mt-1">
                 <p className="font-medium text-gray-600">Types:</p>
                 <div className="mt-0.5 flex flex-wrap gap-1">
-                  {Object.entries(hoveredNode.type_distribution)
+                  {Object.entries(hoveredNode.type_distribution ?? {})
                     .sort(([, a], [, b]) => b - a)
                     .slice(0, 5)
                     .map(([type, count]) => (

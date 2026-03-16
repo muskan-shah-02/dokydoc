@@ -332,7 +332,7 @@ export function CrossProjectMappingPanel({ projects }: CrossProjectMappingPanelP
               </span>
             </div>
             <div className="mt-2 flex items-center gap-2">
-              {Object.entries(stats.by_method).map(([method, count]) => {
+              {Object.entries(stats.by_method ?? {}).map(([method, count]) => {
                 const badge = METHOD_BADGES[method] || { bg: "bg-gray-100", text: "text-gray-600", label: method };
                 return (
                   <span

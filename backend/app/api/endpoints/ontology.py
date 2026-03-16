@@ -1505,11 +1505,32 @@ def get_cross_project_stats(
         pair = tuple(sorted([m.initiative_a_id, m.initiative_b_id]))
         pairs.add(pair)
 
+    # Count by method
+    by_method: dict = {}
+    for m in all_mappings:
+        method = m.mapping_method or "unknown"
+        by_method[method] = by_method.get(method, 0) + 1
+
+    # Count by relationship type
+    by_relationship: dict = {}
+    for m in all_mappings:
+        rel = m.relationship_type or "unknown"
+        by_relationship[rel] = by_relationship.get(rel, 0) + 1
+
+    rejected = sum(1 for m in all_mappings if m.status == "rejected")
+
     return {
         "total_mappings": len(all_mappings),
+        # Legacy field names kept for backward compat
         "confirmed_mappings": confirmed,
         "candidate_mappings": candidates,
         "project_pairs": len(pairs),
+        # Fields expected by frontend CrossProjectStats type
+        "confirmed": confirmed,
+        "candidate": candidates,
+        "rejected": rejected,
+        "by_method": by_method,
+        "by_relationship": by_relationship,
     }
 
 
