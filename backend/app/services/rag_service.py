@@ -41,11 +41,19 @@ class RetrievedContext:
     analysis_summaries: List[Dict] = field(default_factory=list)
     cross_graph_links: List[Dict] = field(default_factory=list)
     requirement_traces: List[Dict] = field(default_factory=list)
+    live_data: List[Dict] = field(default_factory=list)   # operational/billing/stats data
     token_estimate: int = 0
 
     def to_prompt_text(self) -> str:
         """Format retrieved context as a text block for the AI prompt."""
         sections = []
+
+        # Live operational data (billing, stats, usage) — highest priority, show first
+        if self.live_data:
+            for ld in self.live_data[:5]:
+                label = ld.get("label", "SYSTEM DATA")
+                content = ld.get("content", "")
+                sections.append(f"{label}:\n{content}")
 
         if self.concepts:
             lines = []
@@ -111,8 +119,10 @@ class RetrievedContext:
             "analysis_summary_count": len(self.analysis_summaries),
             "cross_graph_link_count": len(self.cross_graph_links),
             "requirement_trace_count": len(self.requirement_traces),
+            "live_data_count": len(self.live_data),
             "token_estimate": self.token_estimate,
             "top_concepts": [c["name"] for c in self.concepts[:5]],
+            "live_data_labels": [ld.get("label", "") for ld in self.live_data[:3]],
         }
 
 
@@ -133,19 +143,48 @@ class RAGService:
         *,
         context_type: str = "general",
         context_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> RetrievedContext:
         """
-        Retrieve relevant context from the knowledge base via 6-stage pipeline.
+        Retrieve relevant context from the knowledge base via intent-aware pipeline.
 
-        Stages:
-          1. Semantic concept search (vector + text hybrid)
-          2. Graph expansion + cross-graph links via ConceptMapping
-          3. Analysis result retrieval from consolidated_analyses
-          4. Document segment search with relevance scoring
-          5. Code component search including structured_analysis JSONB
-          6. Requirement trace retrieval
+        Intent routing:
+          - billing/cost queries → live billing + usage_logs data
+          - stats/count queries → live aggregate counts
+          - project/what-is queries → repository synthesis + code overview
+          - all queries → semantic concept search + doc/code/graph search
         """
         ctx = RetrievedContext()
+
+        # --- Intent Detection: route to appropriate live data sources first ---
+        intents = self._detect_query_intent(query)
+
+        if "billing" in intents:
+            try:
+                ctx.live_data.extend(
+                    self._fetch_billing_context(db, tenant_id, user_id=user_id)
+                )
+            except Exception as e:
+                logger.warning(f"RAG billing context failed: {e}")
+                db.rollback()
+
+        if "stats" in intents:
+            try:
+                ctx.live_data.extend(self._fetch_system_stats_context(db, tenant_id))
+            except Exception as e:
+                logger.warning(f"RAG stats context failed: {e}")
+                db.rollback()
+
+        if "project" in intents or not ctx.live_data:
+            # Always fetch project overview for project queries OR as base context
+            # when no live data was found (catches "what is dokydoc" type questions)
+            try:
+                ctx.live_data.extend(
+                    self._fetch_project_overview_context(db, tenant_id, query, context_type, context_id)
+                )
+            except Exception as e:
+                logger.warning(f"RAG project overview failed: {e}")
+                db.rollback()
 
         # --- Stage 1: Semantic concept search ---
         try:
@@ -161,40 +200,28 @@ class RAGService:
 
         concept_ids = [c["id"] for c in ctx.concepts[:10]] if ctx.concepts else []
 
-        # --- Stage 1b: Repository context fallback (when vector search finds nothing) ---
-        # For broad queries like "what is X", pull synthesis data from repositories
-        if not concept_ids:
-            try:
-                repo_ctx = self._fetch_repository_context(db, tenant_id, query, context_type, context_id)
-                if repo_ctx:
-                    # Inject as analysis summaries so they show up in context
-                    ctx.analysis_summaries.extend(repo_ctx)
-            except Exception as e:
-                logger.warning(f"RAG Stage 1b (repository context) failed: {e}")
-                db.rollback()
-
         # --- Stage 2: Graph expansion + cross-graph links ---
         if concept_ids:
             ctx.relationships = self._expand_relationships(db, tenant_id, concept_ids)
             ctx.cross_graph_links = self._fetch_cross_graph_links(db, tenant_id, concept_ids)
 
         # --- Stage 3: Consolidated analysis retrieval ---
-        # Gather document_ids from concept search and document segments
         doc_ids = set()
         if context_type == "document" and context_id:
             doc_ids.add(context_id)
-        ctx.analysis_summaries = self._fetch_analysis_summaries(db, tenant_id, query, doc_ids)
+        new_analysis_summaries = self._fetch_analysis_summaries(db, tenant_id, query, doc_ids)
+        # Append (not overwrite) — preserves any Stage 1b results
+        ctx.analysis_summaries.extend(new_analysis_summaries)
 
-        # --- Stage 4: Document segment search (enhanced with relevance scoring) ---
+        # --- Stage 4: Document segment search ---
         ctx.document_segments = self._fetch_document_segments(
             db, tenant_id, query, context_type, context_id
         )
-        # Collect doc_ids from segments for Stage 6
         for seg in ctx.document_segments:
             if seg.get("document_id"):
                 doc_ids.add(seg["document_id"])
 
-        # --- Stage 5: Code component search (with structured_analysis) ---
+        # --- Stage 5: Code component search ---
         ctx.code_summaries = self._fetch_code_summaries(
             db, tenant_id, query, context_type, context_id
         )
@@ -570,39 +597,243 @@ class RAGService:
             return []
 
     # ------------------------------------------------------------------
-    # Stage 1b helper: Repository-level context fallback
+    # Intent Detection — classifies query to route to right data sources
     # ------------------------------------------------------------------
 
-    def _fetch_repository_context(
+    # Billing/cost keywords
+    _BILLING_KEYWORDS = re.compile(
+        r'\b(billing|bill|cost|costs|cost\s*to|spend|spent|usage|used|usage\s*log|'
+        r'how\s*much|charged|charge|inr|usd|rupee|dollar|balance|budget|invoice|'
+        r'token|tokens|credits|remaining|consumed|total\s*cost|this\s*month|'
+        r'current\s*month|last\s*month|ai\s*cost|model\s*cost|expensive|afford)\b',
+        re.IGNORECASE,
+    )
+
+    # System stats / count keywords
+    _STATS_KEYWORDS = re.compile(
+        r'\b(how\s*many|count|total|number\s*of|statistics|stats|overview|'
+        r'summary\s*of\s*all|all\s*documents|all\s*files|all\s*repos|list\s*of|'
+        r'analyzed|pending|failed|completed|repositories|documents|files|'
+        r'users|members|team)\b',
+        re.IGNORECASE,
+    )
+
+    # Project / "what is" keywords — means user wants overall system info
+    _PROJECT_KEYWORDS = re.compile(
+        r'\b(what\s*is|describe|tell\s*me\s*about|explain|overview\s*of|'
+        r'what\s*does|what\s*do|purpose\s*of|what\s*are|how\s*does|'
+        r'architecture|tech\s*stack|technology|built\s*with|made\s*with)\b',
+        re.IGNORECASE,
+    )
+
+    def _detect_query_intent(self, query: str) -> set:
+        """
+        Detect what kinds of data the query needs.
+        Returns a set of intent strings: 'billing', 'stats', 'project', 'knowledge'
+        """
+        intents = set()
+        if self._BILLING_KEYWORDS.search(query):
+            intents.add("billing")
+        if self._STATS_KEYWORDS.search(query):
+            intents.add("stats")
+        if self._PROJECT_KEYWORDS.search(query):
+            intents.add("project")
+        # Always include knowledge base search
+        intents.add("knowledge")
+        return intents
+
+    # ------------------------------------------------------------------
+    # Live Data Fetchers (billing, stats, system overview)
+    # ------------------------------------------------------------------
+
+    def _fetch_billing_context(self, db: Session, tenant_id: int, user_id: int = None) -> List[Dict]:
+        """
+        Pull current billing balance + usage summary from live DB tables.
+        Returns list of live_data dicts for the AI context.
+        """
+        results = []
+        try:
+            # 1. Current billing state
+            billing_sql = """
+                SELECT billing_type, balance_inr, current_month_cost,
+                       last_30_days_cost, monthly_limit_inr, last_billing_reset
+                FROM tenant_billing
+                WHERE tenant_id = :tid
+                LIMIT 1
+            """
+            billing_row = db.execute(sql_text(billing_sql), {"tid": tenant_id}).fetchone()
+            if billing_row:
+                btype, balance, cur_month, last30, limit, reset = billing_row
+                lines = [f"Billing type: {btype}"]
+                if btype == "prepaid":
+                    lines.append(f"Current balance: ₹{float(balance or 0):.2f}")
+                else:
+                    lines.append(f"Current month cost: ₹{float(cur_month or 0):.2f}")
+                    lines.append(f"Last 30 days cost: ₹{float(last30 or 0):.2f}")
+                if limit:
+                    lines.append(f"Monthly limit: ₹{float(limit):.2f}")
+                    used_pct = (float(cur_month or 0) / float(limit) * 100) if limit else 0
+                    lines.append(f"Budget used: {used_pct:.1f}%")
+                if reset:
+                    lines.append(f"Last billing reset: {reset.strftime('%Y-%m-%d') if hasattr(reset, 'strftime') else reset}")
+                results.append({
+                    "label": "CURRENT BILLING STATUS",
+                    "content": "\n".join(lines),
+                })
+
+            # 2. Usage breakdown by feature type this month
+            usage_sql = """
+                SELECT
+                    feature_type,
+                    COUNT(*) as request_count,
+                    COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
+                    COALESCE(SUM(cost_inr), 0) as total_cost_inr,
+                    COALESCE(SUM(cost_usd), 0) as total_cost_usd
+                FROM usage_logs
+                WHERE tenant_id = :tid
+                  AND created_at >= DATE_TRUNC('month', CURRENT_DATE)
+                GROUP BY feature_type
+                ORDER BY total_cost_inr DESC
+            """
+            usage_rows = db.execute(sql_text(usage_sql), {"tid": tenant_id}).fetchall()
+            if usage_rows:
+                lines = ["Usage this month (by feature):"]
+                grand_inr = 0
+                grand_tokens = 0
+                for row in usage_rows:
+                    feat, count, tokens, cost_inr, cost_usd = row
+                    grand_inr += float(cost_inr or 0)
+                    grand_tokens += int(tokens or 0)
+                    lines.append(
+                        f"  - {feat}: {count} requests | "
+                        f"{int(tokens or 0):,} tokens | ₹{float(cost_inr or 0):.4f}"
+                    )
+                lines.append(f"  TOTAL: {grand_tokens:,} tokens | ₹{grand_inr:.4f}")
+                results.append({
+                    "label": "USAGE THIS MONTH",
+                    "content": "\n".join(lines),
+                })
+
+            # 3. Most recent 10 usage log entries
+            recent_sql = """
+                SELECT feature_type, operation, model_used, input_tokens,
+                       output_tokens, cost_inr, created_at
+                FROM usage_logs
+                WHERE tenant_id = :tid
+                ORDER BY created_at DESC
+                LIMIT 10
+            """
+            recent_rows = db.execute(sql_text(recent_sql), {"tid": tenant_id}).fetchall()
+            if recent_rows:
+                lines = ["Recent AI usage (last 10 operations):"]
+                for row in recent_rows:
+                    feat, op, model, inp, out, cost, ts = row
+                    ts_str = ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)
+                    lines.append(
+                        f"  [{ts_str}] {feat}/{op} via {model or 'unknown'}: "
+                        f"{(inp or 0) + (out or 0):,} tokens | ₹{float(cost or 0):.4f}"
+                    )
+                results.append({
+                    "label": "RECENT USAGE",
+                    "content": "\n".join(lines),
+                })
+
+        except Exception as e:
+            logger.warning(f"RAG billing context fetch failed: {e}")
+            db.rollback()
+        return results
+
+    def _fetch_system_stats_context(self, db: Session, tenant_id: int) -> List[Dict]:
+        """
+        Pull aggregate counts and system overview from live DB tables.
+        Returns list of live_data dicts for the AI context.
+        """
+        results = []
+        try:
+            stats_sql = """
+                SELECT
+                    (SELECT COUNT(*) FROM documents WHERE tenant_id = :tid) as doc_count,
+                    (SELECT COUNT(*) FROM repositories WHERE tenant_id = :tid) as repo_count,
+                    (SELECT COUNT(*) FROM code_components WHERE tenant_id = :tid) as file_count,
+                    (SELECT COUNT(*) FROM code_components WHERE tenant_id = :tid AND analysis_status = 'completed') as analyzed_count,
+                    (SELECT COUNT(*) FROM code_components WHERE tenant_id = :tid AND analysis_status = 'failed') as failed_count,
+                    (SELECT COUNT(*) FROM code_components WHERE tenant_id = :tid AND analysis_status = 'pending') as pending_count,
+                    (SELECT COUNT(*) FROM ontology_concepts WHERE tenant_id = :tid) as concept_count,
+                    (SELECT COUNT(*) FROM conversations WHERE tenant_id = :tid) as conv_count
+            """
+            row = db.execute(sql_text(stats_sql), {"tid": tenant_id}).fetchone()
+            if row:
+                doc_count, repo_count, file_count, analyzed, failed, pending, concepts, convs = row
+                lines = [
+                    f"Uploaded documents: {doc_count or 0}",
+                    f"Repositories: {repo_count or 0}",
+                    f"Code files tracked: {file_count or 0}",
+                    f"  - Analyzed: {analyzed or 0}",
+                    f"  - Failed: {failed or 0}",
+                    f"  - Pending: {pending or 0}",
+                    f"Knowledge concepts extracted: {concepts or 0}",
+                    f"Chat conversations: {convs or 0}",
+                ]
+                results.append({
+                    "label": "ORGANIZATION SYSTEM OVERVIEW",
+                    "content": "\n".join(lines),
+                })
+
+            # Per-repo breakdown
+            repo_sql = """
+                SELECT r.name, r.url, r.analysis_status, r.synthesis_status,
+                       r.analyzed_files, r.total_files,
+                       COUNT(cc.id) as component_count,
+                       SUM(CASE WHEN cc.analysis_status = 'completed' THEN 1 ELSE 0 END) as completed_count
+                FROM repositories r
+                LEFT JOIN code_components cc ON cc.repository_id = r.id AND cc.tenant_id = :tid
+                WHERE r.tenant_id = :tid
+                GROUP BY r.id, r.name, r.url, r.analysis_status, r.synthesis_status,
+                         r.analyzed_files, r.total_files
+                ORDER BY r.id DESC
+                LIMIT 10
+            """
+            repo_rows = db.execute(sql_text(repo_sql), {"tid": tenant_id}).fetchall()
+            if repo_rows:
+                lines = ["Repositories in this organization:"]
+                for rrow in repo_rows:
+                    name, url, status, synth, analyzed, total, comp_count, comp_done = rrow
+                    prog = f"{comp_done or 0}/{comp_count or 0} files analyzed"
+                    synth_str = f" | synthesis: {synth}" if synth else ""
+                    lines.append(f"  - {name}: status={status}{synth_str} | {prog}")
+                results.append({
+                    "label": "REPOSITORIES",
+                    "content": "\n".join(lines),
+                })
+
+        except Exception as e:
+            logger.warning(f"RAG system stats fetch failed: {e}")
+            db.rollback()
+        return results
+
+    def _fetch_project_overview_context(
         self, db: Session, tenant_id: int, query: str,
         context_type: str, context_id: Optional[int],
     ) -> List[Dict]:
         """
-        Fallback: when semantic search returns no concepts, pull repository
-        synthesis data and description directly. This ensures broad queries
-        like "what is X" or "describe the project" always get a response.
+        For "what is X" / "describe X" queries — pull synthesis data from repositories
+        and top-level code summaries to describe the project.
         """
+        results = []
         try:
+            # Extract likely project/repo name from query by finding words
+            query_words = set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b', query.lower()))
+
             conditions = ["r.tenant_id = :tid"]
             params: Dict[str, Any] = {"tid": tenant_id, "lim": 3}
 
             if context_type == "repository" and context_id:
                 conditions.append("r.id = :rid")
                 params["rid"] = context_id
-            else:
-                # Only repos with completed synthesis — they have the richest context
-                conditions.append("r.synthesis_status = 'completed'")
-
-            # Also try text match on repo name/description if the query is long enough
-            if len(query.strip()) >= 3:
-                conditions.append(
-                    "(r.name ILIKE :q OR r.description ILIKE :q OR r.synthesis_status = 'completed')"
-                )
-                params["q"] = f"%{query[:80]}%"
 
             where = " AND ".join(conditions)
             sql = f"""
-                SELECT r.id, r.name, r.description, r.synthesis_data, r.analysis_status
+                SELECT r.id, r.name, r.description, r.url, r.synthesis_data, r.synthesis_status
                 FROM repositories r
                 WHERE {where}
                 ORDER BY
@@ -611,36 +842,79 @@ class RAGService:
                 LIMIT :lim
             """
             rows = db.execute(sql_text(sql), params).fetchall()
-            results = []
+
             for row in rows:
-                repo_id, repo_name, repo_desc, synthesis_data, status = row
-                summary_parts = []
-                if repo_desc:
-                    summary_parts.append(repo_desc[:300])
-                if synthesis_data:
-                    sd = synthesis_data if isinstance(synthesis_data, dict) else {}
-                    if sd.get("system_overview"):
-                        summary_parts.append(f"Overview: {sd['system_overview'][:400]}")
-                    if sd.get("technology_stack"):
-                        ts = sd["technology_stack"]
-                        langs = ", ".join(ts.get("languages", [])[:5])
-                        frameworks = ", ".join(ts.get("frameworks", [])[:5])
-                        if langs or frameworks:
-                            summary_parts.append(f"Tech stack: {langs} | {frameworks}")
-                    if sd.get("architecture", {}).get("style"):
-                        summary_parts.append(f"Architecture: {sd['architecture']['style']}")
-                if not summary_parts:
-                    summary_parts.append(f"Repository '{repo_name}' (status: {status})")
-                results.append({
-                    "document_id": None,
-                    "document_name": f"Repository: {repo_name}",
-                    "summary": " | ".join(summary_parts)[:600],
-                })
-            return results
+                repo_id_val, repo_name, repo_desc, repo_url, synthesis_data, synth_status = row
+
+                # Check if this repo name appears in query words (name relevance boost)
+                repo_words = set(re.findall(r'\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b', repo_name.lower()))
+                is_relevant = bool(repo_words & query_words) or context_type == "repository"
+
+                # Always include if only 1 repo, or if name matches query words
+                if not rows or len(rows) == 1 or is_relevant or not context_id:
+                    parts = []
+                    if repo_desc:
+                        parts.append(f"Description: {repo_desc[:300]}")
+                    if repo_url:
+                        parts.append(f"URL: {repo_url}")
+
+                    if synthesis_data:
+                        sd = synthesis_data if isinstance(synthesis_data, dict) else {}
+                        if sd.get("system_overview"):
+                            parts.append(f"\nSystem Overview:\n{sd['system_overview'][:600]}")
+                        ts = sd.get("technology_stack", {})
+                        if ts:
+                            langs = ", ".join(ts.get("languages", [])[:5])
+                            frameworks = ", ".join(ts.get("frameworks", [])[:5])
+                            dbs = ", ".join(ts.get("databases", [])[:3])
+                            if langs:
+                                parts.append(f"Languages: {langs}")
+                            if frameworks:
+                                parts.append(f"Frameworks: {frameworks}")
+                            if dbs:
+                                parts.append(f"Databases: {dbs}")
+                        arch = sd.get("architecture", {})
+                        if arch.get("style"):
+                            parts.append(f"Architecture: {arch['style']}")
+                        sec = sd.get("security_posture", {})
+                        if sec.get("authentication"):
+                            parts.append(f"Auth: {sec['authentication']}")
+                        api = sd.get("api_surface", {})
+                        if api.get("total_endpoints"):
+                            parts.append(f"Total API endpoints: {api['total_endpoints']}")
+
+                    if parts:
+                        results.append({
+                            "label": f"PROJECT: {repo_name}",
+                            "content": "\n".join(parts),
+                        })
+
+            # If no repo results, try to return top code files as context
+            if not results:
+                fallback_sql = """
+                    SELECT cc.name, cc.summary, cc.location
+                    FROM code_components cc
+                    WHERE cc.tenant_id = :tid
+                      AND cc.summary IS NOT NULL
+                      AND cc.analysis_status = 'completed'
+                    ORDER BY cc.analysis_completed_at DESC NULLS LAST
+                    LIMIT 5
+                """
+                cc_rows = db.execute(sql_text(fallback_sql), {"tid": tenant_id}).fetchall()
+                if cc_rows:
+                    lines = ["Recently analyzed code files:"]
+                    for cc_row in cc_rows:
+                        name, summary, loc = cc_row
+                        lines.append(f"  - {name}: {(summary or '')[:200]}")
+                    results.append({
+                        "label": "AVAILABLE CODE CONTEXT",
+                        "content": "\n".join(lines),
+                    })
+
         except Exception as e:
-            logger.warning(f"RAG repository context fetch failed: {e}")
+            logger.warning(f"RAG project overview fetch failed: {e}")
             db.rollback()
-            return []
+        return results
 
     # ------------------------------------------------------------------
     # Role-Aware Prompt Intelligence (Task 4)
@@ -1090,6 +1364,12 @@ class RAGService:
 
         parts = [
             f"You are AskyDoc — your organization's personal AI expert, acting as a {persona}.",
+            "",
+            "WHAT YOU ARE:",
+            "AskyDoc is an AI chat assistant for the organization. You have access to ALL organizational data — "
+            "uploaded documents, analyzed code repositories, knowledge graphs, AND live operational data like "
+            "billing costs, usage statistics, and system metrics. Think of yourself as an organizational ChatGPT "
+            "that knows everything uploaded or generated within this organization's account.",
             "",
             "COMMUNICATION STYLE:",
             style,

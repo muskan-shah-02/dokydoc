@@ -298,6 +298,7 @@ async def send_message(
         db, payload.content, tenant_id,
         context_type=conv.context_type,
         context_id=conv.context_id,
+        user_id=current_user.id,
     )
 
     # 3. Get conversation history for multi-turn
