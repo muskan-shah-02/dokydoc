@@ -43,7 +43,7 @@ class CodeAnalysisService(LoggerMixin):
         # Database & queries
         '.sql', '.prisma', '.graphql', '.gql',
         # Shell & scripting
-        '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+        '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd', '.mjs', '.cjs',
         # Infrastructure & CI/CD
         '.tf', '.hcl',        # Terraform
         '.dockerfile',
@@ -126,10 +126,52 @@ class CodeAnalysisService(LoggerMixin):
             resp.raise_for_status()
             return resp.text
 
-    async def _get_repo_file_list(self, owner: str, repo: str, branch: str) -> list:
+    # Extensions that exist in repos but should NOT be AI-analyzed
+    SKIP_EXTENSIONS = {
+        # Compiled / cache
+        '.pyc': 'Compiled', '.pyo': 'Compiled', '.pyd': 'Compiled',
+        '.class': 'Compiled', '.o': 'Compiled', '.so': 'Compiled',
+        # Binary documents
+        '.docx': 'Document', '.doc': 'Document', '.pdf': 'Document',
+        '.xlsx': 'Document', '.xls': 'Document', '.pptx': 'Document', '.ppt': 'Document',
+        '.odt': 'Document', '.ods': 'Document',
+        # Data files
+        '.csv': 'Data File', '.tsv': 'Data File', '.parquet': 'Data File',
+        # Images / media
+        '.svg': 'Image/Media', '.ico': 'Image/Media', '.jpg': 'Image/Media',
+        '.jpeg': 'Image/Media', '.png': 'Image/Media', '.gif': 'Image/Media',
+        '.webp': 'Image/Media', '.bmp': 'Image/Media', '.tiff': 'Image/Media',
+        '.mp4': 'Image/Media', '.mp3': 'Image/Media', '.mov': 'Image/Media',
+        # Logs & backups
+        '.log': 'Log/Backup', '.backup': 'Log/Backup', '.bak': 'Log/Backup',
+        # Templates (not analyzed as code)
+        '.mako': 'Template',
+        # Config examples / secrets
+        '.example': 'Config Example', '.sample': 'Config Example',
+        # Lock files
+        '.lock': 'Lock File',
+    }
+    # How to categorize files excluded by SKIP_DIRS
+    SKIP_DIR_CATEGORIES = {
+        '__pycache__': 'Compiled', '.pytest_cache': 'Cache', '.mypy_cache': 'Cache',
+        '.tox': 'Cache', 'coverage': 'Test Coverage',
+        '.next': 'Build Artifact', 'dist': 'Build Artifact', 'build': 'Build Artifact',
+        'target': 'Build Artifact', 'bin': 'Build Artifact', 'obj': 'Build Artifact',
+        '.gradle': 'Build Artifact', '.terraform': 'Build Artifact',
+        '.serverless': 'Build Artifact', '.vercel': 'Build Artifact',
+        '.venv': 'Virtual Env', 'venv': 'Virtual Env', 'env': 'Virtual Env',
+        '.env': 'Virtual Env',
+        'vendor': 'Dependencies', 'node_modules': 'Dependencies',
+        '.git': 'VCS', '.idea': 'IDE Files', '.vscode': 'IDE Files',
+        '.cache': 'Cache',
+    }
+
+    async def _get_repo_file_list(self, owner: str, repo: str, branch: str) -> dict:
         """
-        Get the file list for a GitHub repository, suitable for dispatching
-        to repo_analysis_task. Returns list of dicts with path, url, language.
+        Get the file list for a GitHub repository.
+        Returns dict:
+          - 'to_analyze': list of {path, url, language} for code files
+          - 'skipped': list of {path, ext, category} for non-analyzed files
         """
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Resolve branch → tree SHA
@@ -150,11 +192,11 @@ class CodeAnalysisService(LoggerMixin):
 
             if commits_resp.status_code != 200:
                 self.logger.error(f"GitHub API error resolving branch: {commits_resp.status_code}")
-                return []
+                return {"to_analyze": [], "skipped": []}
 
             commits_data = commits_resp.json()
             if not commits_data:
-                return []
+                return {"to_analyze": [], "skipped": []}
 
             tree_sha = commits_data[0]["commit"]["tree"]["sha"]
 
@@ -162,7 +204,7 @@ class CodeAnalysisService(LoggerMixin):
             tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1"
             tree_resp = await client.get(tree_url)
             if tree_resp.status_code != 200:
-                return []
+                return {"to_analyze": [], "skipped": []}
 
             tree_data = tree_resp.json()
             all_files = [
@@ -192,41 +234,36 @@ class CodeAnalysisService(LoggerMixin):
                 'tsconfig.json': 'json',
             }
 
-            # Filter to relevant code files
-            file_list = []
+            to_analyze = []
+            skipped = []
+
             for item in all_files:
                 path = item["path"]
                 parts = path.split('/')
-                if any(d in self.SKIP_DIRS for d in parts):
-                    continue
                 filename = parts[-1]
-                ext = ''
-                if '.' in filename:
-                    ext = '.' + filename.rsplit('.', 1)[-1]
+                ext = ('.' + filename.rsplit('.', 1)[-1].lower()) if '.' in filename else ''
+
+                # Check if in a SKIP_DIR
+                skip_dir = next((d for d in parts[:-1] if d in self.SKIP_DIRS), None)
+                if skip_dir:
+                    category = self.SKIP_DIR_CATEGORIES.get(skip_dir, 'Build Artifact')
+                    skipped.append({"path": path, "ext": ext or '(no ext)', "category": category})
+                    continue
 
                 # Match by extension OR by special filename
-                if ext in self.CODE_EXTENSIONS:
+                if ext in self.CODE_EXTENSIONS or filename in SPECIAL_FILENAMES:
                     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-                    language = self.EXT_TO_LANG.get(ext, "")
-                    file_list.append({
-                        "path": path,
-                        "url": raw_url,
-                        "language": language,
-                    })
-                elif filename in SPECIAL_FILENAMES:
-                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-                    language = SPECIAL_FILENAMES[filename]
-                    file_list.append({
-                        "path": path,
-                        "url": raw_url,
-                        "language": language,
-                    })
+                    language = self.EXT_TO_LANG.get(ext, '') or SPECIAL_FILENAMES.get(filename, '')
+                    to_analyze.append({"path": path, "url": raw_url, "language": language})
+                else:
+                    category = self.SKIP_EXTENSIONS.get(ext, 'Other')
+                    skipped.append({"path": path, "ext": ext or '(no ext)', "category": category})
 
             self.logger.info(
-                f"Found {len(file_list)} code files in {owner}/{repo} "
-                f"(from {len(all_files)} total)"
+                f"Repo {owner}/{repo}: {len(to_analyze)} to analyze, "
+                f"{len(skipped)} skipped (from {len(all_files)} total blobs)"
             )
-            return file_list
+            return {"to_analyze": to_analyze, "skipped": skipped}
 
     async def _resolve_github_url(self, url: str) -> str | None:
         """
@@ -300,8 +337,11 @@ class CodeAnalysisService(LoggerMixin):
         )
         db.commit()
 
-        # Build file list from GitHub API
-        file_list = await self._get_repo_file_list(owner, repo_name, branch)
+        # Build file list from GitHub API (now returns dict with to_analyze + skipped)
+        scan_result = await self._get_repo_file_list(owner, repo_name, branch)
+        file_list = scan_result.get("to_analyze", [])
+        skipped_files = scan_result.get("skipped", [])
+
         if not file_list:
             crud.code_component.update(
                 db, db_obj=component, obj_in={
@@ -312,13 +352,18 @@ class CodeAnalysisService(LoggerMixin):
             db.commit()
             return
 
+        # Store skipped files in repository for UI display
+        if skipped_files:
+            crud.repository.update(db=db, db_obj=repo, obj_in={"skipped_files": skipped_files})
+            db.commit()
+
         # Dispatch repo_analysis_task via Celery
         from app.tasks.code_analysis_tasks import repo_analysis_task
         task = repo_analysis_task.delay(repo.id, tenant_id, file_list)
 
         self.logger.info(
             f"Dispatched repo_analysis_task for {display_name}: "
-            f"{len(file_list)} files, celery_task={task.id}"
+            f"{len(file_list)} to analyze, {len(skipped_files)} skipped, celery_task={task.id}"
         )
 
     def analyze_component_in_background(self, component_id: int, tenant_id: int = None) -> None:

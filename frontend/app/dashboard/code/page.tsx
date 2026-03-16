@@ -65,6 +65,7 @@ import {
   FolderOpen,
   File,
   Sparkles,
+  EyeOff,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useRouter } from "next/navigation";
@@ -364,6 +365,8 @@ export default function CodePage() {
   const [loadingRepoComponents, setLoadingRepoComponents] = useState<Set<number>>(new Set());
   const [repoStats, setRepoStats] = useState<Record<number, any>>({});
   const [expandedFolders, setExpandedFolders] = useState<Record<number, Set<string>>>({});
+  const [expandedSkipped, setExpandedSkipped] = useState<Set<number>>(new Set());
+  const [expandedSkippedCategories, setExpandedSkippedCategories] = useState<Record<number, Set<string>>>({});
 
   // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
@@ -531,11 +534,24 @@ export default function CodePage() {
   const toggleFolder = useCallback((repoId: number, folderPath: string) => {
     setExpandedFolders((prev) => {
       const current = new Set(prev[repoId] ?? []);
-      if (current.has(folderPath)) {
-        current.delete(folderPath);
-      } else {
-        current.add(folderPath);
-      }
+      if (current.has(folderPath)) current.delete(folderPath);
+      else current.add(folderPath);
+      return { ...prev, [repoId]: current };
+    });
+  }, []);
+
+  const toggleSkippedSection = useCallback((repoId: number) => {
+    setExpandedSkipped((prev) => {
+      const next = new Set(prev);
+      if (next.has(repoId)) next.delete(repoId); else next.add(repoId);
+      return next;
+    });
+  }, []);
+
+  const toggleSkippedCategory = useCallback((repoId: number, category: string) => {
+    setExpandedSkippedCategories((prev) => {
+      const current = new Set(prev[repoId] ?? []);
+      if (current.has(category)) current.delete(category); else current.add(category);
       return { ...prev, [repoId]: current };
     });
   }, []);
@@ -1173,9 +1189,11 @@ export default function CodePage() {
                         </div>
 
                         {/* Files progress */}
-                        <div className="text-sm text-muted-foreground w-24 text-right">
+                        <div className="text-sm text-muted-foreground w-28 text-right">
                           {total > 0 ? (
-                            <span className="font-mono">{analyzed}/{total} files</span>
+                            <span className="font-mono">
+                              {analyzed}/{repoStats[repo.id]?.total_repo_files ?? total} files
+                            </span>
                           ) : (
                             <span>—</span>
                           )}
@@ -1237,7 +1255,12 @@ export default function CodePage() {
                               {/* Summary stats bar */}
                               <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-1.5 text-xs">
                                 <div className="flex items-center gap-3">
-                                  <span className="font-medium text-foreground">{components.length} files total</span>
+                                  <span className="font-medium text-foreground">
+                                    {components.length} analyzed
+                                    {repoStats[repo.id]?.skipped_files_count > 0 && (
+                                      <span className="text-muted-foreground font-normal"> · {repoStats[repo.id].skipped_files_count} skipped · {repoStats[repo.id].total_repo_files} total</span>
+                                    )}
+                                  </span>
                                   {completedCount > 0 && (
                                     <span className="text-green-600">{completedCount} completed</span>
                                   )}
@@ -1355,6 +1378,70 @@ export default function CodePage() {
                                   );
                                 })()}
                               </div>
+
+                              {/* Evaluation Not Required section */}
+                              {repoStats[repo.id]?.skipped_files_count > 0 && (
+                                <div className="border rounded-md overflow-hidden">
+                                  <div
+                                    className="flex items-center gap-2 px-3 py-2 bg-slate-50/70 dark:bg-slate-900/50 cursor-pointer hover:bg-muted/50 select-none"
+                                    onClick={() => toggleSkippedSection(repo.id)}
+                                  >
+                                    {expandedSkipped.has(repo.id)
+                                      ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                                      : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+                                    <EyeOff className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                    <span className="text-sm font-medium text-muted-foreground">Evaluation Not Required</span>
+                                    <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+                                      {repoStats[repo.id].skipped_category_breakdown?.slice(0, 4).map((cat: any) => (
+                                        <span key={cat.category} className="bg-muted rounded px-1.5 py-0.5">
+                                          {cat.category}: {cat.count}
+                                        </span>
+                                      ))}
+                                      <span className="font-medium">{repoStats[repo.id].skipped_files_count} files</span>
+                                    </div>
+                                  </div>
+
+                                  {expandedSkipped.has(repo.id) && (
+                                    <div>
+                                      {repoStats[repo.id].skipped_category_breakdown?.map((cat: any) => {
+                                        const categoryFiles = (repoStats[repo.id].skipped_files || []).filter((f: any) => f.category === cat.category);
+                                        const isCatExpanded = expandedSkippedCategories[repo.id]?.has(cat.category);
+                                        return (
+                                          <div key={cat.category}>
+                                            <div
+                                              className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/30 cursor-pointer border-t border-muted/30 select-none"
+                                              style={{ paddingLeft: "28px" }}
+                                              onClick={() => toggleSkippedCategory(repo.id, cat.category)}
+                                            >
+                                              {isCatExpanded
+                                                ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                                                : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
+                                              <Folder className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                                              <span className="text-sm flex-1">{cat.category}</span>
+                                              <span className="text-xs text-muted-foreground">{cat.count} files</span>
+                                            </div>
+                                            {isCatExpanded && categoryFiles.map((sf: any) => {
+                                              const fileName = sf.path.split('/').pop();
+                                              return (
+                                                <div
+                                                  key={sf.path}
+                                                  className="flex items-center gap-2 py-1 text-xs text-muted-foreground border-t border-muted/20"
+                                                  style={{ paddingLeft: "56px" }}
+                                                  title={sf.path}
+                                                >
+                                                  <File className="w-3.5 h-3.5 flex-shrink-0 text-slate-300" />
+                                                  <span className="truncate flex-1 font-mono">{fileName}</span>
+                                                  <span className="text-slate-400 flex-shrink-0 font-mono mr-3">{sf.ext}</span>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </>
                           );
                         })()}

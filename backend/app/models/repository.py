@@ -40,6 +40,9 @@ class Repository(Base):
     analyzed_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
 
+    # Skipped files — tracked but not evaluated (binary, compiled, images, etc.)
+    skipped_files: Mapped[list] = mapped_column(JSONB, nullable=True)
+
     # Synthesis (Reduce Phase — combines per-file analyses into System Architecture)
     synthesis_data: Mapped[dict] = mapped_column(JSONB, nullable=True)
     synthesis_status: Mapped[str] = mapped_column(String(50), nullable=True)

@@ -576,10 +576,31 @@ def get_single_repo_stats(
         CodeComponent.ai_cost_inr.isnot(None),
     ).scalar()
 
+    # Skipped files (stored from initial GitHub scan)
+    skipped_files = repo.skipped_files or []
+    skipped_count = len(skipped_files)
+    total_repo_files = len(components) + skipped_count
+
+    # Skipped files breakdown by category
+    skipped_cat_counts: dict = {}
+    skipped_ext_counts: dict = {}
+    for sf in skipped_files:
+        cat = sf.get("category", "Other")
+        skipped_cat_counts[cat] = skipped_cat_counts.get(cat, 0) + 1
+        ext = sf.get("ext", "(no ext)")
+        skipped_ext_counts[ext] = skipped_ext_counts.get(ext, 0) + 1
+    skipped_category_breakdown = sorted(skipped_cat_counts.items(), key=lambda x: -x[1])
+    skipped_extension_breakdown = sorted(skipped_ext_counts.items(), key=lambda x: -x[1])
+
     return {
         "repo_id": repo_id,
         "repo_name": repo.name,
         "total_files": len(components),
+        "total_repo_files": total_repo_files,
+        "skipped_files_count": skipped_count,
+        "skipped_files": skipped_files[:500],
+        "skipped_category_breakdown": [{"category": c, "count": n} for c, n in skipped_category_breakdown],
+        "skipped_extension_breakdown": [{"ext": e, "count": n} for e, n in skipped_extension_breakdown],
         "analysis_status_breakdown": status_counts,
         "extension_breakdown": [{"ext": e, "count": c} for e, c in ext_breakdown],
         "component_type_breakdown": [{"type": t, "count": c} for t, c in type_breakdown],
