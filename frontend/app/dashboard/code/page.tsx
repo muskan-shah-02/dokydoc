@@ -137,15 +137,58 @@ interface TreeFolder {
 
 type TreeNode = TreeFolder | TreeFile;
 
+/** Strip the longest common directory prefix shared by all files.
+ *  E.g. all paths starting with "https:/raw.githubusercontent.com/org/repo/branch/"
+ *  get trimmed so the tree starts at the real project root. */
+function stripCommonPrefix(paths: string[]): string[] {
+  if (paths.length === 0) return [];
+  const split = paths.map((p) => p.split("/"));
+  const minLen = Math.min(...split.map((p) => p.length));
+  let common = 0;
+  for (let i = 0; i < minLen - 1; i++) {
+    // Keep iterating while every path shares the same segment
+    if (split.every((p) => p[i] === split[0][i])) common++;
+    else break;
+  }
+  return paths.map((p) => p.split("/").slice(common).join("/"));
+}
+
+/** Collapse single-child folder chains: a/ → b/ → file becomes "a/b/" as one node. */
+function collapseSingleChildFolders(node: TreeFolder): TreeFolder {
+  const collapsedChildren: TreeNode[] = node.children.map((child) => {
+    if (child.type !== "folder") return child;
+    const collapsed = collapseSingleChildFolders(child);
+    // Merge while the folder has exactly one child that is also a folder
+    let current = collapsed;
+    let mergedName = current.name;
+    let mergedPath = current.path;
+    while (current.children.length === 1 && current.children[0].type === "folder") {
+      current = current.children[0] as TreeFolder;
+      mergedName = `${mergedName}/${current.name}`;
+      mergedPath = current.path;
+    }
+    return { ...current, name: mergedName, path: mergedPath };
+  });
+  return { ...node, children: collapsedChildren };
+}
+
 function buildFileTree(components: CodeComponent[]): TreeFolder {
   const root: TreeFolder = { type: "folder", name: "", path: "", children: [] };
   const sorted = [...components].sort((a, b) => {
     const order: Record<string, number> = { processing: 0, pending: 1, failed: 2, completed: 3, redirected: 3 };
     return (order[a.analysis_status] ?? 2) - (order[b.analysis_status] ?? 2);
   });
-  for (const comp of sorted) {
-    const normalized = comp.location.replace(/^\.\//, "").replace(/\\/g, "/");
-    const parts = normalized.split("/");
+
+  // Normalize all paths first, then strip common URL/path prefix
+  const normalized = sorted.map((comp) =>
+    comp.location.replace(/^\.\//, "").replace(/\\/g, "/")
+  );
+  const trimmed = stripCommonPrefix(normalized);
+
+  for (let i = 0; i < sorted.length; i++) {
+    const comp = sorted[i];
+    const path = trimmed[i] || normalized[i];
+    const parts = path.split("/").filter(Boolean);
     const fileName = parts[parts.length - 1];
     const dirParts = parts.slice(0, -1);
     let current = root;
@@ -161,9 +204,11 @@ function buildFileTree(components: CodeComponent[]): TreeFolder {
       }
       current = child;
     }
-    current.children.push({ type: "file", name: fileName, path: normalized, component: comp });
+    current.children.push({ type: "file", name: fileName, path, component: comp });
   }
-  return root;
+
+  // Collapse single-child folder chains to reduce visual noise
+  return collapseSingleChildFolders(root);
 }
 
 function countFolder(folder: TreeFolder): { total: number; completed: number; processing: number; failed: number; pending: number } {
