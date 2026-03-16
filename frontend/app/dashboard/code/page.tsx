@@ -61,6 +61,8 @@ import {
   ChevronRight,
   ChevronDown,
   FolderGit2,
+  Folder,
+  FolderOpen,
   File,
   Sparkles,
 } from "lucide-react";
@@ -116,6 +118,243 @@ function elapsedSince(isoTimestamp: string | null): number {
   return Math.max(0, Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
 }
 
+// --- File Tree Types & Helpers ---
+
+interface TreeFile {
+  type: "file";
+  name: string;
+  path: string;
+  component: CodeComponent;
+}
+
+interface TreeFolder {
+  type: "folder";
+  name: string;
+  path: string;
+  children: TreeNode[];
+}
+
+type TreeNode = TreeFolder | TreeFile;
+
+function buildFileTree(components: CodeComponent[]): TreeFolder {
+  const root: TreeFolder = { type: "folder", name: "", path: "", children: [] };
+  const sorted = [...components].sort((a, b) => {
+    const order: Record<string, number> = { processing: 0, pending: 1, failed: 2, completed: 3, redirected: 3 };
+    return (order[a.analysis_status] ?? 2) - (order[b.analysis_status] ?? 2);
+  });
+  for (const comp of sorted) {
+    const normalized = comp.location.replace(/^\.\//, "").replace(/\\/g, "/");
+    const parts = normalized.split("/");
+    const fileName = parts[parts.length - 1];
+    const dirParts = parts.slice(0, -1);
+    let current = root;
+    let currentPath = "";
+    for (const part of dirParts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      let child = current.children.find(
+        (c): c is TreeFolder => c.type === "folder" && c.name === part
+      );
+      if (!child) {
+        child = { type: "folder", name: part, path: currentPath, children: [] };
+        current.children.push(child);
+      }
+      current = child;
+    }
+    current.children.push({ type: "file", name: fileName, path: normalized, component: comp });
+  }
+  return root;
+}
+
+function countFolder(folder: TreeFolder): { total: number; completed: number; processing: number; failed: number; pending: number } {
+  let total = 0, completed = 0, processing = 0, failed = 0, pending = 0;
+  function traverse(node: TreeNode) {
+    if (node.type === "file") {
+      total++;
+      const s = node.component.analysis_status;
+      if (s === "completed" || s === "redirected") completed++;
+      else if (s === "processing") processing++;
+      else if (s === "failed") failed++;
+      else pending++;
+    } else {
+      for (const child of node.children) traverse(child);
+    }
+  }
+  for (const child of folder.children) traverse(child);
+  return { total, completed, processing, failed, pending };
+}
+
+interface FileTreeRowsProps {
+  nodes: TreeNode[];
+  depth: number;
+  expandedFolders: Set<string>;
+  onToggleFolder: (path: string) => void;
+  fileIndexRef: { value: number };
+  onFileClick: (id: number) => void;
+  retryingIds: Set<number>;
+  onRetry: (id: number, e: any) => void;
+  getStatusBadge: (status: string) => JSX.Element;
+  getStatusIcon: (status: string) => JSX.Element;
+}
+
+function FileTreeRows({
+  nodes, depth, expandedFolders, onToggleFolder,
+  fileIndexRef, onFileClick, retryingIds, onRetry,
+  getStatusBadge, getStatusIcon,
+}: FileTreeRowsProps): JSX.Element {
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.type === "folder") {
+          const isExpanded = expandedFolders.has(node.path);
+          const counts = countFolder(node);
+          return (
+            <div key={node.path}>
+              {/* Folder row */}
+              <div
+                className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/40 cursor-pointer border-b border-muted/30 select-none"
+                style={{ paddingLeft: `${depth * 16 + 12}px` }}
+                onClick={() => onToggleFolder(node.path)}
+              >
+                <span className="text-muted-foreground flex-shrink-0">
+                  {isExpanded
+                    ? <ChevronDown className="w-3.5 h-3.5" />
+                    : <ChevronRight className="w-3.5 h-3.5" />}
+                </span>
+                {isExpanded
+                  ? <FolderOpen className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+                  : <Folder className="w-4 h-4 text-yellow-500 flex-shrink-0" />}
+                <span className="text-sm font-medium flex-1 min-w-0">{node.name}/</span>
+                <div className="text-xs flex-shrink-0 ml-auto flex items-center gap-2 text-muted-foreground">
+                  {counts.processing > 0 && <span className="text-blue-500">{counts.processing} analyzing</span>}
+                  {counts.failed > 0 && <span className="text-red-500">{counts.failed} failed</span>}
+                  {counts.pending > 0 && <span className="text-amber-500">{counts.pending} pending</span>}
+                  <span className={counts.completed === counts.total ? "text-green-600 font-medium" : ""}>
+                    {counts.completed}/{counts.total} files
+                  </span>
+                </div>
+              </div>
+              {/* Children */}
+              {isExpanded && (
+                <FileTreeRows
+                  nodes={node.children}
+                  depth={depth + 1}
+                  expandedFolders={expandedFolders}
+                  onToggleFolder={onToggleFolder}
+                  fileIndexRef={fileIndexRef}
+                  onFileClick={onFileClick}
+                  retryingIds={retryingIds}
+                  onRetry={onRetry}
+                  getStatusBadge={getStatusBadge}
+                  getStatusIcon={getStatusIcon}
+                />
+              )}
+            </div>
+          );
+        } else {
+          // File row
+          const comp = node.component;
+          const idx = ++fileIndexRef.value;
+          return (
+            <div
+              key={comp.id}
+              className={`grid items-center border-b border-muted/20 text-sm hover:bg-muted/30 cursor-pointer ${
+                comp.analysis_status === "processing"
+                  ? "bg-blue-50/70 dark:bg-blue-950/30 border-l-2 border-l-blue-500"
+                  : comp.analysis_status === "pending"
+                    ? "bg-amber-50/50 dark:bg-amber-950/20 border-l-2 border-l-amber-400"
+                    : comp.analysis_status === "failed"
+                      ? "bg-red-50/50 dark:bg-red-950/20 border-l-2 border-l-red-400"
+                      : ""
+              }`}
+              style={{ gridTemplateColumns: "44px 1fr 80px 120px 70px 80px 80px" }}
+              onClick={() => onFileClick(comp.id)}
+            >
+              <div className="text-center text-xs text-muted-foreground font-mono py-2">{idx}</div>
+              <div className="flex items-center gap-2 py-2 min-w-0" style={{ paddingLeft: `${depth * 16 + 8}px` }}>
+                <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
+                <div className="min-w-0">
+                  <span className="truncate text-sm block">{node.name}</span>
+                  {comp.analysis_status === "failed" && comp.summary && (() => {
+                    let errorMsg = comp.summary;
+                    let solution: string | null = null;
+                    const nlSplit = comp.summary.split("\nSolution: ");
+                    if (nlSplit.length >= 2) {
+                      errorMsg = nlSplit[0];
+                      solution = nlSplit.slice(1).join("\nSolution: ");
+                    } else {
+                      const solIdx = comp.summary.indexOf("Solution:");
+                      if (solIdx > 0) {
+                        errorMsg = comp.summary.slice(0, solIdx).trim();
+                        solution = comp.summary.slice(solIdx + 9).trim();
+                      }
+                    }
+                    return (
+                      <div className="mt-1 space-y-0.5">
+                        <div className="flex items-start gap-1">
+                          <AlertCircle className="w-3 h-3 text-red-500 mt-0.5 flex-shrink-0" />
+                          <span className="text-xs text-red-600 font-medium block" title={errorMsg}>
+                            {errorMsg.length > 90 ? errorMsg.slice(0, 88) + "..." : errorMsg}
+                          </span>
+                        </div>
+                        {solution && (
+                          <div className="flex items-start gap-1 ml-4">
+                            <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950 rounded px-1.5 py-0.5 block" title={solution}>
+                              {solution.length > 100 ? solution.slice(0, 98) + "..." : solution}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+              <div className="text-xs font-mono text-muted-foreground px-2 py-2">
+                {comp.version
+                  ? <span title={comp.version}>{comp.version.length > 8 ? comp.version.slice(0, 7) + "…" : comp.version}</span>
+                  : <span className="text-gray-400">—</span>}
+              </div>
+              <div className="flex items-center gap-1.5 px-2 py-2">
+                {getStatusIcon(comp.analysis_status)}
+                {getStatusBadge(comp.analysis_status)}
+              </div>
+              <div className="text-right text-sm text-muted-foreground px-2 py-2">
+                {comp.analysis_started_at && comp.analysis_completed_at
+                  ? formatElapsed(Math.round((new Date(comp.analysis_completed_at).getTime() - new Date(comp.analysis_started_at).getTime()) / 1000))
+                  : comp.analysis_status === "processing" && comp.analysis_started_at
+                    ? <span className="font-mono text-blue-600">{formatElapsed(elapsedSince(comp.analysis_started_at))}</span>
+                    : "—"}
+              </div>
+              <div className="text-right font-mono text-sm px-2 py-2">
+                {comp.ai_cost_inr != null && comp.ai_cost_inr > 0
+                  ? <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
+                  : comp.analysis_status === "completed"
+                    ? <span className="text-muted-foreground text-xs">cached</span>
+                    : <span className="text-muted-foreground">—</span>}
+              </div>
+              <div className="text-right px-2 py-2">
+                {comp.analysis_status === "failed" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                    disabled={retryingIds.has(comp.id)}
+                    onClick={(e) => { e.stopPropagation(); onRetry(comp.id, e); }}
+                  >
+                    {retryingIds.has(comp.id)
+                      ? <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                      : <RefreshCw className="w-3 h-3 mr-1" />}
+                    Retry
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        }
+      })}
+    </>
+  );
+}
+
 export default function CodePage() {
   // --- State: Repositories (primary view) ---
   const [repositories, setRepositories] = useState<Repository[]>([]);
@@ -124,6 +363,7 @@ export default function CodePage() {
   const [repoComponents, setRepoComponents] = useState<Record<number, CodeComponent[]>>({});
   const [loadingRepoComponents, setLoadingRepoComponents] = useState<Set<number>>(new Set());
   const [repoStats, setRepoStats] = useState<Record<number, any>>({});
+  const [expandedFolders, setExpandedFolders] = useState<Record<number, Set<string>>>({});
 
   // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
@@ -212,6 +452,17 @@ export default function CodePage() {
           savedScrollRef.current = scrollContainerRef.current.scrollTop;
         }
         setRepoComponents((prev) => ({ ...prev, [repoId]: data }));
+        // Auto-expand root-level folders on first load (not polling)
+        if (!isPolling) {
+          const rootFolders = new Set<string>();
+          for (const comp of data) {
+            const parts = comp.location.replace(/^\.\//, "").split("/");
+            if (parts.length > 1) rootFolders.add(parts[0]);
+          }
+          if (rootFolders.size > 0) {
+            setExpandedFolders((prev) => prev[repoId] ? prev : { ...prev, [repoId]: rootFolders });
+          }
+        }
         // Restore scroll after React re-render
         if (isPolling) {
           requestAnimationFrame(() => {
@@ -276,6 +527,18 @@ export default function CodePage() {
     },
     [repoComponents, fetchRepoComponents, repoStats, fetchRepoStats]
   );
+
+  const toggleFolder = useCallback((repoId: number, folderPath: string) => {
+    setExpandedFolders((prev) => {
+      const current = new Set(prev[repoId] ?? []);
+      if (current.has(folderPath)) {
+        current.delete(folderPath);
+      } else {
+        current.add(folderPath);
+      }
+      return { ...prev, [repoId]: current };
+    });
+  }, []);
 
   // Check if any repo is actively being analyzed
   const hasActiveAnalysis = repositories.some(
@@ -1056,145 +1319,42 @@ export default function CodePage() {
                                 );
                               })()}
 
-                              <Table>
-                                <TableHeader>
-                                  <TableRow>
-                                    <TableHead className="w-12 text-center">#</TableHead>
-                                    <TableHead>File</TableHead>
-                                    <TableHead>Version</TableHead>
-                                    <TableHead>Status</TableHead>
-                                    <TableHead className="text-right">Duration</TableHead>
-                                    <TableHead className="text-right">Cost</TableHead>
-                                    <TableHead className="text-right w-20">Actions</TableHead>
-                                  </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                  {/* Sort: processing → pending → failed → completed for visibility */}
-                                  {[...components].sort((a, b) => {
-                                    const order: Record<string, number> = { processing: 0, pending: 1, failed: 2, completed: 3, redirected: 3 };
-                                    return (order[a.analysis_status] ?? 2) - (order[b.analysis_status] ?? 2);
-                                  }).map((comp, idx) => (
-                                    <TableRow
-                                      key={comp.id}
-                                      className={`hover:bg-muted/30 ${
-                                        comp.analysis_status === "processing"
-                                          ? "bg-blue-50/70 dark:bg-blue-950/30 border-l-2 border-l-blue-500"
-                                          : comp.analysis_status === "pending"
-                                            ? "bg-amber-50/50 dark:bg-amber-950/20 border-l-2 border-l-amber-400"
-                                            : comp.analysis_status === "failed"
-                                              ? "bg-red-50/50 dark:bg-red-950/20 border-l-2 border-l-red-400"
-                                              : ""
-                                      }`}
-                                    >
-                                      <TableCell className="text-center text-xs text-muted-foreground font-mono">
-                                        {idx + 1}
-                                      </TableCell>
-                                      <TableCell
-                                        className="cursor-pointer"
-                                        onClick={() => router.push(`/dashboard/code/${comp.id}`)}
-                                      >
-                                        <div className="flex items-center gap-2">
-                                          <File className={`w-4 h-4 flex-shrink-0 ${comp.analysis_status === "failed" ? "text-red-400" : "text-muted-foreground"}`} />
-                                          <div className="min-w-0">
-                                            <span className="truncate text-sm block">{comp.name}</span>
-                                            {comp.analysis_status === "failed" && comp.summary && (() => {
-                                              // Robust parsing: try "\nSolution: " first, then "Solution:" anywhere, then fallback
-                                              let errorMsg = comp.summary;
-                                              let solution: string | null = null;
-                                              const nlSplit = comp.summary.split("\nSolution: ");
-                                              if (nlSplit.length >= 2) {
-                                                errorMsg = nlSplit[0];
-                                                solution = nlSplit.slice(1).join("\nSolution: ");
-                                              } else {
-                                                const solIdx = comp.summary.indexOf("Solution:");
-                                                if (solIdx > 0) {
-                                                  errorMsg = comp.summary.slice(0, solIdx).trim();
-                                                  solution = comp.summary.slice(solIdx + 9).trim();
-                                                }
-                                              }
-                                              return (
-                                                <div className="mt-1 space-y-0.5">
-                                                  <div className="flex items-start gap-1">
-                                                    <AlertCircle className="w-3 h-3 text-red-500 mt-0.5 flex-shrink-0" />
-                                                    <span className="text-xs text-red-600 font-medium block" title={errorMsg}>
-                                                      {errorMsg.length > 90 ? errorMsg.slice(0, 88) + "..." : errorMsg}
-                                                    </span>
-                                                  </div>
-                                                  {solution && (
-                                                    <div className="flex items-start gap-1 ml-4">
-                                                      <span className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950 rounded px-1.5 py-0.5 block" title={solution}>
-                                                        {solution.length > 100 ? solution.slice(0, 98) + "..." : solution}
-                                                      </span>
-                                                    </div>
-                                                  )}
-                                                </div>
-                                              );
-                                            })()}
-                                          </div>
-                                        </div>
-                                      </TableCell>
-                                      <TableCell className="text-xs font-mono text-muted-foreground">
-                                        {comp.version ? (
-                                          <span title={comp.version}>
-                                            {comp.version.length > 8 ? comp.version.slice(0, 7) + "…" : comp.version}
-                                          </span>
-                                        ) : (
-                                          <span className="text-gray-400">—</span>
-                                        )}
-                                      </TableCell>
-                                      <TableCell>
-                                        <div className="flex items-center gap-1.5">
-                                          {getStatusIcon(comp.analysis_status)}
-                                          {getStatusBadge(comp.analysis_status)}
-                                        </div>
-                                      </TableCell>
-                                      <TableCell className="text-right text-sm text-muted-foreground">
-                                        {comp.analysis_started_at && comp.analysis_completed_at ? (
-                                          formatElapsed(
-                                            Math.round(
-                                              (new Date(comp.analysis_completed_at).getTime() -
-                                                new Date(comp.analysis_started_at).getTime()) / 1000
-                                            )
-                                          )
-                                        ) : comp.analysis_status === "processing" && comp.analysis_started_at ? (
-                                          <span className="font-mono text-blue-600">
-                                            {formatElapsed(elapsedSince(comp.analysis_started_at))}
-                                          </span>
-                                        ) : (
-                                          "—"
-                                        )}
-                                      </TableCell>
-                                      <TableCell className="text-right font-mono text-sm">
-                                        {comp.ai_cost_inr != null && comp.ai_cost_inr > 0 ? (
-                                          <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
-                                        ) : comp.analysis_status === "completed" ? (
-                                          <span className="text-muted-foreground text-xs">cached</span>
-                                        ) : (
-                                          <span className="text-muted-foreground">—</span>
-                                        )}
-                                      </TableCell>
-                                      <TableCell className="text-right">
-                                        {comp.analysis_status === "failed" && (
-                                          <Button
-                                            variant="outline"
-                                            size="sm"
-                                            className="h-7 px-2 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                                            disabled={retryingIds.has(comp.id)}
-                                            onClick={(e) => handleRetryComponent(comp.id, e)}
-                                          >
-                                            {retryingIds.has(comp.id) ? (
-                                              <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                                            ) : (
-                                              <RefreshCw className="w-3 h-3 mr-1" />
-                                            )}
-                                            Retry
-                                          </Button>
-                                        )}
-                                      </TableCell>
-                                    </TableRow>
-                                  ))}
-                                </TableBody>
-                              </Table>
+                              {/* Hierarchical folder tree view */}
+                              <div className="border rounded-md overflow-hidden">
+                                {/* Header row */}
+                                <div
+                                  className="grid bg-muted/50 border-b text-xs font-medium text-muted-foreground py-2"
+                                  style={{ gridTemplateColumns: "44px 1fr 80px 120px 70px 80px 80px" }}
+                                >
+                                  <div className="text-center">#</div>
+                                  <div className="pl-3">File</div>
+                                  <div className="px-2">Version</div>
+                                  <div className="px-2">Status</div>
+                                  <div className="text-right px-2">Duration</div>
+                                  <div className="text-right px-2">Cost</div>
+                                  <div className="text-right px-2">Actions</div>
+                                </div>
+                                {/* Tree rows */}
+                                {(() => {
+                                  const tree = buildFileTree(components);
+                                  const repoExpanded = expandedFolders[repo.id] ?? new Set<string>();
+                                  const fileIndexRef = { value: 0 };
+                                  return (
+                                    <FileTreeRows
+                                      nodes={tree.children}
+                                      depth={0}
+                                      expandedFolders={repoExpanded}
+                                      onToggleFolder={(path) => toggleFolder(repo.id, path)}
+                                      fileIndexRef={fileIndexRef}
+                                      onFileClick={(id) => router.push(`/dashboard/code/${id}`)}
+                                      retryingIds={retryingIds}
+                                      onRetry={handleRetryComponent}
+                                      getStatusBadge={getStatusBadge}
+                                      getStatusIcon={getStatusIcon}
+                                    />
+                                  );
+                                })()}
+                              </div>
                             </>
                           );
                         })()}
