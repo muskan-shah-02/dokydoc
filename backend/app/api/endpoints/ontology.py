@@ -982,6 +982,132 @@ def get_system_mermaid_diagram(
 
         mermaid = "\n".join(lines)
 
+    # ---- Technical Architecture Diagram (graph LR with subgraphs per layer) ----
+    elif diagram_type == "technical_architecture":
+        def _layer_for_domain(domain: str) -> str:
+            d = domain.lower().replace("\\", "/")
+            if any(d.startswith(p) for p in ("frontend", "pages", "components", "public", "next", "ui")):
+                return "FRONTEND"
+            if any(x in d for x in ("task", "worker", "celery", "queue", "job")):
+                return "ASYNC"
+            if any(x in d for x in ("/models", "models/", "schema", "migrat", "/db", "db/")):
+                return "DATA"
+            if any(x in d for x in ("middleware", "tenant_context", "rate_limit", "audit_log", "security")):
+                return "MIDDLEWARE"
+            if any(x in d for x in ("api", "endpoint", "route", "router")):
+                return "API"
+            if any(x in d for x in ("service", "services")):
+                return "SERVICES"
+            if any(x in d for x in ("ai", "llm", "prompt", "gemini", "anthropic", "openai", "claude")):
+                return "AI"
+            # crude fallback: if it has 'model' or 'schema' anywhere
+            if "model" in d or "schema" in d:
+                return "DATA"
+            return "SERVICES"
+
+        domain_file_count2: dict = defaultdict(int)
+        domain_concept_count3: dict = defaultdict(int)
+        for c in components:
+            domain_file_count2[comp_to_domain[c.id]] += 1
+        for c in concepts:
+            d = comp_to_domain.get(c.source_component_id, "unknown")
+            domain_concept_count3[d] += 1
+
+        layer_domains2: dict[str, list] = defaultdict(list)  # layer -> sorted domain names
+        domain_to_layer2: dict = {}
+        for d in all_domains:
+            layer = _layer_for_domain(d)
+            layer_domains2[layer].append(d)
+            domain_to_layer2[d] = layer
+
+        # Layer display order and labels
+        layer_order = ["FRONTEND", "MIDDLEWARE", "API", "SERVICES", "ASYNC", "AI", "DATA"]
+        layer_labels = {
+            "FRONTEND": "FRONTEND (React/Next.js)",
+            "MIDDLEWARE": "Middleware & Tenant Context",
+            "API": "API Gateway & Router",
+            "SERVICES": "Core Domain Services",
+            "ASYNC": "Async Processing",
+            "AI": "AI Orchestration",
+            "DATA": "Data Persistence",
+        }
+
+        lines = ["graph LR"]
+
+        # External Clients subgraph (always present)
+        lines += [
+            '    subgraph EXTERNAL ["EXTERNAL CLIENTS"]',
+            "        direction TB",
+            '        END_USER["👤 End User"]',
+            '        GIT_REPOS["Git Repositories"]',
+            "    end",
+        ]
+
+        # One subgraph per layer that has at least one domain
+        for layer_id in layer_order:
+            domains_in_layer = sorted(layer_domains2.get(layer_id, []))
+            if not domains_in_layer:
+                continue
+            label = layer_labels[layer_id]
+            lines.append(f'    subgraph {layer_id} ["{label}"]')
+            lines.append("        direction TB")
+            for d in domains_in_layer:
+                nid = _safe_id(d)
+                fc = domain_file_count2.get(d, 0)
+                cc = domain_concept_count3.get(d, 0)
+                # Short label: last path segment
+                short = d.split("/")[-1].replace("_", " ").title()
+                node_label = f"{short}\\n{fc} files · {cc} concepts"
+                lines.append(f'        {nid}["{node_label}"]')
+                lines.append(f'        click {nid} call dokydocClick("{d}")')
+            lines.append("    end")
+
+        # Inter-layer edges: External → Frontend → Middleware → API → Services → Async/AI → Data
+        fe = [_safe_id(d) for d in sorted(layer_domains2.get("FRONTEND", []))]
+        mw = [_safe_id(d) for d in sorted(layer_domains2.get("MIDDLEWARE", []))]
+        api = [_safe_id(d) for d in sorted(layer_domains2.get("API", []))]
+        svc = [_safe_id(d) for d in sorted(layer_domains2.get("SERVICES", []))]
+        asc = [_safe_id(d) for d in sorted(layer_domains2.get("ASYNC", []))]
+        ai = [_safe_id(d) for d in sorted(layer_domains2.get("AI", []))]
+        data = [_safe_id(d) for d in sorted(layer_domains2.get("DATA", []))]
+
+        if fe:
+            lines.append(f'    END_USER -->|HTTPS| {fe[0]}')
+            lines.append(f'    GIT_REPOS -->|API/Webhook| {fe[0]}')
+        first_be = mw[0] if mw else (api[0] if api else (svc[0] if svc else None))
+        if fe and first_be:
+            for f_node in fe[:2]:
+                lines.append(f'    {f_node} --> {first_be}')
+        if mw and api:
+            for m_node in mw[:2]:
+                lines.append(f'    {m_node} --> {api[0]}')
+        if api and svc:
+            for a_node in api[:2]:
+                for s_node in svc[:3]:
+                    lines.append(f'    {a_node} --> {s_node}')
+        if svc and asc:
+            lines.append(f'    {svc[0]} -->|Task Queue| {asc[0]}')
+        if svc and ai:
+            lines.append(f'    {svc[0]} -->|AI Request| {ai[0]}')
+        if data:
+            for src in (svc + asc)[:4]:
+                lines.append(f'    {src} --> {data[0]}')
+
+        # Top cross-domain relationships as dashed lines
+        added_tech_edges: set = set()
+        for (sd, td), info in sorted(cross_domain.items(), key=lambda x: -x[1]["count"])[:8]:
+            sl = domain_to_layer2.get(sd)
+            tl = domain_to_layer2.get(td)
+            if sl and tl and sl != tl:
+                sn, tn = _safe_id(sd), _safe_id(td)
+                ek = (sn, tn)
+                if ek not in added_tech_edges:
+                    added_tech_edges.add(ek)
+                    rel = list(info["types"])[0] if info["types"] else "uses"
+                    lines.append(f'    {sn} -.->|{rel}| {tn}')
+
+        mermaid = "\n".join(lines)
+
     # ---- ER Diagram ----
     else:  # er
         lines = ["erDiagram"]
@@ -1032,6 +1158,170 @@ def get_system_mermaid_diagram(
         "repo_name": repo.name,
         "domain_count": len(all_domains),
         "concept_count": len(concepts),
+    }
+
+
+@router.get("/graph/system/{repo_id}/domain-mermaid")
+def get_domain_flow_mermaid(
+    repo_id: int,
+    domain_name: str = Query(..., description="Domain name from L3 (e.g. 'services' or 'api/endpoints')"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    L2 domain drill-down Mermaid diagram.
+    Shows all files in a domain and how their concepts relate to each other.
+    Each file node has a click directive to navigate to L1 (component analysis).
+    """
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.ontology_relationship import OntologyRelationship
+    from sqlalchemy import or_
+    from collections import defaultdict
+    import re
+
+    def _safe_id(name: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_]", "_", name).strip("_") or "node"
+
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    all_components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    if not all_components:
+        return {
+            "mermaid_syntax": "graph TD\n    A[No components analyzed yet]",
+            "domain_name": domain_name,
+            "components": [],
+        }
+
+    # Filter components belonging to this domain
+    def _derive_domain_from_path(location: str) -> str:
+        import posixpath
+        loc = (location or "").replace("\\", "/").lstrip("./")
+        for prefix in ("backend/app/", "frontend/src/", "src/app/", "app/", "src/", "lib/"):
+            if loc.startswith(prefix):
+                loc = loc[len(prefix):]
+                break
+        parts = [p for p in loc.split("/") if p]
+        if len(parts) <= 1:
+            return "root"
+        if len(parts) >= 3:
+            return f"{parts[0]}/{parts[1]}"
+        return parts[0]
+
+    domain_components = [
+        c for c in all_components
+        if _derive_domain_from_path(c.location or c.name) == domain_name
+    ]
+
+    if not domain_components:
+        return {
+            "mermaid_syntax": f'graph TD\n    A["No files found in domain: {domain_name}"]',
+            "domain_name": domain_name,
+            "components": [],
+        }
+
+    comp_ids = {c.id for c in domain_components}
+
+    concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id.in_(comp_ids),
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    concept_ids = {c.id for c in concepts}
+    concept_to_comp: dict = {c.id: c.source_component_id for c in concepts}
+
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all() if concept_ids else []
+
+    # Count cross-file relationships
+    file_rel_count: dict = defaultdict(lambda: defaultdict(int))
+    file_rel_types: dict = defaultdict(lambda: defaultdict(set))
+    for r in rels:
+        sc = concept_to_comp.get(r.source_concept_id)
+        tc = concept_to_comp.get(r.target_concept_id)
+        if sc and tc and sc != tc:
+            file_rel_count[sc][tc] += 1
+            file_rel_types[sc][tc].add(r.relationship_type or "uses")
+
+    # Count concepts per component
+    comp_concept_count: dict = defaultdict(int)
+    for c in concepts:
+        comp_concept_count[c.source_component_id] += 1
+
+    # Node shape by type
+    concept_types_per_comp: dict = defaultdict(set)
+    for c in concepts:
+        concept_types_per_comp[c.source_component_id].add((c.concept_type or "").upper())
+
+    def _node_shape(comp_id: int) -> tuple[str, str]:
+        """Returns (open, close) for Mermaid node shape."""
+        types = concept_types_per_comp.get(comp_id, set())
+        if types & {"SERVICE", "MANAGER", "HANDLER"}:
+            return "[", "]"
+        if types & {"MODEL", "SCHEMA", "TABLE", "DATABASE"}:
+            return "[(", ")]"
+        if types & {"ENDPOINT", "ROUTE", "API"}:
+            return "([", "])"
+        if types & {"TASK", "WORKER", "JOB"}:
+            return ">", "]"
+        return "[", "]"
+
+    lines = [f'graph TD']
+    lines.append(f'    title["{domain_name} — File Flow"]')
+    lines.append(f'    style title fill:none,stroke:none,color:#6366f1,font-weight:bold')
+
+    comp_info_list = []
+    for comp in domain_components:
+        file_name = (comp.location or comp.name or "").split("/")[-1]
+        nid = f"file_{comp.id}"
+        cc = comp_concept_count.get(comp.id, 0)
+        analysis_status = comp.analysis_status or "pending"
+        label = f"{file_name}\\n{cc} concepts"
+        op, cl = _node_shape(comp.id)
+        lines.append(f'    {nid}{op}"{label}"{cl}')
+        lines.append(f'    click {nid} call dokydocClick("component:{comp.id}")')
+        comp_info_list.append({
+            "id": comp.id,
+            "name": file_name,
+            "location": comp.location or comp.name,
+            "node_id": nid,
+            "concept_count": cc,
+            "analysis_status": analysis_status,
+        })
+
+    # Add edges (top relationships only to keep diagram readable)
+    edge_count = 0
+    for src_comp_id, targets in sorted(file_rel_count.items(), key=lambda x: -sum(x[1].values())):
+        for tgt_comp_id, count in sorted(targets.items(), key=lambda x: -x[1]):
+            if edge_count >= 30:
+                break
+            src_node = f"file_{src_comp_id}"
+            tgt_node = f"file_{tgt_comp_id}"
+            rel = list(file_rel_types[src_comp_id][tgt_comp_id])[0]
+            lines.append(f'    {src_node} -->|"{rel}"| {tgt_node}')
+            edge_count += 1
+
+    mermaid = "\n".join(lines)
+
+    return {
+        "mermaid_syntax": mermaid,
+        "diagram_type": "domain_flow",
+        "domain_name": domain_name,
+        "repo_id": repo_id,
+        "components": comp_info_list,
     }
 
 

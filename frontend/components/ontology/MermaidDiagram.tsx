@@ -7,14 +7,47 @@ interface MermaidDiagramProps {
   syntax: string;
   title?: string;
   className?: string;
+  /** Called when a node with a `click … call dokydocClick("…")` directive is clicked. */
+  onNodeClick?: (nodeId: string) => void;
+  /** Override the rendered SVG height (default "auto"). */
+  height?: string;
 }
 
-export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagramProps) {
+// Global registry so the Mermaid `call dokydocClick(...)` directive can find
+// the right handler regardless of how many diagrams are on the page.
+const GLOBAL_CB = "__dokydocClick__";
+
+export function MermaidDiagram({
+  syntax,
+  title,
+  className = "",
+  onNodeClick,
+  height,
+}: MermaidDiagramProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
   const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
+
+  // Keep a stable reference to the latest callback so the global handler
+  // can call it without stale-closure issues.
+  const callbackRef = useRef(onNodeClick);
+  useEffect(() => {
+    callbackRef.current = onNodeClick;
+  }, [onNodeClick]);
+
+  // Register/unregister the global dokydocClick function.
+  useEffect(() => {
+    (window as any)[GLOBAL_CB] = (nodeId: string) => {
+      callbackRef.current?.(nodeId);
+    };
+    return () => {
+      if ((window as any)[GLOBAL_CB]) {
+        delete (window as any)[GLOBAL_CB];
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!syntax || !containerRef.current) return;
@@ -30,6 +63,8 @@ export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagram
 
       mermaid.initialize({
         startOnLoad: false,
+        // 'loose' is required so click-directive callbacks reach window.*
+        securityLevel: "loose",
         theme: "base",
         themeVariables: {
           primaryColor: "#e0e7ff",
@@ -41,7 +76,8 @@ export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagram
           background: "#ffffff",
           mainBkg: "#ffffff",
           nodeBorder: "#6366f1",
-          clusterBkg: "#f8fafc",
+          clusterBkg: "#f0f4ff",
+          clusterBorder: "#c7d2fe",
           titleColor: "#1e1b4b",
           edgeLabelBackground: "#ffffff",
           fontSize: "13px",
@@ -56,13 +92,21 @@ export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagram
         .then(({ svg }) => {
           if (cancelled || !containerRef.current) return;
           containerRef.current.innerHTML = svg;
-          // Make SVG responsive
           const svgEl = containerRef.current.querySelector("svg");
           if (svgEl) {
             svgEl.style.width = "100%";
-            svgEl.style.height = "auto";
-            svgEl.style.maxHeight = "500px";
+            svgEl.style.height = height ?? "auto";
+            svgEl.style.minHeight = "300px";
+            if (!height) svgEl.style.maxHeight = "700px";
           }
+
+          // Add pointer cursor to clickable nodes
+          if (onNodeClick) {
+            containerRef.current.querySelectorAll(".node, .cluster label").forEach((el) => {
+              (el as HTMLElement).style.cursor = "pointer";
+            });
+          }
+
           setRendered(true);
         })
         .catch((err) => {
@@ -75,7 +119,8 @@ export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagram
     return () => {
       cancelled = true;
     };
-  }, [syntax]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syntax, height]);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(syntax);
@@ -120,7 +165,7 @@ export function MermaidDiagram({ syntax, title, className = "" }: MermaidDiagram
       </div>
 
       {/* Render area */}
-      <div className="relative rounded-lg border bg-white p-4 overflow-auto min-h-[200px]">
+      <div className="relative rounded-lg border bg-white p-4 overflow-auto min-h-[300px]">
         {!rendered && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 text-gray-400">
             <Loader2 className="h-5 w-5 animate-spin" />

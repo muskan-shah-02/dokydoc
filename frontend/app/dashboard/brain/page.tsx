@@ -83,10 +83,10 @@ export default function BrainDashboardPage() {
   const [drillData, setDrillData] = useState<any>(null);
   const [drillLoading, setDrillLoading] = useState(false);
 
-  // L3 diagram view
-  type DiagramType = "graph" | "architecture" | "dataflow" | "er";
-  const [l3View, setL3View] = useState<DiagramType>("graph");
-  const [mermaidData, setMermaidData] = useState<{ syntax: string; diagram_type: string } | null>(null);
+  // L3 diagram view — default to the full technical architecture
+  type DiagramType = "architecture" | "dataflow" | "er" | "graph";
+  const [l3View, setL3View] = useState<DiagramType>("architecture");
+  const [mermaidData, setMermaidData] = useState<{ mermaid_syntax: string; diagram_type: string } | null>(null);
   const [mermaidLoading, setMermaidLoading] = useState(false);
 
   // L2 concept filter + detail panel
@@ -94,6 +94,15 @@ export default function BrainDashboardPage() {
   const [selectedConceptId, setSelectedConceptId] = useState<number | null>(null);
   const [conceptDetail, setConceptDetail] = useState<any>(null);
   const [conceptDetailLoading, setConceptDetailLoading] = useState(false);
+
+  // L2 domain-flow Mermaid (file-level diagram within a domain)
+  type L2ViewType = "graph" | "flow";
+  const [l2View, setL2View] = useState<L2ViewType>("flow");
+  const [domainFlowData, setDomainFlowData] = useState<{
+    mermaid_syntax: string;
+    components: { id: number; name: string; node_id: string }[];
+  } | null>(null);
+  const [domainFlowLoading, setDomainFlowLoading] = useState(false);
 
   // Fetch top-level meta-graph (Level 5)
   const fetchMetaGraph = useCallback(async () => {
@@ -132,20 +141,52 @@ export default function BrainDashboardPage() {
     setMermaidLoading(true);
     setMermaidData(null);
     try {
-      const data = await api.get<any>(`/ontology/graph/system/${repoId}/mermaid?diagram_type=${type}`);
+      const data = await api.get<any>(
+        `/ontology/graph/system/${repoId}/mermaid?diagram_type=${type}`
+      );
       setMermaidData(data);
     } catch {
-      setMermaidData({ syntax: "graph TD\n    A[Failed to generate diagram]", diagram_type: type });
+      setMermaidData({
+        mermaid_syntax: "graph TD\n    A[Failed to generate diagram]",
+        diagram_type: type,
+      });
     } finally {
       setMermaidLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (drill.level === 3 && drill.repoId && l3View !== "graph") {
-      loadMermaid(drill.repoId, l3View === "architecture" ? "architecture" : l3View === "dataflow" ? "dataflow" : "er");
+    if (drill.level === 3 && drill.repoId) {
+      const type =
+        l3View === "architecture"
+          ? "technical_architecture"
+          : l3View === "dataflow"
+          ? "dataflow"
+          : l3View === "er"
+          ? "er"
+          : null;
+      if (type) loadMermaid(drill.repoId, type);
     }
   }, [l3View, drill.level, drill.repoId, loadMermaid]);
+
+  // Load L2 domain-flow Mermaid when entering L2
+  const loadDomainFlow = useCallback(async (repoId: number, domainName: string) => {
+    setDomainFlowLoading(true);
+    setDomainFlowData(null);
+    try {
+      const data = await api.get<any>(
+        `/ontology/graph/system/${repoId}/domain-mermaid?domain_name=${encodeURIComponent(domainName)}`
+      );
+      setDomainFlowData(data);
+    } catch {
+      setDomainFlowData({
+        mermaid_syntax: "graph TD\n    A[Failed to load domain flow]",
+        components: [],
+      });
+    } finally {
+      setDomainFlowLoading(false);
+    }
+  }, []);
 
   const loadConceptDetail = useCallback(async (conceptId: number) => {
     setConceptDetailLoading(true);
@@ -160,12 +201,17 @@ export default function BrainDashboardPage() {
     }
   }, []);
 
-  // Reset L2 state when drilling changes
+  // Reset L2 state when drilling changes; auto-load domain flow when entering L2
   useEffect(() => {
     setL2TypeFilter("ALL");
     setSelectedConceptId(null);
     setConceptDetail(null);
-  }, [drill.domainName]);
+    setDomainFlowData(null);
+    if (drill.level === 2 && drill.repoId && drill.domainName) {
+      loadDomainFlow(drill.repoId, drill.domainName);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drill.domainName, drill.level]);
 
   // Drill into a level
   const drillInto = useCallback(
@@ -650,10 +696,10 @@ export default function BrainDashboardPage() {
                 {/* View type selector */}
                 <div className="flex rounded-lg border bg-gray-50 p-0.5 gap-0.5">
                   {([
-                    { key: "graph", label: "Graph" },
                     { key: "architecture", label: "Architecture" },
                     { key: "dataflow", label: "Data Flow" },
                     { key: "er", label: "ER Diagram" },
+                    { key: "graph", label: "Graph" },
                   ] as { key: DiagramType; label: string }[]).map((v) => (
                     <button
                       key={v.key}
@@ -691,15 +737,29 @@ export default function BrainDashboardPage() {
               ) : (
                 <div className="p-4">
                   {mermaidLoading ? (
-                    <div className="flex h-48 items-center justify-center gap-2 text-gray-400">
+                    <div className="flex h-64 items-center justify-center gap-2 text-gray-400">
                       <Loader2 className="h-5 w-5 animate-spin" />
-                      <span className="text-sm">Generating diagram...</span>
+                      <span className="text-sm">Generating architecture diagram…</span>
                     </div>
                   ) : mermaidData ? (
-                    <MermaidDiagram
-                      syntax={mermaidData.mermaid_syntax}
-                      title={`${drill.projectName} — ${l3View === "architecture" ? "Architecture" : l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
-                    />
+                    <>
+                      {l3View === "architecture" && (
+                        <p className="mb-2 text-xs text-indigo-600 font-medium">
+                          Click any service node to drill down into its file-level view (L2).
+                        </p>
+                      )}
+                      <MermaidDiagram
+                        syntax={mermaidData.mermaid_syntax}
+                        title={`${drill.projectName} — ${l3View === "architecture" ? "Technical Architecture" : l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
+                        height="600px"
+                        onNodeClick={(nodeId) => {
+                          // Nodes in the technical_architecture diagram use domain names as IDs
+                          if (l3View === "architecture") {
+                            drillInto({ ...drill, level: 2, domainName: nodeId });
+                          }
+                        }}
+                      />
+                    </>
                   ) : (
                     <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
                       Select a diagram type above
@@ -760,16 +820,37 @@ export default function BrainDashboardPage() {
 
             return (
               <div>
-                <div className="border-b px-5 py-3 flex items-center justify-between">
-                  <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                    <Network className="h-4 w-4 text-green-500" />
-                    Level 2 — Domain: {drill.domainName}
-                    <span className="ml-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700">
-                      {allDomainNodes.length} concepts
-                    </span>
-                  </h2>
-                  {/* Type filter tabs */}
-                  {types.length > 1 && (
+                <div className="border-b px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                      <Network className="h-4 w-4 text-green-500" />
+                      Level 2 — {drill.domainName}
+                      <span className="ml-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700">
+                        {allDomainNodes.length} concepts
+                      </span>
+                    </h2>
+                    {/* L2 view selector */}
+                    <div className="flex rounded-lg border bg-gray-50 p-0.5 gap-0.5">
+                      {([
+                        { key: "flow", label: "File Flow" },
+                        { key: "graph", label: "Concept Graph" },
+                      ] as { key: L2ViewType; label: string }[]).map((v) => (
+                        <button
+                          key={v.key}
+                          onClick={() => setL2View(v.key)}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
+                            l2View === v.key
+                              ? "bg-white text-green-700 shadow-sm"
+                              : "text-gray-500 hover:text-gray-700"
+                          }`}
+                        >
+                          {v.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Type filter tabs (only for graph view) */}
+                  {l2View === "graph" && types.length > 1 && (
                     <div className="flex gap-1 flex-wrap">
                       {types.map((t) => (
                         <button
@@ -788,7 +869,59 @@ export default function BrainDashboardPage() {
                   )}
                 </div>
 
-                {allDomainNodes.length > 0 ? (
+                {/* ── L2 File Flow Diagram (Mermaid) ── */}
+                {l2View === "flow" && (
+                  <div className="p-4">
+                    {domainFlowLoading ? (
+                      <div className="flex h-48 items-center justify-center gap-2 text-gray-400">
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span className="text-sm">Building file flow diagram…</span>
+                      </div>
+                    ) : domainFlowData ? (
+                      <>
+                        <p className="mb-2 text-xs text-green-700 font-medium">
+                          Click any file node to open its full analysis (L1).
+                        </p>
+                        <MermaidDiagram
+                          syntax={domainFlowData.mermaid_syntax}
+                          title={`${drill.domainName} — File Flow`}
+                          height="520px"
+                          onNodeClick={(nodeId) => {
+                            // nodeId is "component:{id}" for file nodes
+                            if (nodeId.startsWith("component:")) {
+                              const compId = parseInt(nodeId.replace("component:", ""), 10);
+                              if (!isNaN(compId)) {
+                                router.push(`/dashboard/code/${compId}`);
+                              }
+                            }
+                          }}
+                        />
+                        {domainFlowData.components.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {domainFlowData.components.map((c) => (
+                              <button
+                                key={c.id}
+                                onClick={() => router.push(`/dashboard/code/${c.id}`)}
+                                className="flex items-center gap-1.5 rounded-md border bg-white px-2.5 py-1 text-xs text-gray-700 hover:bg-green-50 hover:border-green-300 transition-colors"
+                                title={`Open ${c.name} analysis`}
+                              >
+                                <FileText className="h-3 w-3 text-green-500 flex-shrink-0" />
+                                {c.name}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
+                        No flow data available for this domain
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ── L2 Concept Graph ── */}
+                {l2View === "graph" && allDomainNodes.length > 0 ? (
                   <div className="flex" style={{ height: "520px" }}>
                     {/* Graph */}
                     <div className={selectedConceptId ? "flex-1" : "w-full"} style={{ minWidth: 0 }}>
@@ -890,12 +1023,18 @@ export default function BrainDashboardPage() {
                             )}
                             {/* Source file drill-down */}
                             {selectedNode?.source_component_id && (
-                              <div className="pt-2 border-t">
+                              <div className="pt-2 border-t space-y-1.5">
                                 <button
-                                  onClick={() => drillInto({ ...drill, level: 1, componentId: selectedNode.source_component_id, componentName: selectedNode.name })}
+                                  onClick={() => router.push(`/dashboard/code/${selectedNode.source_component_id}`)}
                                   className="w-full rounded-md bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700 hover:bg-orange-100"
                                 >
-                                  Drill into File (L1) →
+                                  Open File Analysis (L1) →
+                                </button>
+                                <button
+                                  onClick={() => drillInto({ ...drill, level: 1, componentId: selectedNode.source_component_id, componentName: selectedNode.name })}
+                                  className="w-full rounded-md bg-gray-50 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-100"
+                                >
+                                  View in Brain (L1)
                                 </button>
                               </div>
                             )}
@@ -908,11 +1047,11 @@ export default function BrainDashboardPage() {
                       </div>
                     )}
                   </div>
-                ) : (
+                ) : l2View === "graph" ? (
                   <div className="flex h-60 items-center justify-center text-gray-400">
                     <p className="text-sm">No concepts in this domain yet</p>
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })()
