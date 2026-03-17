@@ -66,6 +66,8 @@ import {
   File,
   Sparkles,
   EyeOff,
+  Activity,
+  BarChart2,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useRouter } from "next/navigation";
@@ -1136,6 +1138,99 @@ export default function CodePage() {
                 {failedFiles > 0 && (
                   <div className="h-full bg-red-500" style={{ width: `${(failedFiles / totalFiles) * 100}%` }} />
                 )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Currently Analyzing Banner ── */}
+      {(() => {
+        const processing = Object.entries(repoComponents).flatMap(([repoId, comps]) =>
+          comps
+            .filter((c) => c.analysis_status === "processing")
+            .map((c) => ({ ...c, repoName: repositories.find((r) => r.id === Number(repoId))?.name ?? `Repo #${repoId}` }))
+        );
+        if (processing.length === 0) return null;
+        return (
+          <div className="rounded-lg border-2 border-blue-400 bg-blue-50 dark:bg-blue-950 p-4 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-blue-700 dark:text-blue-300">
+              <Activity className="w-4 h-4 animate-pulse" />
+              Now Analyzing ({processing.length} file{processing.length > 1 ? "s" : ""})
+              <span className="ml-auto text-xs font-normal text-blue-500">These files move to their repo folder once complete</span>
+            </div>
+            <div className="space-y-1">
+              {processing.map((comp) => {
+                const fileName = comp.location?.split("/").pop() ?? comp.name;
+                const elapsed = comp.analysis_started_at
+                  ? Math.round((Date.now() - new Date(comp.analysis_started_at).getTime()) / 1000)
+                  : null;
+                return (
+                  <div key={comp.id} className="flex items-center gap-3 rounded-md bg-white dark:bg-blue-900/40 border border-blue-200 px-3 py-2 text-xs">
+                    <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <span className="font-mono font-medium text-gray-800 dark:text-gray-100 truncate block">{fileName}</span>
+                      <span className="text-gray-400">{comp.repoName}</span>
+                    </div>
+                    {elapsed !== null && (
+                      <span className="text-blue-500 font-mono flex-shrink-0">{elapsed}s</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── File Type Breakdown ── */}
+      {(() => {
+        const allComps = Object.values(repoComponents).flat();
+        if (allComps.length === 0) return null;
+
+        // Derive language from file extension
+        const extCounts: Record<string, number> = {};
+        for (const comp of allComps) {
+          const loc = comp.location ?? comp.name ?? "";
+          const fileName = loc.split("/").pop() ?? loc;
+          const ext = fileName.includes(".") ? "." + fileName.split(".").pop()!.toLowerCase() : "(no ext)";
+          extCounts[ext] = (extCounts[ext] ?? 0) + 1;
+        }
+
+        // Count repo-level skipped breakdown from repoStats (uses skipped_category_breakdown array)
+        const skippedBreakdown: Record<string, number> = {};
+        for (const stats of Object.values(repoStats)) {
+          for (const cat of (stats as any).skipped_category_breakdown ?? []) {
+            skippedBreakdown[cat.category] = (skippedBreakdown[cat.category] ?? 0) + (cat.count ?? 0);
+          }
+        }
+
+        const topExts = Object.entries(extCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8);
+
+        return (
+          <div className="rounded-lg border bg-white dark:bg-gray-950 p-4 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
+              <BarChart2 className="w-4 h-4 text-indigo-500" />
+              Repository File Breakdown
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {topExts.map(([ext, count]) => (
+                <div key={ext} className="rounded-md border bg-gray-50 dark:bg-gray-900 px-3 py-2 flex items-center justify-between">
+                  <span className="text-xs font-mono text-gray-600 dark:text-gray-400 truncate">{ext}</span>
+                  <span className="text-xs font-bold text-gray-900 dark:text-gray-100 ml-2">{count}</span>
+                </div>
+              ))}
+            </div>
+            {Object.keys(skippedBreakdown).length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1 border-t">
+                <span className="text-xs text-gray-400 self-center">Skipped:</span>
+                {Object.entries(skippedBreakdown).map(([cat, cnt]) => (
+                  <span key={cat} className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 rounded-full px-2 py-0.5">
+                    {cat}: {cnt}
+                  </span>
+                ))}
               </div>
             )}
           </div>

@@ -87,11 +87,23 @@ export default function ProjectDetailPage() {
 
   const fetchProject = useCallback(async () => {
     try {
-      const [projectRes, assetsRes, statsRes] = await Promise.all([
+      // Use allSettled so a failing stats/assets call doesn't block the whole page
+      const [projectResult, assetsResult, statsResult] = await Promise.allSettled([
         api.get<Initiative>(`/initiatives/${projectId}`),
         api.get<InitiativeAsset[]>(`/initiatives/${projectId}/assets`),
         api.get<OntologyStats>("/ontology/stats", { initiative_id: projectId }),
       ]);
+
+      if (projectResult.status === "rejected") {
+        const reason = (projectResult.reason as any)?.detail ?? (projectResult.reason as any)?.message ?? "Project not found";
+        setError(`Could not load project: ${reason}`);
+        return;
+      }
+
+      const projectRes = projectResult.value;
+      const assetsRes = assetsResult.status === "fulfilled" ? assetsResult.value : [];
+      const statsRes = statsResult.status === "fulfilled" ? statsResult.value : { total_concepts: 0, total_relationships: 0, concept_types: [] };
+
       setProject(projectRes);
       setAssets(assetsRes.filter((a) => a.is_active));
       setOntologyStats(statsRes);
@@ -143,10 +155,12 @@ export default function ProjectDetailPage() {
     setShowLinkDialog(true);
     try {
       if (type === "DOCUMENT") {
-        const docs = await api.get<Document[]>("/documents/", { limit: 200 });
+        const raw = await api.get<any>("/documents/", { limit: 200 });
+        const docs: Document[] = raw.items ?? raw.documents ?? (Array.isArray(raw) ? raw : []);
         setAllDocs(docs);
       } else {
-        const repos = await api.get<Repository[]>("/repositories/", { limit: 200 });
+        const raw = await api.get<any>("/repositories/", { limit: 200 });
+        const repos: Repository[] = raw.items ?? raw.repositories ?? (Array.isArray(raw) ? raw : []);
         setAllRepos(repos);
       }
     } catch { /* ignore */ }
@@ -228,10 +242,17 @@ export default function ProjectDetailPage() {
 
   if (!project) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center">
-        <AlertCircle className="h-8 w-8 text-red-400" />
-        <p className="mt-2 text-sm text-gray-500">Project not found</p>
-        <button onClick={() => router.push("/dashboard/projects")} className="mt-3 text-sm text-blue-600 hover:underline">
+      <div className="flex h-96 flex-col items-center justify-center gap-3">
+        <div className="rounded-full bg-red-50 p-4">
+          <AlertCircle className="h-8 w-8 text-red-400" />
+        </div>
+        <div className="text-center">
+          <p className="text-base font-semibold text-gray-800">Project could not be loaded</p>
+          <p className="mt-1 text-sm text-gray-500 max-w-xs">
+            {error || `No project found with ID ${projectId}. It may have been deleted or you may not have access.`}
+          </p>
+        </div>
+        <button onClick={() => router.push("/dashboard/projects")} className="mt-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
           Back to Projects
         </button>
       </div>

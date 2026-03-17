@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
+import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
 
 // ----- Types -----
 
@@ -120,6 +121,8 @@ export default function AutoDocsPage() {
   const [viewingDoc, setViewingDoc] = useState<GeneratedDocFull | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  // Diagram view toggle: "rendered" = MarkdownRenderer, "diagram" = MermaidDiagram
+  const [diagramView, setDiagramView] = useState<"rendered" | "diagram">("rendered");
 
   // Fetch available sources (documents + repositories)
   useEffect(() => {
@@ -161,6 +164,7 @@ export default function AutoDocsPage() {
         doc_type: selectedDocType,
       }) as GeneratedDocFull;
       setViewingDoc(data);
+      setDiagramView("rendered");
       fetchHistory();
     } catch {
       alert("Generation failed. Please check that this source has been analyzed.");
@@ -174,6 +178,7 @@ export default function AutoDocsPage() {
     try {
       const data = await api.get(`/auto-docs/${id}`) as GeneratedDocFull;
       setViewingDoc(data);
+      setDiagramView("rendered");
     } catch {
       alert("Failed to load document.");
     } finally {
@@ -185,6 +190,12 @@ export default function AutoDocsPage() {
     navigator.clipboard.writeText(content);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // Extract first mermaid code block from content
+  const extractMermaid = (content: string): string | null => {
+    const match = content.match(/```mermaid\n([\s\S]*?)```/);
+    return match ? match[1].trim() : null;
   };
 
   const handleDownload = (doc: GeneratedDocFull) => {
@@ -365,7 +376,10 @@ export default function AutoDocsPage() {
             </div>
           )}
 
-          {!viewLoading && viewingDoc && (
+          {!viewLoading && viewingDoc && (() => {
+            const mermaidSyntax = extractMermaid(viewingDoc.content ?? "");
+            const hasMermaid = !!mermaidSyntax;
+            return (
             <div className="bg-white border rounded-xl shadow-sm overflow-hidden flex flex-col h-full">
               {/* Viewer header */}
               <div className="flex items-center justify-between px-5 py-3 border-b bg-gray-50">
@@ -380,6 +394,23 @@ export default function AutoDocsPage() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {/* Code / Diagram toggle — only shown when mermaid content exists */}
+                  {hasMermaid && (
+                    <div className="flex rounded-md border overflow-hidden text-xs">
+                      <button
+                        onClick={() => setDiagramView("rendered")}
+                        className={`px-3 py-1.5 font-medium transition-colors ${diagramView === "rendered" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                      >
+                        Code
+                      </button>
+                      <button
+                        onClick={() => setDiagramView("diagram")}
+                        className={`px-3 py-1.5 font-medium transition-colors border-l ${diagramView === "diagram" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                      >
+                        View Diagram
+                      </button>
+                    </div>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -406,7 +437,15 @@ export default function AutoDocsPage() {
               {/* Content */}
               <div className="flex-1 overflow-y-auto p-6 max-h-[calc(100vh-280px)]">
                 {viewingDoc.content ? (
-                  <MarkdownRenderer content={viewingDoc.content} />
+                  hasMermaid && diagramView === "diagram" ? (
+                    <MermaidDiagram
+                      syntax={mermaidSyntax!}
+                      title={viewingDoc.title}
+                      className="w-full"
+                    />
+                  ) : (
+                    <MarkdownRenderer content={viewingDoc.content} />
+                  )
                 ) : (
                   <p className="text-sm text-gray-400 italic">No content generated.</p>
                 )}
@@ -420,7 +459,8 @@ export default function AutoDocsPage() {
                 </div>
               )}
             </div>
-          )}
+            );
+          })()}
         </div>
       </div>
     </div>

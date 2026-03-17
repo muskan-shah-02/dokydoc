@@ -122,11 +122,14 @@ export default function ValidationPanelPage() {
         }),
       ]);
 
-      if (!docResponse.ok) throw new Error("Failed to fetch documents.");
-      if (!mismatchResponse.ok) throw new Error("Failed to fetch mismatches.");
+      if (!docResponse.ok) throw new Error(`Unable to load documents (HTTP ${docResponse.status}). Check that the backend is running.`);
+      if (!mismatchResponse.ok) throw new Error(`Unable to load validation results (HTTP ${mismatchResponse.status}).`);
 
-      const docData: Document[] = await docResponse.json();
-      const mismatchData: Mismatch[] = await mismatchResponse.json();
+      // /documents/ returns a paginated object {items:[...]} not a plain array
+      const rawDoc = await docResponse.json();
+      const docData: Document[] = rawDoc.items ?? rawDoc.documents ?? (Array.isArray(rawDoc) ? rawDoc : []);
+      const rawMismatch = await mismatchResponse.json();
+      const mismatchData: Mismatch[] = rawMismatch.items ?? rawMismatch.mismatches ?? (Array.isArray(rawMismatch) ? rawMismatch : []);
 
       // Enhance documents with mismatch counts
       const enhancedDocuments = docData.map((doc) => ({
@@ -145,7 +148,15 @@ export default function ValidationPanelPage() {
       setFilteredDocuments(enhancedDocuments);
       setMismatches(mismatchData);
     } catch (err: any) {
-      setError(err.message);
+      // Show a clean, readable message — not a raw JS TypeError
+      const raw: string = err?.message ?? String(err);
+      if (raw.includes("is not a function") || raw.includes("is undefined") || raw.includes("Cannot read")) {
+        setError("Unexpected data format received from the server. Please refresh the page or contact support.");
+      } else if (raw.includes("NetworkError") || raw.includes("Failed to fetch")) {
+        setError("Cannot connect to the backend. Make sure the server is running on port 8000.");
+      } else {
+        setError(raw);
+      }
     } finally {
       setIsLoading(false);
     }
