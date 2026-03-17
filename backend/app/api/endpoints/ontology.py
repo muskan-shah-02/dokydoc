@@ -1325,6 +1325,448 @@ def get_domain_flow_mermaid(
     }
 
 
+@router.get("/graph/repo/{repo_id}/drill")
+def adaptive_path_drill(
+    repo_id: int,
+    path: str = Query("", description="Navigation path (e.g. 'services' or 'services/billing'). Empty = architectural overview."),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Adaptive drill-down that follows the ACTUAL filesystem depth of the repo.
+
+    - path=""          → Architectural layer overview (graph LR with subgraphs)
+    - path="services"  → Nodes at the next level: sub-dirs OR files, whichever exist
+    - path="services/billing" → Same, one level deeper
+    - A node whose type="file" means click → navigate to L1 (/dashboard/code/{id})
+    - A node whose type="group" means click → drill deeper (append segment to path)
+    - A node whose type="mixed_group" contains both files and sub-groups
+
+    Returns:
+      view_type:      "architecture" | "groups" | "files" | "mixed"
+      mermaid_syntax: Mermaid diagram for this level
+      nodes:          Array of {name, path, type, file_count, concept_count,
+                                component_id, depth_to_leaf, key_concepts}
+      breadcrumb:     Array of {label, path} for navigation back up
+    """
+    import re
+    from collections import defaultdict
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.ontology_relationship import OntologyRelationship
+    from sqlalchemy import or_
+
+    def _safe_id(name: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_]", "_", name).strip("_") or "node"
+
+    def _normalize(location: str) -> str:
+        """Strip repo-specific URL and common root prefixes to get a clean relative path."""
+        loc = (location or "").replace("\\", "/")
+        # Handle GitHub blob/tree URLs: strip everything before and including the branch segment
+        for marker in ("blob/", "tree/"):
+            idx = loc.find(marker)
+            if idx >= 0:
+                after = loc[idx + len(marker):]
+                slash = after.find("/")
+                if slash >= 0:
+                    loc = after[slash + 1:]
+                break
+        loc = loc.lstrip("./")
+        # Strip standard root prefixes
+        for prefix in (
+            "backend/app/", "backend/", "frontend/src/", "frontend/app/",
+            "frontend/", "src/app/", "src/", "app/", "lib/",
+        ):
+            if loc.startswith(prefix):
+                loc = loc[len(prefix):]
+                break
+        return loc
+
+    def _depth_to_leaf(normalized_path: str, all_norms: list[str]) -> int:
+        """Compute how many more path segments exist beneath this path across all files."""
+        prefix = normalized_path.rstrip("/") + "/"
+        max_depth = 0
+        for n in all_norms:
+            if n.startswith(prefix):
+                remaining = n[len(prefix):]
+                depth = len([p for p in remaining.split("/") if p])
+                max_depth = max(max_depth, depth)
+        return max_depth
+
+    def _build_breadcrumb(parts: list) -> list:
+        crumbs = []
+        for i, seg in enumerate(parts):
+            crumbs.append({"label": seg, "path": "/".join(parts[:i + 1])})
+        return crumbs
+
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    all_components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    if not all_components:
+        return {
+            "view_type": "empty",
+            "mermaid_syntax": "graph TD\n    A[No components analyzed yet]",
+            "nodes": [],
+            "breadcrumb": [],
+        }
+
+    # Normalize all component locations
+    comp_norms = {c.id: _normalize(c.location or c.name or "") for c in all_components}
+    all_norms = list(comp_norms.values())
+
+    # --- ARCHITECTURAL OVERVIEW (path == "") ---
+    if not path:
+        # Reuse the technical_architecture mermaid generator via internal call
+        # We'll inline a trimmed version here for clarity
+        def _layer_for_domain(domain: str) -> str:
+            d = domain.lower()
+            if any(d.startswith(p) for p in ("frontend", "pages", "components", "public", "next", "ui")):
+                return "FRONTEND"
+            if any(x in d for x in ("task", "worker", "celery", "queue", "job")):
+                return "ASYNC"
+            if any(x in d for x in ("model", "schema", "migrat", "/db", "db/")):
+                return "DATA"
+            if any(x in d for x in ("middleware", "tenant_context", "rate_limit", "audit", "security")):
+                return "MIDDLEWARE"
+            if any(x in d for x in ("api", "endpoint", "route", "router")):
+                return "API"
+            if any(x in d for x in ("service", "services")):
+                return "SERVICES"
+            if any(x in d for x in ("ai", "llm", "prompt", "gemini", "anthropic", "openai")):
+                return "AI"
+            if "model" in d or "schema" in d:
+                return "DATA"
+            return "SERVICES"
+
+        # Compute first-level path segments (the "domain" groups)
+        domain_file_count: dict = defaultdict(int)
+        domain_comp_ids: dict = defaultdict(list)
+        for comp in all_components:
+            norm = comp_norms[comp.id]
+            parts = [p for p in norm.split("/") if p]
+            if not parts:
+                continue
+            # Domain = first 1-2 meaningful segments (same as existing _derive_domain_from_path)
+            if len(parts) == 1:
+                domain = "root"
+            elif len(parts) >= 3:
+                domain = f"{parts[0]}/{parts[1]}"
+            else:
+                domain = parts[0]
+            domain_file_count[domain] += 1
+            domain_comp_ids[domain].append(comp.id)
+
+        # Fetch concepts for concept count per domain
+        all_concept_ids_by_comp: dict = defaultdict(int)
+        concepts_all = db.query(OntologyConcept).filter(
+            OntologyConcept.source_component_id.in_({c.id for c in all_components}),
+            OntologyConcept.tenant_id == tenant_id,
+            OntologyConcept.is_active == True,
+        ).all()
+        for c in concepts_all:
+            all_concept_ids_by_comp[c.source_component_id] += 1
+
+        domain_concept_count: dict = defaultdict(int)
+        for domain, comp_ids in domain_comp_ids.items():
+            for cid in comp_ids:
+                domain_concept_count[domain] += all_concept_ids_by_comp.get(cid, 0)
+
+        all_domains = sorted(domain_file_count.keys())
+
+        # Cross-domain edges
+        concept_to_domain: dict = {}
+        for c in concepts_all:
+            # Find domain for this component
+            norm = comp_norms.get(c.source_component_id, "")
+            parts = [p for p in norm.split("/") if p]
+            if len(parts) == 1:
+                d = "root"
+            elif len(parts) >= 3:
+                d = f"{parts[0]}/{parts[1]}"
+            else:
+                d = parts[0] if parts else "root"
+            concept_to_domain[c.id] = d
+
+        concept_ids_set = {c.id for c in concepts_all}
+        rels_all = db.query(OntologyRelationship).filter(
+            OntologyRelationship.tenant_id == tenant_id,
+            or_(
+                OntologyRelationship.source_concept_id.in_(concept_ids_set),
+                OntologyRelationship.target_concept_id.in_(concept_ids_set),
+            ),
+        ).all() if concept_ids_set else []
+
+        cross_domain: dict = defaultdict(lambda: {"count": 0, "types": set()})
+        for r in rels_all:
+            sd = concept_to_domain.get(r.source_concept_id)
+            td = concept_to_domain.get(r.target_concept_id)
+            if sd and td and sd != td:
+                key = (sd, td)
+                cross_domain[key]["count"] += 1
+                cross_domain[key]["types"].add(r.relationship_type or "uses")
+
+        layer_domains2: dict = defaultdict(list)
+        domain_to_layer2: dict = {}
+        for d in all_domains:
+            layer = _layer_for_domain(d)
+            layer_domains2[layer].append(d)
+            domain_to_layer2[d] = layer
+
+        layer_order = ["FRONTEND", "MIDDLEWARE", "API", "SERVICES", "ASYNC", "AI", "DATA"]
+        layer_labels = {
+            "FRONTEND": "FRONTEND", "MIDDLEWARE": "Middleware & Tenant Context",
+            "API": "API Gateway & Router", "SERVICES": "Core Domain Services",
+            "ASYNC": "Async Processing", "AI": "AI Orchestration", "DATA": "Data Persistence",
+        }
+
+        lines = ["graph LR"]
+        lines += [
+            '    subgraph EXTERNAL ["EXTERNAL CLIENTS"]',
+            "        direction TB",
+            '        END_USER["👤 End User"]',
+            '        GIT_REPOS["Git Repositories"]',
+            "    end",
+        ]
+
+        present_layers = []
+        for layer_id in layer_order:
+            domains_in_layer = sorted(layer_domains2.get(layer_id, []))
+            if not domains_in_layer:
+                continue
+            present_layers.append(layer_id)
+            label = layer_labels[layer_id]
+            lines.append(f'    subgraph {layer_id} ["{label}"]')
+            lines.append("        direction TB")
+            for d in domains_in_layer:
+                nid = _safe_id(d)
+                fc = domain_file_count.get(d, 0)
+                cc = domain_concept_count.get(d, 0)
+                dtl = _depth_to_leaf(d, all_norms)
+                depth_hint = f"↓{dtl} level{'s' if dtl != 1 else ''}" if dtl > 0 else "→ files"
+                short = d.split("/")[-1].replace("_", " ").title()
+                label_text = f"{short}\\n{fc} files · {cc} concepts\\n{depth_hint}"
+                lines.append(f'        {nid}["{label_text}"]')
+                lines.append(f'        click {nid} call dokydocClick("{d}")')
+            lines.append("    end")
+
+        # Inter-layer edges
+        def first_node(layer): return _safe_id(sorted(layer_domains2.get(layer, []))[0]) if layer_domains2.get(layer) else None
+        fe, mw, api, svc, asc, ai, data = (first_node(l) for l in ["FRONTEND", "MIDDLEWARE", "API", "SERVICES", "ASYNC", "AI", "DATA"])
+        if fe: lines += [f'    END_USER -->|HTTPS| {fe}', f'    GIT_REPOS -->|API/Webhook| {fe}']
+        first_be = mw or api or svc
+        if fe and first_be: lines.append(f'    {fe} --> {first_be}')
+        if mw and api: lines.append(f'    {mw} --> {api}')
+        if api and svc: lines.append(f'    {api} --> {svc}')
+        if svc and asc: lines.append(f'    {svc} -->|Task Queue| {asc}')
+        if svc and ai: lines.append(f'    {svc} -->|AI Request| {ai}')
+        if data:
+            for src in [x for x in [svc, asc, api] if x]: lines.append(f'    {src} --> {data}')
+
+        added: set = set()
+        for (sd, td), info in sorted(cross_domain.items(), key=lambda x: -x[1]["count"])[:8]:
+            sl, tl = domain_to_layer2.get(sd), domain_to_layer2.get(td)
+            if sl and tl and sl != tl:
+                sn, tn = _safe_id(sd), _safe_id(td)
+                ek = (sn, tn)
+                if ek not in added:
+                    added.add(ek)
+                    rel = list(info["types"])[0] if info["types"] else "uses"
+                    lines.append(f'    {sn} -.->|{rel}| {tn}')
+
+        # Build nodes metadata
+        nodes_meta = []
+        for d in all_domains:
+            dtl = _depth_to_leaf(d, all_norms)
+            nodes_meta.append({
+                "name": d.split("/")[-1],
+                "path": d,
+                "type": "file" if dtl == 0 else "group",
+                "file_count": domain_file_count.get(d, 0),
+                "concept_count": domain_concept_count.get(d, 0),
+                "component_id": None,
+                "depth_to_leaf": dtl,
+                "layer": domain_to_layer2.get(d, "SERVICES"),
+            })
+
+        return {
+            "view_type": "architecture",
+            "mermaid_syntax": "\n".join(lines),
+            "nodes": nodes_meta,
+            "breadcrumb": [],
+            "repo_name": repo.name,
+        }
+
+    # --- PATH DRILL (path != "") ---
+    path = path.strip("/")
+    path_parts = [p for p in path.split("/") if p]
+
+    # Filter components whose normalized path starts with this path prefix
+    matching: list = []
+    for comp in all_components:
+        norm = comp_norms[comp.id]
+        prefix = path + "/"
+        if norm.startswith(prefix) or norm == path:
+            matching.append((comp, norm))
+
+    if not matching:
+        return {
+            "view_type": "empty",
+            "mermaid_syntax": f'graph TD\n    A["No files found under: {path}"]',
+            "nodes": [],
+            "breadcrumb": _build_breadcrumb(path_parts),
+        }
+
+    # Analyse what lives at the NEXT level beneath current path
+    # next_items: segment_name -> {components, is_pure_group, has_files, has_subdirs}
+    next_items: dict = {}
+    for comp, norm in matching:
+        remaining = norm[len(path):].lstrip("/")
+        parts = [p for p in remaining.split("/") if p]
+        if not parts:
+            continue
+        seg = parts[0]
+        is_file = len(parts) == 1
+
+        if seg not in next_items:
+            next_items[seg] = {
+                "components": [],
+                "file_components": [],
+                "has_subdirs": False,
+            }
+        next_items[seg]["components"].append(comp)
+        if is_file:
+            next_items[seg]["file_components"].append(comp)
+        else:
+            next_items[seg]["has_subdirs"] = True
+
+    # Determine view type: groups = at least one sub-directory exists; files = all are leaves
+    has_groups = any(info["has_subdirs"] for info in next_items.values())
+
+    # Fetch concepts for matching components
+    matching_comp_ids = {comp.id for comp, _ in matching}
+    concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id.in_(matching_comp_ids),
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    concept_ids = {c.id for c in concepts}
+    concept_to_comp: dict = {c.id: c.source_component_id for c in concepts}
+    comp_concept_count: dict = defaultdict(int)
+    comp_key_concepts: dict = defaultdict(list)
+    for c in concepts:
+        comp_concept_count[c.source_component_id] += 1
+        if len(comp_key_concepts[c.source_component_id]) < 3:
+            comp_key_concepts[c.source_component_id].append(c.name)
+
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all() if concept_ids else []
+
+    # Count cross-item relationships (between items at the current level)
+    def seg_for_comp(comp_id: int) -> str:
+        norm = comp_norms.get(comp_id, "")
+        remaining = norm[len(path):].lstrip("/")
+        parts = [p for p in remaining.split("/") if p]
+        return parts[0] if parts else ""
+
+    item_rel_count: dict = defaultdict(lambda: defaultdict(int))
+    item_rel_types: dict = defaultdict(lambda: defaultdict(set))
+    for r in rels:
+        sc = concept_to_comp.get(r.source_concept_id)
+        tc = concept_to_comp.get(r.target_concept_id)
+        if sc and tc and sc != tc:
+            ss = seg_for_comp(sc)
+            ts = seg_for_comp(tc)
+            if ss and ts and ss != ts:
+                item_rel_count[ss][ts] += 1
+                item_rel_types[ss][ts].add(r.relationship_type or "uses")
+
+    # --- Build Mermaid + nodes metadata ---
+    lines = ["graph TD"]
+    nodes_meta = []
+    added_edges: set = set()
+
+    for seg, info in sorted(next_items.items()):
+        nid = _safe_id(seg)
+        all_comps_here = info["components"]
+        fc = len(set(c.id for c in all_comps_here))
+        cc = sum(comp_concept_count.get(c.id, 0) for c in all_comps_here)
+        key_c = []
+        for c in all_comps_here:
+            key_c.extend(comp_key_concepts.get(c.id, []))
+        key_c = list(dict.fromkeys(key_c))[:3]
+
+        if info["has_subdirs"]:
+            # This is a drillable group (has sub-directories)
+            node_type = "group"
+            full_path = f"{path}/{seg}"
+            dtl = _depth_to_leaf(full_path, all_norms)
+            depth_hint = f"↓{dtl} level{'s' if dtl != 1 else ''}" if dtl > 0 else "→ files"
+            short = seg.replace("_", " ").replace("-", " ").title()
+            label = f"{short}\\n{fc} files · {cc} concepts\\n{depth_hint}"
+            lines.append(f'    {nid}["{label}"]')
+            lines.append(f'    click {nid} call dokydocClick("{full_path}")')
+            nodes_meta.append({
+                "name": seg, "path": full_path, "type": "group",
+                "file_count": fc, "concept_count": cc,
+                "component_id": None, "depth_to_leaf": dtl,
+                "key_concepts": key_c,
+            })
+        else:
+            # This is a leaf file
+            comp = info["file_components"][0] if info["file_components"] else info["components"][0]
+            node_type = "file"
+            cc_single = comp_concept_count.get(comp.id, 0)
+            key_c_single = comp_key_concepts.get(comp.id, [])
+            # Pick shape by analysis status / concept types
+            label = f"{seg}\\n{cc_single} concepts"
+            lines.append(f'    {nid}["{label}"]')
+            lines.append(f'    click {nid} call dokydocClick("component:{comp.id}")')
+            nodes_meta.append({
+                "name": seg, "path": f"{path}/{seg}", "type": "file",
+                "file_count": 1, "concept_count": cc_single,
+                "component_id": comp.id, "depth_to_leaf": 0,
+                "key_concepts": key_c_single,
+            })
+
+    # Add inter-item edges (top 20)
+    edge_count = 0
+    for src_seg, targets in sorted(item_rel_count.items(), key=lambda x: -sum(x[1].values())):
+        for tgt_seg, count in sorted(targets.items(), key=lambda x: -x[1]):
+            if edge_count >= 20:
+                break
+            sn, tn = _safe_id(src_seg), _safe_id(tgt_seg)
+            ek = (sn, tn)
+            if ek not in added_edges and sn in {_safe_id(s) for s in next_items} and tn in {_safe_id(s) for s in next_items}:
+                added_edges.add(ek)
+                rel = list(item_rel_types[src_seg][tgt_seg])[0]
+                lines.append(f'    {sn} -->|"{rel}"| {tn}')
+                edge_count += 1
+
+    view_type = "groups" if has_groups else "files"
+
+    return {
+        "view_type": view_type,
+        "mermaid_syntax": "\n".join(lines),
+        "nodes": nodes_meta,
+        "breadcrumb": _build_breadcrumb(path_parts),
+        "current_path": path,
+        "repo_name": repo.name,
+    }
+
+
 @router.get("/graph/alignment/{initiative_id}")
 def get_alignment_graph(
     initiative_id: int,

@@ -83,13 +83,42 @@ export default function BrainDashboardPage() {
   const [drillData, setDrillData] = useState<any>(null);
   const [drillLoading, setDrillLoading] = useState(false);
 
-  // L3 diagram view — default to the full technical architecture
+  // L3 static diagram tabs (dataflow/er/graph — kept as secondary views)
   type DiagramType = "architecture" | "dataflow" | "er" | "graph";
   const [l3View, setL3View] = useState<DiagramType>("architecture");
   const [mermaidData, setMermaidData] = useState<{ mermaid_syntax: string; diagram_type: string } | null>(null);
   const [mermaidLoading, setMermaidLoading] = useState(false);
 
-  // L2 concept filter + detail panel
+  // ── ADAPTIVE PATH EXPLORER (replaces fixed L3/L2/L1 drill) ──
+  // explorePath is the current navigation path within a repo.
+  // []           → architectural overview (all layers)
+  // ["services"] → inside the "services" domain
+  // ["services","auth"] → inside auth sub-service
+  // Terminates when a "file" node is clicked (→ navigate to /dashboard/code/{id})
+  interface ExploreNode {
+    name: string;
+    path: string;
+    type: "group" | "file";
+    file_count: number;
+    concept_count: number;
+    component_id: number | null;
+    depth_to_leaf: number;
+    key_concepts: string[];
+    layer?: string;
+  }
+  interface ExploreData {
+    view_type: "architecture" | "groups" | "files" | "empty";
+    mermaid_syntax: string;
+    nodes: ExploreNode[];
+    breadcrumb: { label: string; path: string }[];
+    repo_name?: string;
+    current_path?: string;
+  }
+  const [explorePath, setExplorePath] = useState<string[]>([]);
+  const [exploreData, setExploreData] = useState<ExploreData | null>(null);
+  const [exploreLoading, setExploreLoading] = useState(false);
+
+  // L2 concept filter + detail panel (kept for the "Concept Graph" tab)
   const [l2TypeFilter, setL2TypeFilter] = useState<string>("ALL");
   const [selectedConceptId, setSelectedConceptId] = useState<number | null>(null);
   const [conceptDetail, setConceptDetail] = useState<any>(null);
@@ -188,6 +217,28 @@ export default function BrainDashboardPage() {
     }
   }, []);
 
+  // Load the adaptive path explorer for a given path within a repo
+  const loadExplorePath = useCallback(async (repoId: number, pathSegments: string[]) => {
+    setExploreLoading(true);
+    setExploreData(null);
+    try {
+      const pathParam = pathSegments.join("/");
+      const data = await api.get<ExploreData>(
+        `/ontology/graph/repo/${repoId}/drill?path=${encodeURIComponent(pathParam)}`
+      );
+      setExploreData(data);
+    } catch {
+      setExploreData({
+        view_type: "empty",
+        mermaid_syntax: "graph TD\n    A[Failed to load diagram]",
+        nodes: [],
+        breadcrumb: [],
+      });
+    } finally {
+      setExploreLoading(false);
+    }
+  }, []);
+
   const loadConceptDetail = useCallback(async (conceptId: number) => {
     setConceptDetailLoading(true);
     setConceptDetail(null);
@@ -228,20 +279,24 @@ export default function BrainDashboardPage() {
         if (next.level === 4 && next.projectId) {
           data = await api.get<any>(`/ontology/graph/alignment/${next.projectId}`);
         } else if (next.level === 3) {
-          if (next.repoId) {
-            data = await api.get<any>(`/ontology/graph/system/${next.repoId}`);
-          } else if (next.projectId) {
-            // Project has no repo yet — fetch assets to check
+          let resolvedRepoId = next.repoId;
+          if (!resolvedRepoId && next.projectId) {
             const assets = await api.get<any[]>(`/initiatives/${next.projectId}/assets`).catch(() => []);
             const repoAsset = (Array.isArray(assets) ? assets : []).find(
               (a: any) => a.asset_type === "REPOSITORY" && a.is_active
             );
             if (repoAsset) {
-              setDrill({ ...next, repoId: repoAsset.asset_id });
-              data = await api.get<any>(`/ontology/graph/system/${repoAsset.asset_id}`);
-            } else {
-              data = { system_nodes: [], _no_repo: true };
+              resolvedRepoId = repoAsset.asset_id;
+              setDrill({ ...next, repoId: resolvedRepoId });
             }
+          }
+          if (resolvedRepoId) {
+            // Also load the adaptive path explorer starting at repo root
+            setExplorePath([]);
+            loadExplorePath(resolvedRepoId, []);
+            data = await api.get<any>(`/ontology/graph/system/${resolvedRepoId}`);
+          } else {
+            data = { system_nodes: [], _no_repo: true };
           }
         } else if (next.level === 2 && next.repoId) {
           data = await api.get<any>(`/ontology/graph/domain/${next.repoId}`);
@@ -680,40 +735,96 @@ export default function BrainDashboardPage() {
             )}
           </div>
         ) : drill.level === 3 ? (
-          /* Level 3: System Architecture */
+          /* Level 3+: Adaptive Path Explorer */
           <div>
-            <div className="border-b px-5 py-3 flex items-start justify-between gap-4">
-              <div>
+            {/* Header */}
+            <div className="border-b px-5 py-3 flex items-start justify-between gap-4 flex-wrap">
+              <div className="flex-1 min-w-0">
                 <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
                   <Layers className="h-4 w-4 text-blue-500" />
-                  Level 3 — System Architecture: {drill.projectName}
+                  {explorePath.length === 0
+                    ? `System Architecture — ${drill.projectName}`
+                    : exploreData?.view_type === "files"
+                    ? `Files in: ${explorePath.join(" / ")}`
+                    : `${explorePath[explorePath.length - 1]} — Sub-components`}
                 </h2>
-                <p className="mt-0.5 text-xs text-gray-400">
-                  Domain modules and their relationships. Click a domain to drill into file-level view.
-                </p>
+                {/* Dynamic breadcrumb path */}
+                {explorePath.length > 0 && drill.repoId && (
+                  <div className="flex items-center gap-1 mt-1 flex-wrap text-xs text-gray-400">
+                    <button
+                      className="hover:text-blue-600 font-medium text-blue-500"
+                      onClick={() => {
+                        setExplorePath([]);
+                        loadExplorePath(drill.repoId!, []);
+                      }}
+                    >
+                      {drill.projectName}
+                    </button>
+                    {exploreData?.breadcrumb?.map((crumb, i) => (
+                      <span key={crumb.path} className="flex items-center gap-1">
+                        <span>/</span>
+                        {i < (exploreData.breadcrumb?.length ?? 0) - 1 ? (
+                          <button
+                            className="hover:text-blue-600"
+                            onClick={() => {
+                              const segs = crumb.path.split("/").filter(Boolean);
+                              setExplorePath(segs);
+                              loadExplorePath(drill.repoId!, segs);
+                            }}
+                          >
+                            {crumb.label}
+                          </button>
+                        ) : (
+                          <span className="font-medium text-gray-700">{crumb.label}</span>
+                        )}
+                      </span>
+                    ))}
+                    {/* depth hint */}
+                    {exploreData?.view_type && exploreData.view_type !== "empty" && (
+                      <span className="ml-2 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] text-blue-600 font-medium">
+                        {exploreData.view_type === "files" ? "→ click file to open analysis" : "click node to drill deeper"}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {/* View type selector */}
-                <div className="flex rounded-lg border bg-gray-50 p-0.5 gap-0.5">
-                  {([
-                    { key: "architecture", label: "Architecture" },
-                    { key: "dataflow", label: "Data Flow" },
-                    { key: "er", label: "ER Diagram" },
-                    { key: "graph", label: "Graph" },
-                  ] as { key: DiagramType; label: string }[]).map((v) => (
-                    <button
-                      key={v.key}
-                      onClick={() => setL3View(v.key)}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
-                        l3View === v.key
-                          ? "bg-white text-blue-700 shadow-sm"
-                          : "text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      {v.label}
-                    </button>
-                  ))}
-                </div>
+                {/* Secondary view tabs (only when at repo root) */}
+                {explorePath.length === 0 && (
+                  <div className="flex rounded-lg border bg-gray-50 p-0.5 gap-0.5">
+                    {([
+                      { key: "architecture", label: "Architecture" },
+                      { key: "dataflow", label: "Data Flow" },
+                      { key: "er", label: "ER Diagram" },
+                      { key: "graph", label: "Graph" },
+                    ] as { key: DiagramType; label: string }[]).map((v) => (
+                      <button
+                        key={v.key}
+                        onClick={() => setL3View(v.key)}
+                        className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
+                          l3View === v.key
+                            ? "bg-white text-blue-700 shadow-sm"
+                            : "text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        {v.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {/* Back button when drilling */}
+                {explorePath.length > 0 && drill.repoId && (
+                  <button
+                    onClick={() => {
+                      const up = explorePath.slice(0, -1);
+                      setExplorePath(up);
+                      loadExplorePath(drill.repoId!, up);
+                    }}
+                    className="flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" /> Back
+                  </button>
+                )}
                 {drill.projectId && drill.projectId > 0 && (
                   <button
                     onClick={() => drillInto({ level: 4, projectId: drill.projectId, projectName: drill.projectName, repoId: drill.repoId })}
@@ -724,54 +835,153 @@ export default function BrainDashboardPage() {
                 )}
               </div>
             </div>
-            {drillData?.system_nodes?.length > 0 ? (
-              l3View === "graph" ? (
-                <div style={{ height: "550px" }}>
-                  <SystemArchitectureView
-                    data={drillData}
-                    onSelectDomain={(domainName) =>
-                      drillInto({ ...drill, level: 2, domainName })
-                    }
-                  />
-                </div>
-              ) : (
+
+            {/* Adaptive Explorer Body */}
+            {(() => {
+              // At root: show the adaptive explorer (replaces old architecture diagram)
+              if (explorePath.length === 0 && l3View !== "architecture") {
+                // Secondary tabs (dataflow/er/graph) — same as before
+                return (
+                  <div className="p-4">
+                    {mermaidLoading ? (
+                      <div className="flex h-64 items-center justify-center gap-2 text-gray-400">
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span className="text-sm">Generating diagram…</span>
+                      </div>
+                    ) : mermaidData ? (
+                      l3View === "graph" ? (
+                        drillData?.system_nodes?.length > 0 ? (
+                          <div style={{ height: "550px" }}>
+                            <SystemArchitectureView
+                              data={drillData}
+                              onSelectDomain={(domainName) => {
+                                const segs = domainName.split("/").filter(Boolean);
+                                setExplorePath(segs);
+                                loadExplorePath(drill.repoId!, segs);
+                                setL3View("architecture");
+                              }}
+                            />
+                          </div>
+                        ) : null
+                      ) : (
+                        <MermaidDiagram
+                          syntax={mermaidData.mermaid_syntax}
+                          title={`${drill.projectName} — ${l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
+                          height="600px"
+                        />
+                      )
+                    ) : (
+                      <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
+                        Loading…
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              // Adaptive explorer: show the path-drill Mermaid
+              if (exploreLoading) {
+                return (
+                  <div className="flex h-64 items-center justify-center gap-2 text-gray-400 p-4">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    <span className="text-sm">
+                      {explorePath.length === 0 ? "Building architecture diagram…" : `Loading ${explorePath[explorePath.length - 1]}…`}
+                    </span>
+                  </div>
+                );
+              }
+
+              if (!exploreData || exploreData.view_type === "empty") {
+                return (
+                  <div className="flex h-60 flex-col items-center justify-center text-gray-400">
+                    <Network className="h-8 w-8 mb-2" />
+                    <p className="text-sm">
+                      {explorePath.length === 0
+                        ? "Analyze a repository to build the architecture diagram"
+                        : `No files found under: ${explorePath.join("/")} `}
+                    </p>
+                  </div>
+                );
+              }
+
+              const handleNodeClick = (nodeId: string) => {
+                if (nodeId.startsWith("component:")) {
+                  // Leaf file → navigate to L1
+                  const compId = parseInt(nodeId.replace("component:", ""), 10);
+                  if (!isNaN(compId)) router.push(`/dashboard/code/${compId}`);
+                } else {
+                  // Group node → drill deeper
+                  const segs = nodeId.split("/").filter(Boolean);
+                  setExplorePath(segs);
+                  loadExplorePath(drill.repoId!, segs);
+                }
+              };
+
+              const depthLabel = exploreData.view_type === "architecture"
+                ? "Click any layer node to explore its files"
+                : exploreData.view_type === "files"
+                ? "Click any file to open its full analysis"
+                : "Click any node to drill deeper — leaf files open analysis directly";
+
+              return (
                 <div className="p-4">
-                  {mermaidLoading ? (
-                    <div className="flex h-64 items-center justify-center gap-2 text-gray-400">
-                      <Loader2 className="h-5 w-5 animate-spin" />
-                      <span className="text-sm">Generating architecture diagram…</span>
-                    </div>
-                  ) : mermaidData ? (
-                    <>
-                      {l3View === "architecture" && (
-                        <p className="mb-2 text-xs text-indigo-600 font-medium">
-                          Click any service node to drill down into its file-level view (L2).
-                        </p>
-                      )}
-                      <MermaidDiagram
-                        syntax={mermaidData.mermaid_syntax}
-                        title={`${drill.projectName} — ${l3View === "architecture" ? "Technical Architecture" : l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
-                        height="600px"
-                        onNodeClick={(nodeId) => {
-                          // Nodes in the technical_architecture diagram use domain names as IDs
-                          if (l3View === "architecture") {
-                            drillInto({ ...drill, level: 2, domainName: nodeId });
-                          }
-                        }}
-                      />
-                    </>
-                  ) : (
-                    <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
-                      Select a diagram type above
+                  <p className="mb-2 text-xs text-indigo-600 font-medium">{depthLabel}</p>
+                  <MermaidDiagram
+                    syntax={exploreData.mermaid_syntax}
+                    title={explorePath.length === 0 ? `${drill.projectName} — Architecture` : explorePath.join(" / ")}
+                    height="600px"
+                    onNodeClick={handleNodeClick}
+                  />
+                  {/* Node summary cards below diagram */}
+                  {exploreData.nodes.length > 0 && (
+                    <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                      {exploreData.nodes.map((node) => (
+                        <button
+                          key={node.path}
+                          onClick={() => {
+                            if (node.type === "file" && node.component_id) {
+                              router.push(`/dashboard/code/${node.component_id}`);
+                            } else {
+                              const segs = node.path.split("/").filter(Boolean);
+                              setExplorePath(segs);
+                              loadExplorePath(drill.repoId!, segs);
+                            }
+                          }}
+                          className={`text-left rounded-lg border p-2.5 text-xs hover:shadow-sm transition-all ${
+                            node.type === "file"
+                              ? "hover:border-orange-300 hover:bg-orange-50"
+                              : "hover:border-blue-300 hover:bg-blue-50"
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 mb-1">
+                            {node.type === "file"
+                              ? <FileText className="h-3.5 w-3.5 text-orange-400 flex-shrink-0" />
+                              : <Network className="h-3.5 w-3.5 text-blue-400 flex-shrink-0" />}
+                            <span className="font-medium truncate">{node.name}</span>
+                          </div>
+                          <div className="text-[10px] text-gray-400">
+                            {node.file_count} file{node.file_count !== 1 ? "s" : ""} · {node.concept_count} concepts
+                          </div>
+                          {node.depth_to_leaf > 0 && (
+                            <div className="text-[10px] text-blue-400 mt-0.5">↓ {node.depth_to_leaf} level{node.depth_to_leaf !== 1 ? "s" : ""} to files</div>
+                          )}
+                          {node.type === "file" && (
+                            <div className="text-[10px] text-orange-400 mt-0.5">→ open analysis</div>
+                          )}
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>
-              )
-            ) : drillData?._no_repo ? (
+              );
+            })()}
+
+            {/* No-repo fallback — only shown if drillData explicitly says no repo */}
+            {drillData?._no_repo && (
               <div className="flex h-60 flex-col items-center justify-center text-gray-400 gap-3">
                 <Network className="h-8 w-8" />
                 <p className="text-sm font-medium text-gray-600">No repositories connected to this project</p>
-                <p className="text-xs text-gray-400">Go to the project page and link a repository to build the system architecture</p>
+                <p className="text-xs text-gray-400">Go to the project page and link a repository to enable the architecture view.</p>
                 {drill.projectId && (
                   <button
                     onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
@@ -780,12 +990,6 @@ export default function BrainDashboardPage() {
                     Connect a Repository
                   </button>
                 )}
-              </div>
-            ) : (
-              <div className="flex h-60 flex-col items-center justify-center text-gray-400">
-                <Network className="mb-2 h-8 w-8" />
-                <p className="text-sm">No system data available</p>
-                <p className="text-xs mt-1">Analyze a connected repository to build the architecture graph</p>
               </div>
             )}
           </div>
@@ -1103,46 +1307,34 @@ export default function BrainDashboardPage() {
         )}
       </div>
 
-      {/* Level guide */}
+      {/* Level guide — dynamic depth model */}
       <div className="mt-6 rounded-lg border bg-white p-5">
-        <h3 className="text-sm font-semibold text-gray-900">
+        <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
           Brain Hierarchy Levels
+          <span className="text-[10px] font-normal text-gray-400 ml-1">
+            (depth adapts to your codebase — levels 3+ are dynamic)
+          </span>
         </h3>
+        {/* Dynamic path indicator */}
+        {drill.level === 3 && explorePath.length > 0 && (
+          <div className="mt-2 flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 rounded-md px-3 py-1.5">
+            <Layers className="h-3 w-3" />
+            <span className="font-medium">Depth {explorePath.length + 3}:</span>
+            <span>{explorePath.join(" / ")}</span>
+            {exploreData?.view_type === "files" && (
+              <span className="ml-1 text-orange-500 font-medium">→ next click opens file analysis</span>
+            )}
+          </div>
+        )}
         <div className="mt-3 grid gap-2 md:grid-cols-5">
           {[
-            {
-              level: 5,
-              label: "Organization",
-              desc: "All projects as clusters",
-              color: "bg-purple-50 text-purple-700",
-            },
-            {
-              level: 4,
-              label: "Alignment",
-              desc: "Doc ↔ Code mapping",
-              color: "bg-indigo-50 text-indigo-700",
-            },
-            {
-              level: 3,
-              label: "System",
-              desc: "Repo architecture",
-              color: "bg-blue-50 text-blue-700",
-            },
-            {
-              level: 2,
-              label: "Domain",
-              desc: "Module clusters",
-              color: "bg-green-50 text-green-700",
-            },
-            {
-              level: 1,
-              label: "File",
-              desc: "Per-file subgraph",
-              color: "bg-orange-50 text-orange-700",
-            },
+            { level: 5, label: "Organization", desc: "All projects as clusters", color: "bg-purple-50 text-purple-700" },
+            { level: 4, label: "Alignment", desc: "Doc ↔ Code mapping", color: "bg-indigo-50 text-indigo-700" },
+            { level: 3, label: "System", desc: "Repo architecture", color: "bg-blue-50 text-blue-700" },
+            { level: 2, label: "Domain", desc: "Module clusters", color: "bg-green-50 text-green-700" },
+            { level: 1, label: "File", desc: "Per-file subgraph", color: "bg-orange-50 text-orange-700" },
           ].map((l) => {
             const isActive = drill.level === l.level;
-            // Determine if this level is navigable
             const canNavigate =
               l.level === 5 ||
               (l.level === 4 && !!drill.projectId) ||
@@ -1151,15 +1343,11 @@ export default function BrainDashboardPage() {
               (l.level === 1 && !!drill.componentId);
 
             const hint =
-              l.level === 5
-                ? null
-                : l.level === 4
-                ? !drill.projectId ? "Click a project node first" : null
-                : l.level === 3
-                ? !drill.projectId ? "Click a project node first" : null
-                : l.level === 2
-                ? !drill.repoId ? "Drill into L3 first" : null
-                : !drill.componentId ? "Drill into L2 first" : null;
+              l.level === 5 ? null
+              : l.level === 4 ? (!drill.projectId ? "Click a project node first" : null)
+              : l.level === 3 ? (!drill.projectId ? "Click a project node first" : null)
+              : l.level === 2 ? (!drill.repoId ? "Drill into L3 first" : null)
+              : !drill.componentId ? "Drill into L2 first" : null;
 
             return (
               <button
