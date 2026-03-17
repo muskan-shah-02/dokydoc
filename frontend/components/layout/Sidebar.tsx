@@ -46,6 +46,8 @@ import {
   Search,
   Sparkles,
   HelpCircle,
+  Zap,
+  Link2,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -116,6 +118,18 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       icon: BrainCircuit,
       text: "Brain",
       href: "/dashboard/brain",
+      badge: "New",
+    },
+    {
+      icon: Zap,
+      text: "Auto Docs",
+      href: "/dashboard/auto-docs",
+      badge: "New",
+    },
+    {
+      icon: Link2,
+      text: "Integrations",
+      href: "/dashboard/integrations",
       badge: "New",
     },
     {

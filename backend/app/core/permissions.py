@@ -80,6 +80,9 @@ class Permission(str, Enum):
     APPROVAL_VIEW = "approval:view"  # View approvals
     APPROVAL_RESOLVE = "approval:resolve"  # Approve/reject/request revision
 
+    # API Key Permissions (Sprint 8)
+    API_KEY_MANAGE = "api_key:manage"  # Create / revoke own API keys
+
 
 # Role-to-Permissions Mapping
 ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
@@ -130,6 +133,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,
         Permission.APPROVAL_RESOLVE,
+        # API Key Management (Sprint 8)
+        Permission.API_KEY_MANAGE,
     },
 
     Role.ADMIN: {
@@ -147,6 +152,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         # Approval - can view and resolve level 1-2 (Sprint 6)
         Permission.APPROVAL_VIEW,
         Permission.APPROVAL_RESOLVE,
+        # API Key Management (Sprint 8)
+        Permission.API_KEY_MANAGE,
     },
 
     Role.BA: {
@@ -204,6 +211,8 @@ ROLE_PERMISSIONS: dict[Role, Set[Permission]] = {
         Permission.APPROVAL_REQUEST,
         Permission.APPROVAL_VIEW,
         Permission.APPROVAL_RESOLVE,
+        # API Key Management (Sprint 8)
+        Permission.API_KEY_MANAGE,
     },
 
     Role.PRODUCT_MANAGER: {

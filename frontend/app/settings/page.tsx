@@ -28,6 +28,13 @@ import {
   DollarSign,
   X,
   Bell,
+  Key,
+  Trash2,
+  Copy,
+  Check,
+  Eye,
+  EyeOff,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +56,13 @@ export default function SettingsPage() {
     id: "notifications",
     label: "Notifications",
     icon: <Bell className="h-4 w-4" />,
+  });
+
+  // API Keys tab — available to all users
+  tabs.push({
+    id: "api-keys",
+    label: "API Keys",
+    icon: <Key className="h-4 w-4" />,
   });
 
   // Add Organization and Billing tabs for CXO
@@ -102,6 +116,7 @@ export default function SettingsPage() {
           {activeTab === "password" && <PasswordTab />}
           {activeTab === "permissions" && <PermissionsTab permissions={permissions} />}
           {activeTab === "notifications" && <NotificationPrefsTab />}
+          {activeTab === "api-keys" && <ApiKeysTab />}
           {activeTab === "organization" && isCXO() && <TenantTab tenant={tenant} />}
           {activeTab === "billing" && isCXO() && <BillingTab />}
         </div>
@@ -1146,6 +1161,206 @@ function NotificationPrefsTab() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// API Keys Tab
+// ============================================================================
+
+interface ApiKeyItem {
+  id: number;
+  name: string;
+  key_prefix: string;
+  is_active: boolean;
+  expires_at: string | null;
+  last_used_at: string | null;
+  request_count: number;
+  created_at: string;
+}
+
+function ApiKeysTab() {
+  const [keys, setKeys] = useState<ApiKeyItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [expiresDays, setExpiresDays] = useState<string>("");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [revoking, setRevoking] = useState<number | null>(null);
+
+  const fetchKeys = async () => {
+    try {
+      const data = await api.get("/api-keys/") as any;
+      setKeys(data.api_keys || []);
+    } catch {
+      console.error("Failed to load API keys");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchKeys(); }, []);
+
+  const handleCreate = async () => {
+    if (!newKeyName.trim()) return;
+    setCreating(true);
+    try {
+      const data = await api.post("/api-keys/", {
+        name: newKeyName.trim(),
+        expires_days: expiresDays ? parseInt(expiresDays, 10) : null,
+      }) as any;
+      setRevealedKey(data.raw_key);
+      setNewKeyName("");
+      setExpiresDays("");
+      await fetchKeys();
+    } catch {
+      alert("Failed to create API key.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleRevoke = async (id: number) => {
+    if (!confirm("Revoke this API key? This cannot be undone.")) return;
+    setRevoking(id);
+    try {
+      await api.delete(`/api-keys/${id}`);
+      setKeys((prev) => prev.filter((k) => k.id !== id));
+    } catch {
+      alert("Failed to revoke key.");
+    } finally {
+      setRevoking(null);
+    }
+  };
+
+  const copyKey = () => {
+    if (!revealedKey) return;
+    navigator.clipboard.writeText(revealedKey);
+    setCopiedKey(true);
+    setTimeout(() => setCopiedKey(false), 2000);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-gray-900">API Keys</h3>
+        <p className="mt-1 text-sm text-gray-600">
+          Create keys for programmatic access. Pass them as{" "}
+          <code className="bg-gray-100 px-1 py-0.5 rounded text-xs font-mono">X-API-Key</code>{" "}
+          header in requests.
+        </p>
+      </div>
+
+      {/* Revealed key banner */}
+      {revealedKey && (
+        <div className="p-4 bg-green-50 border border-green-200 rounded-lg space-y-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-green-800">
+            <Key className="w-4 h-4" />
+            API key created — copy it now. It will not be shown again.
+          </div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs font-mono bg-white border border-green-300 rounded px-3 py-2 break-all select-all">
+              {revealedKey}
+            </code>
+            <Button size="sm" variant="outline" onClick={copyKey} className="gap-1.5 flex-shrink-0">
+              {copiedKey ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedKey ? "Copied" : "Copy"}
+            </Button>
+          </div>
+          <button onClick={() => setRevealedKey(null)} className="text-xs text-green-700 hover:underline">
+            I've saved it — dismiss
+          </button>
+        </div>
+      )}
+
+      {/* Create form */}
+      <div className="p-4 border border-dashed rounded-lg space-y-3 max-w-xl">
+        <p className="text-sm font-medium text-gray-700">Create new key</p>
+        <div className="flex gap-2">
+          <Input
+            placeholder="Key name (e.g. CI/CD Pipeline)"
+            value={newKeyName}
+            onChange={(e) => setNewKeyName(e.target.value)}
+            className="flex-1"
+            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+          />
+          <Input
+            placeholder="Expires (days, optional)"
+            value={expiresDays}
+            onChange={(e) => setExpiresDays(e.target.value)}
+            type="number"
+            min={1}
+            max={365}
+            className="w-40"
+          />
+          <Button onClick={handleCreate} disabled={creating || !newKeyName.trim()} className="flex-shrink-0">
+            {creating ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Key className="w-4 h-4 mr-1.5" />}
+            {creating ? "Creating…" : "Create"}
+          </Button>
+        </div>
+      </div>
+
+      {/* Key list */}
+      {loading ? (
+        <div className="text-sm text-gray-500 py-4">Loading keys…</div>
+      ) : keys.length === 0 ? (
+        <div className="text-center py-8 text-gray-400">
+          <Key className="w-10 h-10 mx-auto mb-2" />
+          <p className="text-sm">No API keys yet</p>
+        </div>
+      ) : (
+        <div className="border rounded-lg overflow-hidden">
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Name</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Key</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Created</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Last used</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Requests</th>
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-600">Expires</th>
+                <th className="px-4 py-2" />
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {keys.map((k) => (
+                <tr key={k.id} className={`hover:bg-gray-50 ${!k.is_active ? "opacity-50" : ""}`}>
+                  <td className="px-4 py-2 font-medium text-gray-900">{k.name}</td>
+                  <td className="px-4 py-2 font-mono text-xs text-gray-500">{k.key_prefix}…</td>
+                  <td className="px-4 py-2 text-gray-500">{new Date(k.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-2 text-gray-500">{k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : "—"}</td>
+                  <td className="px-4 py-2 text-gray-700">{k.request_count.toLocaleString()}</td>
+                  <td className="px-4 py-2 text-gray-500">{k.expires_at ? new Date(k.expires_at).toLocaleDateString() : "Never"}</td>
+                  <td className="px-4 py-2 text-right">
+                    {k.is_active && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs text-red-500 hover:text-red-700 hover:bg-red-50"
+                        onClick={() => handleRevoke(k.id)}
+                        disabled={revoking === k.id}
+                      >
+                        <Trash2 className="w-3.5 h-3.5 mr-1" />
+                        Revoke
+                      </Button>
+                    )}
+                    {!k.is_active && <span className="text-xs text-gray-400">Revoked</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+        <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+        <p className="text-xs text-amber-700">
+          API keys carry the same permissions as your account. Never share them publicly. Revoke unused keys promptly.
+        </p>
+      </div>
     </div>
   );
 }

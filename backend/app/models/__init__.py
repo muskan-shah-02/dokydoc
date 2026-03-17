@@ -25,3 +25,6 @@ from .approval import Approval  # Sprint 6: Approval Workflow
 from .conversation import Conversation, ChatMessage  # Sprint 7: RAG/Chat Assistant
 from .document_version import DocumentVersion  # Sprint 8: Version Comparison
 from .notification_preference import NotificationPreference  # Sprint 8: Notification Preferences
+from .api_key import ApiKey  # Sprint 8: API Key Authentication
+from .generated_doc import GeneratedDoc  # Sprint 8: Auto Docs
+from .integration_config import IntegrationConfig  # Sprint 8: Integrations

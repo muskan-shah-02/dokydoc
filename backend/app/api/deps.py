@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.core.config import settings
 from app.schemas import token as token_schema
@@ -48,7 +49,7 @@ def get_tenant_id(request: Request) -> int:
 
 def get_current_user(
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
+    token: Optional[str] = Depends(oauth2_scheme),
     request: Request = None
 ) -> User:
     """
@@ -57,7 +58,21 @@ def get_current_user(
     BE-04/AUTH-01 FIX: Now validates token type to ensure only access tokens are accepted.
     SPRINT 2 ENHANCEMENT: Validates tenant context from JWT matches user's tenant_id.
     """
+    # Sprint 8: API key auth — if middleware resolved the user, skip JWT validation
+    if request is not None:
+        api_key_user = getattr(request.state, "api_key_user", None)
+        if api_key_user is not None:
+            logger.debug(f"API key auth bypass for user {api_key_user.email}")
+            return api_key_user
+
     logger.debug("Validating user token")
+
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     try:
         payload = jwt.decode(

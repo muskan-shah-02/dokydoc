@@ -22,10 +22,14 @@ from app.api.endpoints import (
     search,  # SPRINT 5: Unified Semantic Search
     approvals,  # SPRINT 6: Approval Workflow
     chat,  # SPRINT 7: RAG/Chat Assistant
+    api_keys,  # SPRINT 8: API Key Authentication
+    auto_docs,  # SPRINT 8: Auto Docs (Module 12)
+    integrations,  # SPRINT 8: Documentation Integrations (Module 11)
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
 from app.middleware.audit_middleware import AuditMiddleware
+from app.middleware.api_key_auth import ApiKeyAuthMiddleware
 from slowapi.errors import RateLimitExceeded
 
 # Setup logging
@@ -75,6 +79,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
 
 # --- Middleware Configuration ---
+
+# SPRINT 8: API Key Auth Middleware (resolves X-API-Key before tenant context)
+app.add_middleware(ApiKeyAuthMiddleware)
 
 # SPRINT 5: Audit Middleware (logs mutating requests, runs AFTER tenant context)
 app.add_middleware(AuditMiddleware)
@@ -410,6 +417,27 @@ app.include_router(
     chat.router,
     prefix=f"/api/{settings.API_VERSION}/chat",
     tags=["Chat"]
+)
+
+# SPRINT 8: API Key Management
+app.include_router(
+    api_keys.router,
+    prefix=f"/api/{settings.API_VERSION}/api-keys",
+    tags=["API Keys"]
+)
+
+# SPRINT 8: Auto Docs (Module 12)
+app.include_router(
+    auto_docs.router,
+    prefix=f"/api/{settings.API_VERSION}/auto-docs",
+    tags=["Auto Docs"]
+)
+
+# SPRINT 8: Documentation Integrations (Module 11)
+app.include_router(
+    integrations.router,
+    prefix=f"/api/{settings.API_VERSION}/integrations",
+    tags=["Integrations"]
 )
 
 # --- Startup Event (Legacy support) ---
