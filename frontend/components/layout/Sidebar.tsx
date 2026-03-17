@@ -48,6 +48,7 @@ import {
   HelpCircle,
   Zap,
   Link2,
+  BarChart3,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -147,6 +148,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
       icon: Download,
       text: "Export",
       href: "/dashboard/export",
+    },
+    {
+      icon: BarChart3,
+      text: "Analytics",
+      href: "/dashboard/analytics",
+      badge: "New",
     },
     {
       icon: ShieldCheck,

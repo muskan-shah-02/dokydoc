@@ -124,15 +124,26 @@ export default function BrainDashboardPage() {
       }
       setDrillLoading(true);
       try {
-        let data: any;
-        if (next.level === 3 && next.repoId) {
-          data = await api.get<any>(
-            `/ontology/graph/system/${next.repoId}`
-          );
+        let data: any = null;
+
+        if (next.level === 3) {
+          if (next.repoId) {
+            data = await api.get<any>(`/ontology/graph/system/${next.repoId}`);
+          } else if (next.projectId) {
+            // Project has no repo yet — fetch assets to check
+            const assets = await api.get<any[]>(`/initiatives/${next.projectId}/assets`).catch(() => []);
+            const repoAsset = (Array.isArray(assets) ? assets : []).find(
+              (a: any) => a.asset_type === "REPOSITORY" && a.is_active
+            );
+            if (repoAsset) {
+              setDrill({ ...next, repoId: repoAsset.asset_id });
+              data = await api.get<any>(`/ontology/graph/system/${repoAsset.asset_id}`);
+            } else {
+              data = { system_nodes: [], _no_repo: true };
+            }
+          }
         } else if (next.level === 2 && next.repoId) {
-          data = await api.get<any>(
-            `/ontology/graph/domain/${next.repoId}`
-          );
+          data = await api.get<any>(`/ontology/graph/domain/${next.repoId}`);
         } else if (next.level === 1 && next.componentId) {
           // Use pre-built graph version (fast) with fallback to live query
           try {
@@ -444,18 +455,29 @@ export default function BrainDashboardPage() {
                 <SystemArchitectureView
                   data={drillData}
                   onSelectDomain={(domainName) =>
-                    drillInto({
-                      ...drill,
-                      level: 2,
-                      domainName,
-                    })
+                    drillInto({ ...drill, level: 2, domainName })
                   }
                 />
+              </div>
+            ) : drillData?._no_repo ? (
+              <div className="flex h-60 flex-col items-center justify-center text-gray-400 gap-3">
+                <Network className="h-8 w-8" />
+                <p className="text-sm font-medium text-gray-600">No repositories connected to this project</p>
+                <p className="text-xs text-gray-400">Go to the project page and link a repository to build the system architecture</p>
+                {drill.projectId && (
+                  <button
+                    onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
+                    className="rounded-md bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                  >
+                    Connect a Repository
+                  </button>
+                )}
               </div>
             ) : (
               <div className="flex h-60 flex-col items-center justify-center text-gray-400">
                 <Network className="mb-2 h-8 w-8" />
                 <p className="text-sm">No system data available</p>
+                <p className="text-xs mt-1">Analyze a connected repository to build the architecture graph</p>
               </div>
             )}
           </div>
@@ -601,44 +623,68 @@ export default function BrainDashboardPage() {
               desc: "Per-file subgraph",
               color: "bg-orange-50 text-orange-700",
             },
-          ].map((l) => (
-            <button
-              key={l.level}
-              onClick={() => {
-                if (l.level === 5) {
-                  drillInto({ level: 5 });
-                } else if (l.level === 4 && drill.projectId) {
-                  router.push(`/dashboard/projects/${drill.projectId}`);
-                } else if (l.level === 3 && drill.projectId) {
-                  drillInto({
-                    level: 3,
-                    projectId: drill.projectId,
-                    projectName: drill.projectName,
-                    repoId: drill.repoId,
-                  });
-                } else if (l.level === 2 && drill.repoId) {
-                  drillInto({
-                    ...drill,
-                    level: 2,
-                    domainName: drill.domainName,
-                  });
-                }
-                // L1 requires a specific componentId, so no generic click action
-              }}
-              className={`rounded-lg p-3 text-left transition-all hover:ring-2 hover:ring-offset-1 ${l.color} ${
-                drill.level === l.level
-                  ? "ring-2 ring-offset-1 font-semibold"
-                  : "opacity-80 hover:opacity-100"
-              }`}
-            >
-              <p className="text-xs font-semibold">L{l.level}</p>
-              <p className="text-sm font-medium">{l.label}</p>
-              <p className="mt-0.5 text-[10px] opacity-70">{l.desc}</p>
-              {drill.level === l.level && (
-                <p className="mt-1 text-[10px] font-semibold opacity-90">← Current</p>
-              )}
-            </button>
-          ))}
+          ].map((l) => {
+            const isActive = drill.level === l.level;
+            // Determine if this level is navigable
+            const canNavigate =
+              l.level === 5 ||
+              (l.level === 4 && !!drill.projectId) ||
+              (l.level === 3 && !!drill.projectId) ||
+              (l.level === 2 && !!drill.repoId && !!drill.projectId) ||
+              (l.level === 1 && !!drill.componentId);
+
+            const hint =
+              l.level === 5
+                ? null
+                : l.level === 4
+                ? !drill.projectId ? "Click a project node first" : null
+                : l.level === 3
+                ? !drill.projectId ? "Click a project node first" : null
+                : l.level === 2
+                ? !drill.repoId ? "Drill into L3 first" : null
+                : !drill.componentId ? "Drill into L2 first" : null;
+
+            return (
+              <button
+                key={l.level}
+                title={hint ?? undefined}
+                disabled={!canNavigate}
+                onClick={() => {
+                  if (l.level === 5) {
+                    drillInto({ level: 5 });
+                  } else if (l.level === 4 && drill.projectId) {
+                    router.push(`/dashboard/projects/${drill.projectId}`);
+                  } else if (l.level === 3 && drill.projectId) {
+                    drillInto({
+                      level: 3,
+                      projectId: drill.projectId,
+                      projectName: drill.projectName,
+                      repoId: drill.repoId,
+                    });
+                  } else if (l.level === 2 && drill.repoId) {
+                    drillInto({ ...drill, level: 2, domainName: drill.domainName });
+                  }
+                }}
+                className={`rounded-lg p-3 text-left transition-all ${l.color} ${
+                  isActive
+                    ? "ring-2 ring-offset-1 font-semibold"
+                    : canNavigate
+                    ? "opacity-80 hover:opacity-100 hover:ring-2 hover:ring-offset-1 cursor-pointer"
+                    : "opacity-40 cursor-not-allowed"
+                }`}
+              >
+                <p className="text-xs font-semibold">L{l.level}</p>
+                <p className="text-sm font-medium">{l.label}</p>
+                <p className="mt-0.5 text-[10px] opacity-70">{l.desc}</p>
+                {isActive && (
+                  <p className="mt-1 text-[10px] font-semibold opacity-90">← Current</p>
+                )}
+                {!canNavigate && hint && (
+                  <p className="mt-1 text-[10px] opacity-60 italic">{hint}</p>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 

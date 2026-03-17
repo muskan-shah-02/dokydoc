@@ -25,6 +25,7 @@ from app.api.endpoints import (
     api_keys,  # SPRINT 8: API Key Authentication
     auto_docs,  # SPRINT 8: Auto Docs (Module 12)
     integrations,  # SPRINT 8: Documentation Integrations (Module 11)
+    analytics,  # SPRINT 8: Analytics Dashboard
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -438,6 +439,13 @@ app.include_router(
     integrations.router,
     prefix=f"/api/{settings.API_VERSION}/integrations",
     tags=["Integrations"]
+)
+
+# SPRINT 8: Analytics Dashboard
+app.include_router(
+    analytics.router,
+    prefix=f"/api/{settings.API_VERSION}/analytics",
+    tags=["Analytics"]
 )
 
 # --- Startup Event (Legacy support) ---
