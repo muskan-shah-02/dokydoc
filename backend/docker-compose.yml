@@ -142,6 +142,8 @@ services:
       - .env
     ports:
       - "5555:5555"
+    volumes:
+      - .:/app                      # Mount code so restarts pick up changes
     depends_on:
       - redis
     networks:
