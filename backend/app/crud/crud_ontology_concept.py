@@ -221,7 +221,12 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
         return [r[0] for r in results]
 
     def count_by_tenant(self, db: Session, *, tenant_id: int, initiative_id: int = None) -> int:
-        """Count all active concepts for a tenant, optionally scoped to a project."""
+        """Count active concepts for a tenant.
+
+        When initiative_id is provided, counts ONLY concepts explicitly linked to
+        that project (strict scoping). Unscoped concepts (initiative_id IS NULL)
+        are NOT included here — they are global and would inflate every project's count.
+        """
         if not tenant_id:
             raise ValueError("tenant_id is REQUIRED for count_by_tenant()")
 
@@ -230,13 +235,7 @@ class CRUDOntologyConcept(CRUDBase[OntologyConcept, OntologyConceptCreate, Ontol
             self.model.is_active == True
         )
         if initiative_id is not None:
-            from sqlalchemy import or_
-            query = query.filter(
-                or_(
-                    self.model.initiative_id == initiative_id,
-                    self.model.initiative_id.is_(None)
-                )
-            )
+            query = query.filter(self.model.initiative_id == initiative_id)
         return query.count()
 
 

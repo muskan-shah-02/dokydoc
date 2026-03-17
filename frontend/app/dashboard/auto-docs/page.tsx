@@ -128,10 +128,11 @@ export default function AutoDocsPage() {
       api.get("/repositories/") as Promise<any>,
     ])
       .then(([docs, repos]) => {
-        const docItems: SourceItem[] = (docs.documents || docs || []).slice(0, 50).map(
+        const docArray = docs.items || docs.documents || (Array.isArray(docs) ? docs : []);
+        const docItems: SourceItem[] = docArray.slice(0, 50).map(
           (d: any) => ({ id: d.id, name: d.filename || `Document #${d.id}`, type: "document" as const })
         );
-        const repoItems: SourceItem[] = (repos.repositories || repos || []).slice(0, 50).map(
+        const repoItems: SourceItem[] = (Array.isArray(repos) ? repos : repos.items || repos.repositories || []).slice(0, 50).map(
           (r: any) => ({ id: r.id, name: r.name || `Repository #${r.id}`, type: "repository" as const })
         );
         setSources([...docItems, ...repoItems]);
