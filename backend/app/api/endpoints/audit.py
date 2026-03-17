@@ -9,10 +9,11 @@ Provides endpoints for:
   GET  /audit/export/pdf    — Export audit logs as PDF (Sprint 6)
 """
 from typing import Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func, text
 import io
 import csv
 
@@ -304,3 +305,211 @@ def _format_title(action: str, resource_type: str) -> str:
         (action, resource_type),
         f"{action.title()} {resource_type.replace('_', ' ').title()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8: Audit Analytics Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/analytics")
+def get_analytics(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Returns chart-ready analytics data for the Security Insights Panel:
+    - daily_counts: last 14 days of activity
+    - action_breakdown: create/update/delete/login totals
+    - top_users: top 5 most active users
+    - busiest_hour: 0-23 UTC hour with most activity
+    """
+    from app.models.audit_log import AuditLog
+
+    cutoff_14d = datetime.utcnow() - timedelta(days=14)
+
+    # Daily counts — last 14 days
+    daily_rows = (
+        db.query(
+            func.date(AuditLog.created_at).label("date"),
+            func.count(AuditLog.id).label("count"),
+        )
+        .filter(AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff_14d)
+        .group_by(func.date(AuditLog.created_at))
+        .order_by(func.date(AuditLog.created_at))
+        .all()
+    )
+    daily_counts = [{"date": str(r.date), "count": r.count} for r in daily_rows]
+
+    # Action breakdown
+    action_rows = (
+        db.query(AuditLog.action, func.count(AuditLog.id).label("count"))
+        .filter(AuditLog.tenant_id == tenant_id)
+        .group_by(AuditLog.action)
+        .all()
+    )
+    action_breakdown: dict = {}
+    for r in action_rows:
+        action_breakdown[r.action] = r.count
+
+    # Top 5 users by activity
+    user_rows = (
+        db.query(
+            AuditLog.user_email,
+            func.count(AuditLog.id).label("event_count"),
+        )
+        .filter(AuditLog.tenant_id == tenant_id, AuditLog.user_email.isnot(None))
+        .group_by(AuditLog.user_email)
+        .order_by(func.count(AuditLog.id).desc())
+        .limit(5)
+        .all()
+    )
+    top_users = [{"email": r.user_email, "event_count": r.event_count} for r in user_rows]
+
+    # Busiest hour (0-23)
+    hour_rows = (
+        db.query(
+            func.extract("hour", AuditLog.created_at).label("hour"),
+            func.count(AuditLog.id).label("count"),
+        )
+        .filter(AuditLog.tenant_id == tenant_id)
+        .group_by(func.extract("hour", AuditLog.created_at))
+        .order_by(func.count(AuditLog.id).desc())
+        .first()
+    )
+    busiest_hour = int(hour_rows.hour) if hour_rows else 0
+
+    return {
+        "daily_counts": daily_counts,
+        "action_breakdown": action_breakdown,
+        "top_users": top_users,
+        "busiest_hour": busiest_hour,
+    }
+
+
+@router.get("/anomalies")
+def get_anomalies(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Detects anomalies in the last 24 hours:
+    - repeated_failures: users with >5 failed actions in the last hour
+    - off_hours_access: accesses between 22:00-06:00 UTC today
+    - bulk_deletes: users with >10 deletes in the last hour
+    """
+    from app.models.audit_log import AuditLog
+
+    now = datetime.utcnow()
+    one_hour_ago = now - timedelta(hours=1)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Repeated failures (>5 status="failure" in last 1h)
+    failure_rows = (
+        db.query(AuditLog.user_email, func.count(AuditLog.id).label("count"), func.max(AuditLog.created_at).label("last_attempt"))
+        .filter(
+            AuditLog.tenant_id == tenant_id,
+            AuditLog.status == "failure",
+            AuditLog.created_at >= one_hour_ago,
+            AuditLog.user_email.isnot(None),
+        )
+        .group_by(AuditLog.user_email)
+        .having(func.count(AuditLog.id) > 5)
+        .all()
+    )
+    repeated_failures = [
+        {"email": r.user_email, "count": r.count, "last_attempt": r.last_attempt.isoformat() if r.last_attempt else None}
+        for r in failure_rows
+    ]
+
+    # Off-hours access (22:00-06:00 UTC today)
+    off_hours_rows = (
+        db.query(AuditLog.user_email, AuditLog.created_at)
+        .filter(
+            AuditLog.tenant_id == tenant_id,
+            AuditLog.created_at >= today_start,
+            AuditLog.user_email.isnot(None),
+        )
+        .filter(
+            (func.extract("hour", AuditLog.created_at) >= 22)
+            | (func.extract("hour", AuditLog.created_at) < 6)
+        )
+        .order_by(AuditLog.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    off_hours_access = [
+        {"email": r.user_email, "datetime": r.created_at.isoformat(), "hour": r.created_at.hour}
+        for r in off_hours_rows
+    ]
+
+    # Bulk deletes (>10 deletes in last 1h)
+    delete_rows = (
+        db.query(AuditLog.user_email, func.count(AuditLog.id).label("count"))
+        .filter(
+            AuditLog.tenant_id == tenant_id,
+            AuditLog.action == "delete",
+            AuditLog.created_at >= one_hour_ago,
+            AuditLog.user_email.isnot(None),
+        )
+        .group_by(AuditLog.user_email)
+        .having(func.count(AuditLog.id) > 10)
+        .all()
+    )
+    bulk_deletes = [{"email": r.user_email, "count": r.count} for r in delete_rows]
+
+    return {
+        "repeated_failures": repeated_failures,
+        "off_hours_access": off_hours_access,
+        "bulk_deletes": bulk_deletes,
+    }
+
+
+@router.get("/compliance-report")
+def get_compliance_report(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    days: int = Query(30, description="Reporting period in days"),
+) -> Any:
+    """
+    Returns structured JSON for SOC2/ISO27001 compliance fields.
+    Frontend downloads this as a JSON file.
+    """
+    from app.models.audit_log import AuditLog
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    total_events = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff
+    ).scalar() or 0
+
+    unique_users = db.query(func.count(func.distinct(AuditLog.user_email))).filter(
+        AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff, AuditLog.user_email.isnot(None)
+    ).scalar() or 0
+
+    failed_actions = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff, AuditLog.status == "failure"
+    ).scalar() or 0
+
+    admin_actions = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff,
+        AuditLog.resource_type == "settings",
+    ).scalar() or 0
+
+    data_exports = db.query(func.count(AuditLog.id)).filter(
+        AuditLog.tenant_id == tenant_id, AuditLog.created_at >= cutoff, AuditLog.action == "export"
+    ).scalar() or 0
+
+    return {
+        "period_days": days,
+        "period_start": cutoff.date().isoformat(),
+        "period_end": datetime.utcnow().date().isoformat(),
+        "total_events": total_events,
+        "unique_users": unique_users,
+        "failed_actions": failed_actions,
+        "admin_actions": admin_actions,
+        "data_exports": data_exports,
+        "generated_at": datetime.utcnow().isoformat(),
+    }

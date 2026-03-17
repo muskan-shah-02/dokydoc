@@ -22,11 +22,15 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.517.0",
+    "mermaid": "^11.13.0",
     "next": "15.3.3",
     "react": "^19.0.0",
+    "react-diff-viewer-continued": "^4.2.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^16.1.1",
+    "recharts": "^3.8.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {

@@ -42,6 +42,7 @@ class RetrievedContext:
     cross_graph_links: List[Dict] = field(default_factory=list)
     requirement_traces: List[Dict] = field(default_factory=list)
     live_data: List[Dict] = field(default_factory=list)   # operational/billing/stats data
+    pending_approvals: List[Dict] = field(default_factory=list)  # approvals assigned to current user
     token_estimate: int = 0
 
     def to_prompt_text(self) -> str:
@@ -123,6 +124,7 @@ class RetrievedContext:
             "token_estimate": self.token_estimate,
             "top_concepts": [c["name"] for c in self.concepts[:5]],
             "live_data_labels": [ld.get("label", "") for ld in self.live_data[:3]],
+            "pending_approval_count": len(self.pending_approvals),
         }
 
 
@@ -229,6 +231,14 @@ class RAGService:
         # --- Stage 6: Requirement trace retrieval ---
         if doc_ids:
             ctx.requirement_traces = self._fetch_requirement_traces(db, tenant_id, doc_ids)
+
+        # --- Stage 7: Pending approvals for current user ---
+        if user_id:
+            try:
+                ctx.pending_approvals = self._fetch_pending_approvals(db, tenant_id, user_id)
+            except Exception as e:
+                logger.warning(f"RAG Stage 7 (pending approvals) failed: {e}")
+                db.rollback()
 
         # Estimate tokens
         ctx.token_estimate = len(ctx.to_prompt_text()) // 4
@@ -593,6 +603,40 @@ class RAGService:
             ]
         except Exception as e:
             logger.warning(f"RAG requirement trace fetch failed: {e}")
+            db.rollback()
+            return []
+
+    def _fetch_pending_approvals(
+        self, db: Session, tenant_id: int, user_id: int
+    ) -> List[Dict]:
+        """Fetch pending approvals assigned to the current user (max 5)."""
+        try:
+            from app.models.approval import Approval
+            rows = (
+                db.query(Approval)
+                .filter(
+                    Approval.tenant_id == tenant_id,
+                    Approval.status == "pending",
+                    Approval.assignee_id == user_id,
+                )
+                .order_by(Approval.created_at.desc())
+                .limit(5)
+                .all()
+            )
+            return [
+                {
+                    "id": a.id,
+                    "entity_type": a.entity_type,
+                    "entity_id": a.entity_id,
+                    "entity_name": a.entity_name,
+                    "status": a.status,
+                    "level": a.level,
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in rows
+            ]
+        except Exception as e:
+            logger.warning(f"RAG pending approvals fetch failed: {e}")
             db.rollback()
             return []
 
@@ -1042,9 +1086,10 @@ class RAGService:
         return {
             "persona": "knowledgeable AI assistant",
             "style": (
-                "Provide clear, well-structured answers. "
-                "Balance technical depth with accessibility. "
-                "Use markdown formatting for readability."
+                "Provide clear, well-structured answers using rich Markdown. "
+                "Always use ## headings for sections, **bold** for key terms, "
+                "bullet points for lists, > blockquotes for risks/warnings, "
+                "and code blocks for technical identifiers. Never output walls of plain text."
             ),
             "priority_context": [],
         }
@@ -1392,7 +1437,15 @@ class RAGService:
         parts.append("RESPONSE RULES:")
         parts.append("- Answer using the provided context. Synthesize all available information into a clear, useful response.")
         parts.append("- When referencing sources, use citation tags: [Doc: filename], [Code: component_name], [Concept: concept_name].")
-        parts.append("- Use markdown formatting: headers for sections, code blocks for code, tables for comparisons.")
+        parts.append("- ALWAYS format responses using rich Markdown for readability:")
+        parts.append("  * Use ## and ### headings to organize sections (never dump wall-of-text)")
+        parts.append("  * Use **bold** for key terms, labels, risk indicators, and important values")
+        parts.append("  * Use bullet points (-) for lists of items or features")
+        parts.append("  * Use numbered lists (1. 2. 3.) for sequential steps, ranked items, or priorities")
+        parts.append("  * Use > blockquotes to highlight critical risks, warnings, or key insights")
+        parts.append("  * Use `inline code` for file names, function names, config keys, and technical identifiers")
+        parts.append("  * Use fenced code blocks (```language) for multi-line code snippets")
+        parts.append("  * Use markdown tables for comparisons, mappings, or structured data")
         parts.append("- Be specific — mention exact names, file paths, requirement keys, and coverage statuses.")
         parts.append("- If multiple sources agree, synthesize them into a cohesive answer rather than listing each separately.")
         parts.append("- If the query is vague or could mean multiple things, answer what you can AND ask 1-2 specific clarifying questions at the end to help the user get more precise information.")

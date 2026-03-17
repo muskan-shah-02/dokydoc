@@ -519,6 +519,135 @@ def delete_document(
 
     document_endpoints.logger.info(f"Document {document_id} deleted successfully from tenant {tenant_id}")
     return None
+# --- Document Version Comparison Endpoints ---
+
+@router.get("/{document_id}/versions")
+def list_document_versions(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """List all saved versions for a document, newest first."""
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    from app.crud.crud_document_version import crud_document_version
+    versions = crud_document_version.get_by_document(
+        db, document_id=document_id, tenant_id=tenant_id
+    )
+
+    # Enrich with uploader email
+    result = []
+    for v in versions:
+        user = db.query(models.User).filter(models.User.id == v.uploaded_by_id).first()
+        result.append({
+            "id": v.id,
+            "document_id": v.document_id,
+            "version_number": v.version_number,
+            "content_hash": v.content_hash,
+            "file_size": v.file_size,
+            "original_filename": v.original_filename,
+            "uploaded_by_id": v.uploaded_by_id,
+            "uploaded_by_email": user.email if user else None,
+            "created_at": v.created_at.isoformat(),
+        })
+    return {"versions": result, "total": len(result)}
+
+
+@router.post("/{document_id}/versions/diff")
+def diff_document_versions(
+    document_id: int,
+    payload: dict,  # {version_a: int, version_b: int}
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Compute a side-by-side line diff between two versions.
+    Returns structured diff lines for rendering in the frontend diff viewer.
+    """
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    from app.crud.crud_document_version import crud_document_version
+
+    version_a_num = payload.get("version_a")
+    version_b_num = payload.get("version_b")
+    if not version_a_num or not version_b_num:
+        raise HTTPException(status_code=422, detail="version_a and version_b are required")
+
+    ver_a = crud_document_version.get_by_version_number(
+        db, document_id=document_id, tenant_id=tenant_id, version_number=version_a_num
+    )
+    ver_b = crud_document_version.get_by_version_number(
+        db, document_id=document_id, tenant_id=tenant_id, version_number=version_b_num
+    )
+
+    if not ver_a:
+        raise HTTPException(status_code=404, detail=f"Version {version_a_num} not found")
+    if not ver_b:
+        raise HTTPException(status_code=404, detail=f"Version {version_b_num} not found")
+
+    return crud_document_version.compute_diff(
+        text_a=ver_a.content_text,
+        text_b=ver_b.content_text,
+        version_a=version_a_num,
+        version_b=version_b_num,
+        document_id=document_id,
+    )
+
+
+@router.post("/{document_id}/versions/{version_number}/restore", response_model=schemas.Document)
+def restore_document_version(
+    document_id: int,
+    version_number: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Restore a document to a previous version.
+    Creates a NEW version entry with the old content (non-destructive).
+    """
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    from app.crud.crud_document_version import crud_document_version
+
+    target_version = crud_document_version.get_by_version_number(
+        db, document_id=document_id, tenant_id=tenant_id, version_number=version_number
+    )
+    if not target_version:
+        raise HTTPException(status_code=404, detail=f"Version {version_number} not found")
+
+    # Create a new version with the old content (non-destructive restore)
+    new_version = crud_document_version.create(
+        db,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        content_text=target_version.content_text,
+        original_filename=target_version.original_filename or document.filename,
+        file_size=target_version.file_size,
+        uploaded_by_id=current_user.id,
+    )
+
+    # Update document raw_text to reflect the restored content
+    crud.document.update(
+        db=db,
+        db_obj=document,
+        obj_in={"raw_text": target_version.content_text, "status": "completed"},
+    )
+
+    document_endpoints.logger.info(
+        f"Document {document_id} restored to version {version_number} as new version {new_version.version_number}"
+    )
+    return document
+
+
 @router.post("/{document_id}/stop")
 def stop_document_analysis(
     document_id: int,

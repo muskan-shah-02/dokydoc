@@ -15,6 +15,7 @@ from app import models
 from app.api import deps
 from app.db.session import get_db
 from app.crud.crud_notification import notification as notification_crud
+from app.crud.crud_notification_preference import crud_notification_preference
 from app.core.logging import get_logger
 
 logger = get_logger("api.notifications")
@@ -101,3 +102,51 @@ def mark_all_read(
         db=db, user_id=current_user.id, tenant_id=tenant_id
     )
     return {"status": "all_read", "count": count}
+
+
+# --- Notification Preferences ---
+
+@router.get("/preferences")
+def get_preferences(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get (or initialize) notification preferences for the current user."""
+    prefs = crud_notification_preference.get_or_create_defaults(
+        db=db, user_id=current_user.id, tenant_id=tenant_id
+    )
+    return {
+        "id": prefs.id,
+        "user_id": prefs.user_id,
+        "analysis_complete": prefs.analysis_complete,
+        "analysis_failed": prefs.analysis_failed,
+        "validation_alert": prefs.validation_alert,
+        "mention": prefs.mention,
+        "system": prefs.system,
+    }
+
+
+@router.put("/preferences")
+def update_preferences(
+    update_data: dict,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Update notification preferences. Only boolean fields are applied."""
+    prefs = crud_notification_preference.update(
+        db=db,
+        user_id=current_user.id,
+        tenant_id=tenant_id,
+        update_data=update_data,
+    )
+    return {
+        "id": prefs.id,
+        "user_id": prefs.user_id,
+        "analysis_complete": prefs.analysis_complete,
+        "analysis_failed": prefs.analysis_failed,
+        "validation_alert": prefs.validation_alert,
+        "mention": prefs.mention,
+        "system": prefs.system,
+    }

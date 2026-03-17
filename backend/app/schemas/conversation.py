@@ -88,9 +88,25 @@ class ChatSendResponse(BaseModel):
     assistant_message: ChatMessageResponse
     context_summary: Optional[dict] = None
     citations: Optional[List[CitationItem]] = None
+    approval_references: Optional[List[dict]] = None  # Sprint 8: In-dock approvals
 
 
 class ChatMessageListResponse(BaseModel):
     """List of messages in a conversation."""
     messages: List[ChatMessageResponse]
     total: int
+
+
+# --- Slash Command Schemas ---
+
+class CommandRequest(BaseModel):
+    """Execute a slash command without the full RAG pipeline."""
+    command: str = Field(..., description="The slash command, e.g. '/help'")
+    args: str = Field(default="", description="Arguments after the command")
+
+
+class CommandResponse(BaseModel):
+    """Response from a slash command execution."""
+    command: str
+    content: str
+    is_command_response: bool = True

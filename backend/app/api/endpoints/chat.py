@@ -39,6 +39,8 @@ from app.schemas.conversation import (
     ChatSendResponse,
     ChatMessageListResponse,
     ModelPreferenceUpdate,
+    CommandRequest,
+    CommandResponse,
 )
 from app.core.logging import logger
 from app.core.permissions import Permission
@@ -369,6 +371,7 @@ async def send_message(
         "assistant_message": assistant_msg,
         "context_summary": context_summary,
         "citations": citations,
+        "approval_references": context.pending_approvals if context.pending_approvals else None,
     }
 
 
@@ -552,6 +555,146 @@ def submit_feedback(
 # -------------------------------------------------------------------
 # Conversation Export (Task 12)
 # -------------------------------------------------------------------
+
+SLASH_COMMAND_HELP = """## AskyDoc Slash Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/help` | Show all available commands | `/help` |
+| `/status` | System overview: docs, analyses, pending items | `/status` |
+| `/search [query]` | Semantic search across your knowledge base | `/search authentication flow` |
+| `/export` | Export the current conversation as JSON | `/export` |
+| `/pending` | List your pending approval requests | `/pending` |
+| `/summarize [name]` | Summarize a document by name (AI) | `/summarize Requirements.pdf` |
+| `/analyze [name]` | Analyze a code component by name (AI) | `/analyze AuthService` |
+| `/compare [A] vs [B]` | Compare two documents or components (AI) | `/compare v1.pdf vs v2.pdf` |
+
+> **Tip:** For AI commands (/summarize, /analyze, /compare), if multiple items match your search term, AskyDoc will show you the top matches to choose from.
+
+View full documentation → [Help & Docs](/dashboard/help)
+"""
+
+
+def _handle_simple_command(
+    command: str,
+    args: str,
+    conversation_id: int,
+    db: Session,
+    tenant_id: int,
+    current_user: Any,
+) -> str:
+    """Handle simple slash commands that don't need the RAG pipeline."""
+    if command == "/help":
+        return SLASH_COMMAND_HELP
+
+    if command == "/status":
+        from app.models import Document, CodeComponent, Approval
+        doc_count = db.query(Document).filter(
+            Document.tenant_id == tenant_id,
+            Document.is_deleted.is_(False) if hasattr(Document, "is_deleted") else True,
+        ).count()
+        code_count = db.query(CodeComponent).filter(
+            CodeComponent.tenant_id == tenant_id,
+        ).count()
+        pending_approvals = db.query(Approval).filter(
+            Approval.tenant_id == tenant_id,
+            Approval.status == "pending",
+        ).count()
+        my_pending = db.query(Approval).filter(
+            Approval.tenant_id == tenant_id,
+            Approval.status == "pending",
+            Approval.requested_by_id == current_user.id,
+        ).count()
+        return (
+            f"## System Status\n\n"
+            f"| Metric | Count |\n"
+            f"|--------|-------|\n"
+            f"| **Documents** | {doc_count} |\n"
+            f"| **Code Components** | {code_count} |\n"
+            f"| **Pending Approvals (all)** | {pending_approvals} |\n"
+            f"| **My Pending Approvals** | {my_pending} |\n"
+        )
+
+    if command == "/pending":
+        from app.models import Approval
+        items = db.query(Approval).filter(
+            Approval.tenant_id == tenant_id,
+            Approval.status == "pending",
+            Approval.requested_by_id == current_user.id,
+        ).order_by(Approval.created_at.desc()).limit(10).all()
+        if not items:
+            return "## Pending Approvals\n\nNo pending approvals — you're all caught up! ✓"
+        lines = ["## Your Pending Approvals\n", "| # | Entity | Type | Created |", "|---|--------|------|---------|"]
+        for i, item in enumerate(items, 1):
+            name = item.entity_name or f"#{item.entity_id}"
+            created = item.created_at.strftime("%b %d") if item.created_at else "—"
+            lines.append(f"| {i} | **{name}** | {item.entity_type} | {created} |")
+        lines.append(f"\n> Navigate to [Approvals](/dashboard/approvals) to act on these.")
+        return "\n".join(lines)
+
+    if command == "/search":
+        if not args.strip():
+            return "> **Usage:** `/search [query]`\n\nProvide a search term, e.g. `/search authentication flow`"
+        try:
+            from app.services.semantic_search_service import semantic_search_service
+            results = semantic_search_service.unified_search(
+                db, query=args.strip(), tenant_id=tenant_id, limit=5
+            )
+            items = results.get("results", []) if isinstance(results, dict) else results
+            if not items:
+                return f"## Search: \"{args.strip()}\"\n\nNo results found. Try different keywords."
+            lines = [f"## Search Results for \"{args.strip()}\"\n"]
+            for i, r in enumerate(items, 1):
+                name = r.get("name") or r.get("title") or "Untitled"
+                rtype = r.get("type") or r.get("result_type") or "item"
+                lines.append(f"{i}. **{name}** — `{rtype}`")
+                snippet = r.get("snippet") or r.get("description") or ""
+                if snippet:
+                    lines.append(f"   > {snippet[:150]}")
+            return "\n".join(lines)
+        except Exception:
+            return f"## Search: \"{args.strip()}\"\n\nSearch is temporarily unavailable. Try asking your question directly."
+
+    if command == "/export":
+        return (
+            "## Export Conversation\n\n"
+            "To export this conversation, click the **Download** button in the conversation header, "
+            "or use the export button (↓) at the top of the chat.\n\n"
+            "> The export includes all messages, model info, token counts, and timestamps in JSON format."
+        )
+
+    return f"> Unknown command: `{command}`\n\nType `/help` to see all available commands."
+
+
+@router.post("/conversations/{conversation_id}/command", response_model=CommandResponse)
+async def execute_command(
+    conversation_id: int,
+    payload: CommandRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.require_permission(Permission.CHAT_USE)),
+) -> Any:
+    """
+    Execute a slash command without the full RAG/billing pipeline.
+    Handles: /help, /status, /search, /export, /pending
+    AI-powered commands (/summarize, /analyze, /compare) go through the normal send_message endpoint.
+    """
+    conv = crud.conversation.get(db, id=conversation_id, tenant_id=tenant_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+
+    command = payload.command.lower().strip()
+    if not command.startswith("/"):
+        command = f"/{command}"
+
+    content = _handle_simple_command(
+        command, payload.args, conversation_id, db, tenant_id, current_user,
+    )
+
+    return CommandResponse(command=command, content=content)
+
 
 @router.get("/conversations/{conversation_id}/export")
 def export_conversation(

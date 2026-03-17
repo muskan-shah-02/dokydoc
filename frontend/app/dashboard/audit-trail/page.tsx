@@ -40,6 +40,7 @@ import {
   GitBranch,
   AlertCircle,
 } from "lucide-react";
+import { SecurityInsightsPanel } from "@/components/audit/SecurityInsightsPanel";
 
 interface AuditEvent {
   id: number;
@@ -408,6 +409,9 @@ export default function AuditTrailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Security Insights Panel — Sprint 8 */}
+      <SecurityInsightsPanel />
 
       <Card>
         <CardContent className="p-4">

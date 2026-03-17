@@ -27,6 +27,7 @@ import {
   TrendingUp,
   DollarSign,
   X,
+  Bell,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +43,13 @@ export default function SettingsPage() {
     { id: "password", label: "Password", icon: <Lock className="h-4 w-4" /> },
     { id: "permissions", label: "Permissions", icon: <Shield className="h-4 w-4" /> },
   ];
+
+  // Notifications tab — available to all users
+  tabs.push({
+    id: "notifications",
+    label: "Notifications",
+    icon: <Bell className="h-4 w-4" />,
+  });
 
   // Add Organization and Billing tabs for CXO
   if (isCXO()) {
@@ -93,6 +101,7 @@ export default function SettingsPage() {
           {activeTab === "profile" && <ProfileTab user={user} />}
           {activeTab === "password" && <PasswordTab />}
           {activeTab === "permissions" && <PermissionsTab permissions={permissions} />}
+          {activeTab === "notifications" && <NotificationPrefsTab />}
           {activeTab === "organization" && isCXO() && <TenantTab tenant={tenant} />}
           {activeTab === "billing" && isCXO() && <BillingTab />}
         </div>
@@ -1053,6 +1062,88 @@ function PermissionsTab({ permissions }: { permissions: string[] }) {
           <p className="mt-2 text-sm text-gray-600">
             Contact your administrator to request access
           </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Notification Preferences Tab
+// ============================================================================
+
+const PREF_FIELDS: { key: string; label: string; description: string }[] = [
+  { key: "analysis_complete", label: "Analysis Complete", description: "Notify when document or repository analysis finishes successfully" },
+  { key: "analysis_failed", label: "Analysis Failed", description: "Notify when an analysis run encounters errors" },
+  { key: "validation_alert", label: "Validation Alerts", description: "Notify when mismatches or validation issues are detected" },
+  { key: "mention", label: "Mentions", description: "Notify when you are mentioned in a task or comment" },
+  { key: "system", label: "System Messages", description: "Notify for system-level announcements and updates" },
+];
+
+function NotificationPrefsTab() {
+  const [prefs, setPrefs] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get("/notifications/preferences")
+      .then((data: any) => setPrefs(data))
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleToggle = async (key: string, value: boolean) => {
+    setPrefs((prev) => ({ ...prev, [key]: value }));
+    setSaving(key);
+    try {
+      await api.put("/notifications/preferences", { [key]: value });
+    } catch {
+      // Revert on failure
+      setPrefs((prev) => ({ ...prev, [key]: !value }));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-gray-900">Notification Preferences</h3>
+        <p className="mt-1 text-sm text-gray-600">
+          Control which in-app notifications you receive. Changes are saved automatically.
+        </p>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500 py-4">
+          <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+          Loading preferences…
+        </div>
+      ) : (
+        <div className="space-y-4 max-w-xl">
+          {PREF_FIELDS.map(({ key, label, description }) => (
+            <div key={key} className="flex items-start justify-between gap-4 py-3 border-b last:border-0">
+              <div>
+                <p className="text-sm font-medium text-gray-900">{label}</p>
+                <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+              </div>
+              <button
+                role="switch"
+                aria-checked={!!prefs[key]}
+                disabled={saving === key}
+                onClick={() => handleToggle(key, !prefs[key])}
+                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${
+                  prefs[key] ? "bg-blue-600" : "bg-gray-200"
+                } ${saving === key ? "opacity-50" : ""}`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${
+                    prefs[key] ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </div>

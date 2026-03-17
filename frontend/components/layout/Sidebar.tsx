@@ -45,6 +45,7 @@ import {
   BrainCircuit,
   Search,
   Sparkles,
+  HelpCircle,
 } from "lucide-react";
 
 // Context for sidebar collapsed state
@@ -431,6 +432,23 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                 </ul>
               )}
             </div>
+          </div>
+
+          {/* Help & Docs Link */}
+          <div className="px-3 pb-2">
+            <Link
+              href="/dashboard/help"
+              onClick={() => isOpen && onClose()}
+              className={`flex items-center gap-3 py-2 px-3 rounded-lg text-sm transition-colors ${
+                pathname === "/dashboard/help"
+                  ? "bg-purple-50 text-purple-700 font-medium"
+                  : "text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+              } ${isCollapsed ? "justify-center" : ""}`}
+              title="Help & Docs"
+            >
+              <HelpCircle className="h-4 w-4 flex-shrink-0" />
+              {!isCollapsed && <span>Help & Docs</span>}
+            </Link>
           </div>
 
           {/* User Profile Section */}

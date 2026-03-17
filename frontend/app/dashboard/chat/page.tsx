@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "next/navigation";
-import ReactMarkdown from "react-markdown";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
+import { SlashCommandPalette, SLASH_COMMANDS, type SlashCommand } from "@/components/chat/SlashCommandPalette";
+import { InlineApprovalActions } from "@/components/chat/InlineApprovalActions";
 import {
   MessageCircle,
   Plus,
@@ -144,9 +144,13 @@ export default function ChatPage() {
   const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
   const [queryStep, setQueryStep] = useState(0);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [approvalRefs, setApprovalRefs] = useState<Record<number, any[]>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const inputAreaRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -428,6 +432,14 @@ export default function ChatPage() {
         data.assistant_message,
       ]);
 
+      // Store approval references for this assistant message
+      if (data.approval_references && data.approval_references.length > 0) {
+        setApprovalRefs((prev) => ({
+          ...prev,
+          [data.assistant_message.id]: data.approval_references,
+        }));
+      }
+
       setConversations((prev) =>
         prev.map((c) =>
           c.id === conv!.id
@@ -450,9 +462,103 @@ export default function ChatPage() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showCommandPalette && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Escape")) {
+      return; // Let palette handle these
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      if (!showCommandPalette) sendMessage();
+    }
+  };
+
+  const handleInputChange = (value: string) => {
+    setInput(value);
+    if (value.startsWith("/") && !value.includes(" ")) {
+      setCommandQuery(value.slice(1));
+      setShowCommandPalette(true);
+    } else {
+      setShowCommandPalette(false);
+      setCommandQuery("");
+    }
+  };
+
+  const handleCommandSelect = async (cmd: SlashCommand) => {
+    setShowCommandPalette(false);
+    // Fill example into input for AI commands, or execute simple commands directly
+    if (cmd.type === "ai") {
+      setInput(cmd.command + " ");
+      setCommandQuery("");
+      inputRef.current?.focus();
+      return;
+    }
+    // Simple commands: execute immediately
+    setInput("");
+    setCommandQuery("");
+    if (!activeConv) {
+      // Create a conversation first
+      try {
+        const res = await fetch(`${API_BASE}/chat/conversations`, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({ title: cmd.command, context_type: "general", model_preference: "auto" }),
+        });
+        if (!res.ok) return;
+        const conv = await res.json();
+        setConversations((prev) => [conv, ...prev]);
+        setActiveConv(conv);
+        await executeSlashCommand(cmd.command, "", conv.id);
+      } catch (e) {
+        console.error("Failed to create conversation:", e);
+      }
+      return;
+    }
+    await executeSlashCommand(cmd.command, "", activeConv.id);
+  };
+
+  const executeSlashCommand = async (command: string, args: string, convId: number) => {
+    setSending(true);
+    const optimisticUser: ChatMessage = {
+      id: Date.now(),
+      conversation_id: convId,
+      role: "user",
+      content: args ? `${command} ${args}` : command,
+      context_used: null,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      model_used: null,
+      feedback_rating: null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticUser]);
+    setTimeout(scrollToBottom, 50);
+    try {
+      const res = await fetch(`${API_BASE}/chat/conversations/${convId}/command`, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify({ command, args }),
+      });
+      if (!res.ok) throw new Error("Command failed");
+      const data = await res.json();
+      const assistantMsg: ChatMessage = {
+        id: Date.now() + 1,
+        conversation_id: convId,
+        role: "assistant",
+        content: data.content,
+        context_used: null,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        model_used: "command",
+        feedback_rating: null,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+      setTimeout(scrollToBottom, 100);
+    } catch (e) {
+      console.error("Command execution failed:", e);
+    } finally {
+      setSending(false);
     }
   };
 
@@ -802,35 +908,7 @@ export default function ChatPage() {
                     }`}
                   >
                     {msg.role === "assistant" ? (
-                      <div className="text-sm prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-a:text-purple-600 prose-code:text-purple-700 prose-code:bg-purple-50 prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
-                        <ReactMarkdown
-                          components={{
-                            code({ className, children, ...props }) {
-                              const match = /language-(\w+)/.exec(className || "");
-                              const codeString = String(children).replace(/\n$/, "");
-                              if (match) {
-                                return (
-                                  <SyntaxHighlighter
-                                    style={oneLight}
-                                    language={match[1]}
-                                    PreTag="div"
-                                    className="rounded-lg text-xs !my-2"
-                                  >
-                                    {codeString}
-                                  </SyntaxHighlighter>
-                                );
-                              }
-                              return (
-                                <code className={className} {...props}>
-                                  {children}
-                                </code>
-                              );
-                            },
-                          }}
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
-                      </div>
+                      <MarkdownRenderer content={msg.content} />
                     ) : (
                       <div className="text-sm whitespace-pre-wrap break-words leading-relaxed">
                         {msg.content}
@@ -926,6 +1004,11 @@ export default function ChatPage() {
                       </div>
                     )}
                   </div>
+                  {/* Inline Approval Actions — shown below assistant message bubble */}
+                  {msg.role === "assistant" && approvalRefs[msg.id] && (
+                    <InlineApprovalActions approvals={approvalRefs[msg.id]} />
+                  )}
+
                   {msg.role === "user" && (
                     <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
                       <User className="h-4 w-4 text-gray-600" />
@@ -975,13 +1058,20 @@ export default function ChatPage() {
         {/* Input Area */}
         <div className="border-t border-gray-200 bg-white p-4">
           <div className="max-w-3xl mx-auto flex items-end gap-3">
-            <div className="flex-1 relative">
+            <div className="flex-1 relative" ref={inputAreaRef}>
+              {showCommandPalette && (
+                <SlashCommandPalette
+                  query={commandQuery}
+                  onSelect={handleCommandSelect}
+                  onClose={() => setShowCommandPalette(false)}
+                />
+              )}
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => handleInputChange(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask AskyDoc about your documents, code, or knowledge graphs..."
+                placeholder="Ask AskyDoc… or type / for commands"
                 rows={1}
                 className="w-full resize-none rounded-xl border border-gray-300 px-4 py-3 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent placeholder-gray-400"
                 style={{ maxHeight: "120px", minHeight: "44px" }}

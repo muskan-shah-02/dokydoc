@@ -63,7 +63,9 @@ import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
 import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
-import { Network, History } from "lucide-react";
+import { Network, History, Upload, GitCompare } from "lucide-react";
+import { VersionHistoryPanel } from "@/components/documents/VersionHistoryPanel";
+import { VersionDiffModal } from "@/components/documents/VersionDiffModal";
 
 // --- 1. Types ---
 
@@ -848,6 +850,9 @@ export default function DocumentDetailPage() {
   const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
   const [versionPanelOpen, setVersionPanelOpen] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [diffModal, setDiffModal] = useState<{ versionA: number; versionB: number } | null>(null);
+  const [uploadingVersion, setUploadingVersion] = useState(false);
+  const uploadVersionInputRef = React.useRef<HTMLInputElement>(null);
 
   const triggerExtraction = useCallback(async (docId: string) => {
     setExtracting(true);
@@ -907,6 +912,28 @@ export default function DocumentDetailPage() {
   useEffect(() => {
     fetchFullAnalysis();
   }, [fetchFullAnalysis]);
+
+  const handleUploadNewVersion = useCallback(async (file: File) => {
+    if (!documentId) return;
+    setUploadingVersion(true);
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("parent_document_id", documentId);
+    const token = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/documents/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      await fetchFullAnalysis();
+    } catch {
+      alert("Failed to upload new version.");
+    } finally {
+      setUploadingVersion(false);
+    }
+  }, [documentId, fetchFullAnalysis]);
 
   // Polling with billing notifications
   useEffect(() => {
@@ -1045,7 +1072,33 @@ export default function DocumentDetailPage() {
             </div>
           </div>
         </div>
-        <div>
+        <div className="flex items-center gap-2">
+          {/* Hidden file input for uploading a new version */}
+          <input
+            ref={uploadVersionInputRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.docx,.txt,.md,.csv,.xlsx"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleUploadNewVersion(file);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => uploadVersionInputRef.current?.click()}
+            disabled={uploadingVersion || isLive}
+            className="gap-1.5 text-xs"
+          >
+            {uploadingVersion ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Upload className="w-3.5 h-3.5" />
+            )}
+            {uploadingVersion ? "Uploading..." : "Upload New Version"}
+          </Button>
           {!isLive && (
             <Button
               onClick={handleRunAnalysis}
@@ -1106,6 +1159,12 @@ export default function DocumentDetailPage() {
             className="data-[state=active]:bg-purple-50 data-[state=active]:text-purple-700 h-10 px-6"
           >
             <Network className="w-4 h-4 mr-2" /> Knowledge Graph
+          </TabsTrigger>
+          <TabsTrigger
+            value="versions"
+            className="data-[state=active]:bg-amber-50 data-[state=active]:text-amber-700 h-10 px-6"
+          >
+            <History className="w-4 h-4 mr-2" /> Version History
           </TabsTrigger>
         </TabsList>
 
@@ -1198,7 +1257,34 @@ export default function DocumentDetailPage() {
             />
           )}
         </TabsContent>
+
+        <TabsContent value="versions">
+          <div className="bg-white border rounded-xl p-6 shadow-sm">
+            <div className="flex items-center gap-2 mb-4">
+              <History className="w-5 h-5 text-amber-600" />
+              <h2 className="text-base font-semibold text-gray-900">Version History</h2>
+            </div>
+            {doc && (
+              <VersionHistoryPanel
+                documentId={doc.id}
+                onCompare={(versionA, versionB) => setDiffModal({ versionA, versionB })}
+                onRestored={fetchFullAnalysis}
+              />
+            )}
+          </div>
+        </TabsContent>
       </Tabs>
+
+      {/* Version Diff Modal */}
+      {doc && diffModal && (
+        <VersionDiffModal
+          documentId={doc.id}
+          versionA={diffModal.versionA}
+          versionB={diffModal.versionB}
+          isOpen={!!diffModal}
+          onClose={() => setDiffModal(null)}
+        />
+      )}
     </div>
   );
 }
