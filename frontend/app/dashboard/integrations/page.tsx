@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Link2,
   Loader2,
@@ -13,6 +14,8 @@ import {
   AlertCircle,
   ExternalLink,
   Download,
+  Slack,
+  LogIn,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +40,8 @@ interface PageItem {
   title: string;
   url: string;
   updated_at: string;
+  member_count?: number;
+  topic?: string;
 }
 
 interface ConnectFormState {
@@ -46,9 +51,21 @@ interface ConnectFormState {
   base_url: string;
 }
 
+// OAuth-capable providers use the full OAuth flow.
+// Notion uses manual token (internal integration token model).
+const OAUTH_PROVIDERS = new Set(["jira", "slack"]);
+
 const PROVIDER_META: Record<
   string,
-  { label: string; color: string; description: string; tokenLabel: string; tokenPlaceholder: string }
+  {
+    label: string;
+    color: string;
+    description: string;
+    tokenLabel: string;
+    tokenPlaceholder: string;
+    useOAuth: boolean;
+    oauthLabel: string;
+  }
 > = {
   notion: {
     label: "Notion",
@@ -56,6 +73,8 @@ const PROVIDER_META: Record<
     description: "Import pages from your Notion workspace",
     tokenLabel: "Notion Integration Token",
     tokenPlaceholder: "secret_...",
+    useOAuth: false,
+    oauthLabel: "",
   },
   jira: {
     label: "Jira",
@@ -63,6 +82,17 @@ const PROVIDER_META: Record<
     description: "Import issues and epics from Jira Cloud",
     tokenLabel: "Jira API Token",
     tokenPlaceholder: "Your Atlassian API token",
+    useOAuth: true,
+    oauthLabel: "Connect with Atlassian",
+  },
+  slack: {
+    label: "Slack",
+    color: "bg-[#4A154B] text-white",
+    description: "Browse channels and import message history as docs",
+    tokenLabel: "Slack Bot Token",
+    tokenPlaceholder: "xoxb-...",
+    useOAuth: true,
+    oauthLabel: "Connect with Slack",
   },
   confluence: {
     label: "Confluence",
@@ -70,6 +100,8 @@ const PROVIDER_META: Record<
     description: "Import Confluence pages (coming soon)",
     tokenLabel: "API Token",
     tokenPlaceholder: "",
+    useOAuth: false,
+    oauthLabel: "",
   },
   sharepoint: {
     label: "SharePoint",
@@ -77,12 +109,53 @@ const PROVIDER_META: Record<
     description: "Import SharePoint documents (coming soon)",
     tokenLabel: "Access Token",
     tokenPlaceholder: "",
+    useOAuth: false,
+    oauthLabel: "",
   },
 };
+
+// ----- Toast helper -----
+
+function Toast({
+  message,
+  type,
+  onClose,
+}: {
+  message: string;
+  type: "success" | "error";
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 5000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div
+      className={`fixed top-4 right-4 z-50 flex items-center gap-3 rounded-xl shadow-lg px-5 py-3.5 text-sm font-medium ${
+        type === "success"
+          ? "bg-green-600 text-white"
+          : "bg-red-600 text-white"
+      }`}
+    >
+      {type === "success" ? (
+        <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+      ) : (
+        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+      )}
+      {message}
+      <button onClick={onClose} className="ml-2 opacity-70 hover:opacity-100">
+        <XCircle className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
 
 // ----- Main Page -----
 
 export default function IntegrationsPage() {
+  const searchParams = useSearchParams();
+
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [connectingProvider, setConnectingProvider] = useState<string | null>(null);
@@ -93,7 +166,11 @@ export default function IntegrationsPage() {
     base_url: "",
   });
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [oauthLoading, setOauthLoading] = useState<string | null>(null);
+
+  // Toast
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // Page browser state
   const [browsingProvider, setBrowsingProvider] = useState<string | null>(null);
@@ -103,7 +180,7 @@ export default function IntegrationsPage() {
   const [importedIds, setImportedIds] = useState<Set<string>>(new Set());
   const [pageQuery, setPageQuery] = useState("");
 
-  const fetchIntegrations = async () => {
+  const fetchIntegrations = useCallback(async () => {
     setLoading(true);
     try {
       const data = (await api.get("/integrations/")) as any;
@@ -113,16 +190,58 @@ export default function IntegrationsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchIntegrations();
-  }, []);
+  }, [fetchIntegrations]);
 
-  const handleConnect = async () => {
+  // Handle OAuth callback query params (?oauth_success=jira&workspace=... or ?oauth_error=...)
+  useEffect(() => {
+    const success = searchParams.get("oauth_success");
+    const error = searchParams.get("oauth_error");
+    const workspace = searchParams.get("workspace");
+    const provider = searchParams.get("provider");
+
+    if (success) {
+      const label = PROVIDER_META[success]?.label || success;
+      const ws = workspace ? ` (${decodeURIComponent(workspace)})` : "";
+      setToast({ message: `${label}${ws} connected successfully!`, type: "success" });
+      fetchIntegrations();
+      // Clean URL
+      window.history.replaceState({}, "", "/dashboard/integrations");
+    } else if (error) {
+      const label = provider ? PROVIDER_META[provider]?.label || provider : "Integration";
+      setToast({
+        message: `${label} connection failed: ${decodeURIComponent(error)}. Check your app credentials.`,
+        type: "error",
+      });
+      window.history.replaceState({}, "", "/dashboard/integrations");
+    }
+  }, [searchParams, fetchIntegrations]);
+
+  // OAuth redirect flow
+  const handleOAuthConnect = async (provider: string) => {
+    setOauthLoading(provider);
+    try {
+      const data = (await api.get(
+        `/integrations/${provider}/oauth/authorize`
+      )) as any;
+      if (data.url) {
+        window.location.href = data.url;
+      }
+    } catch (e: any) {
+      const msg = e?.detail || e?.message || "OAuth not configured on the server.";
+      setToast({ message: `Cannot start ${provider} OAuth: ${msg}`, type: "error" });
+      setOauthLoading(null);
+    }
+  };
+
+  // Manual token connect (Notion, manual fallback)
+  const handleManualConnect = async () => {
     if (!form.provider || !form.access_token) return;
     setSubmitting(true);
-    setError(null);
+    setFormError(null);
     try {
       await api.post("/integrations/connect", {
         provider: form.provider,
@@ -133,20 +252,28 @@ export default function IntegrationsPage() {
       setConnectingProvider(null);
       setForm({ provider: "", access_token: "", workspace_name: "", base_url: "" });
       await fetchIntegrations();
+      setToast({
+        message: `${PROVIDER_META[form.provider]?.label || form.provider} connected successfully!`,
+        type: "success",
+      });
     } catch (e: any) {
-      setError(e?.message || "Connection failed. Check your token and try again.");
+      setFormError(e?.message || "Connection failed. Check your token and try again.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleDisconnect = async (id: number) => {
+  const handleDisconnect = async (id: number, provider: string) => {
     if (!confirm("Disconnect this integration? The access token will be removed.")) return;
     try {
       await api.delete(`/integrations/${id}`);
       await fetchIntegrations();
+      setToast({
+        message: `${PROVIDER_META[provider]?.label || provider} disconnected.`,
+        type: "success",
+      });
     } catch {
-      alert("Failed to disconnect.");
+      setToast({ message: "Failed to disconnect.", type: "error" });
     }
   };
 
@@ -160,7 +287,7 @@ export default function IntegrationsPage() {
       )) as any;
       setPages(data.items || []);
     } catch (e: any) {
-      alert(`Failed to fetch pages: ${e?.message || "Unknown error"}`);
+      setToast({ message: `Failed to fetch pages: ${e?.message || "Unknown error"}`, type: "error" });
     } finally {
       setPagesLoading(false);
     }
@@ -174,8 +301,9 @@ export default function IntegrationsPage() {
         title: item.title,
       });
       setImportedIds((prev) => new Set([...prev, item.id]));
+      setToast({ message: `"${item.title}" imported as a document.`, type: "success" });
     } catch (e: any) {
-      alert(`Import failed: ${e?.message || "Unknown error"}`);
+      setToast({ message: `Import failed: ${e?.message || "Unknown error"}`, type: "error" });
     } finally {
       setImportingId(null);
     }
@@ -184,14 +312,23 @@ export default function IntegrationsPage() {
   const activeIntegrations = integrations.filter((i) => i.is_active);
   const providerMap = Object.fromEntries(activeIntegrations.map((i) => [i.provider, i]));
 
-  const openConnectModal = (provider: string) => {
+  const openManualModal = (provider: string) => {
     setForm({ provider, access_token: "", workspace_name: "", base_url: "" });
-    setError(null);
+    setFormError(null);
     setConnectingProvider(provider);
   };
 
   return (
     <div className="p-6 space-y-6">
+      {/* Toast */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="p-2 bg-gradient-to-br from-blue-500 to-teal-500 rounded-lg">
@@ -212,10 +349,12 @@ export default function IntegrationsPage() {
       ) : (
         <>
           {/* Provider Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Object.entries(PROVIDER_META).map(([provider, meta]) => {
               const connected = providerMap[provider];
               const comingSoon = provider === "confluence" || provider === "sharepoint";
+              const isOAuthLoading = oauthLoading === provider;
+
               return (
                 <div
                   key={provider}
@@ -223,13 +362,13 @@ export default function IntegrationsPage() {
                 >
                   {/* Provider header */}
                   <div className="flex items-center justify-between">
-                    <span
-                      className={`text-xs font-semibold px-2.5 py-1 rounded-full ${meta.color}`}
-                    >
+                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${meta.color}`}>
                       {meta.label}
                     </span>
                     {connected ? (
-                      <Badge className="bg-green-100 text-green-700 text-xs">Connected</Badge>
+                      <Badge className="bg-green-100 text-green-700 text-xs">
+                        <CheckCircle2 className="w-3 h-3 mr-1" /> Connected
+                      </Badge>
                     ) : comingSoon ? (
                       <Badge className="bg-gray-100 text-gray-500 text-xs">Coming Soon</Badge>
                     ) : (
@@ -239,11 +378,14 @@ export default function IntegrationsPage() {
 
                   <p className="text-xs text-gray-500">{meta.description}</p>
 
-                  {/* Connected details */}
+                  {/* Connected workspace info */}
                   {connected && (
-                    <div className="text-xs text-gray-500 space-y-0.5">
+                    <div className="text-xs text-gray-500 space-y-0.5 bg-gray-50 rounded-lg p-2.5">
                       {connected.workspace_name && (
-                        <p className="font-medium text-gray-700">{connected.workspace_name}</p>
+                        <p className="font-semibold text-gray-800">{connected.workspace_name}</p>
+                      )}
+                      {connected.workspace_id && (
+                        <p className="text-gray-400">ID: {connected.workspace_id}</p>
                       )}
                       {connected.last_synced_at && (
                         <p>Last synced: {new Date(connected.last_synced_at).toLocaleString()}</p>
@@ -251,14 +393,14 @@ export default function IntegrationsPage() {
                       {connected.sync_error && (
                         <p className="text-red-500 flex items-center gap-1">
                           <AlertCircle className="w-3 h-3" />
-                          {connected.sync_error.slice(0, 60)}
+                          {connected.sync_error.slice(0, 80)}
                         </p>
                       )}
                     </div>
                   )}
 
                   {/* Actions */}
-                  <div className="flex gap-2 mt-auto pt-2">
+                  <div className="flex gap-2 mt-auto pt-1">
                     {connected ? (
                       <>
                         <Button
@@ -273,17 +415,41 @@ export default function IntegrationsPage() {
                           size="sm"
                           variant="outline"
                           className="h-8 text-xs text-red-600 hover:bg-red-50 border-red-200"
-                          onClick={() => handleDisconnect(connected.id)}
+                          onClick={() => handleDisconnect(connected.id, provider)}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </Button>
                       </>
+                    ) : meta.useOAuth ? (
+                      <div className="flex flex-col gap-1.5 w-full">
+                        {/* Primary: OAuth button */}
+                        <Button
+                          size="sm"
+                          className="w-full h-8 text-xs gap-1.5 bg-blue-600 hover:bg-blue-700"
+                          disabled={comingSoon || isOAuthLoading}
+                          onClick={() => handleOAuthConnect(provider)}
+                        >
+                          {isOAuthLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <LogIn className="w-3.5 h-3.5" />
+                          )}
+                          {isOAuthLoading ? "Redirecting…" : meta.oauthLabel}
+                        </Button>
+                        {/* Secondary: manual token fallback */}
+                        <button
+                          className="text-[10px] text-gray-400 hover:text-gray-600 underline text-center"
+                          onClick={() => openManualModal(provider)}
+                        >
+                          Use API token instead
+                        </button>
+                      </div>
                     ) : (
                       <Button
                         size="sm"
                         className="flex-1 h-8 text-xs bg-blue-600 hover:bg-blue-700 gap-1"
                         disabled={comingSoon}
-                        onClick={() => openConnectModal(provider)}
+                        onClick={() => openManualModal(provider)}
                       >
                         <Plus className="w-3.5 h-3.5" />
                         {comingSoon ? "Coming Soon" : "Connect"}
@@ -295,12 +461,13 @@ export default function IntegrationsPage() {
             })}
           </div>
 
-          {/* Page Browser */}
+          {/* Page / Channel Browser */}
           {browsingProvider && (
             <div className="bg-white border rounded-xl shadow-sm overflow-hidden">
               <div className="flex items-center justify-between px-5 py-3 border-b bg-gray-50">
                 <h2 className="text-sm font-semibold text-gray-800">
-                  Browse {PROVIDER_META[browsingProvider]?.label} Pages
+                  Browse {PROVIDER_META[browsingProvider]?.label}{" "}
+                  {browsingProvider === "slack" ? "Channels" : "Pages"}
                 </h2>
                 <Button
                   size="sm"
@@ -325,7 +492,9 @@ export default function IntegrationsPage() {
                   onKeyDown={(e) => {
                     if (e.key === "Enter") handleBrowse(browsingProvider, pageQuery);
                   }}
-                  placeholder="Search pages…"
+                  placeholder={
+                    browsingProvider === "slack" ? "Filter channels…" : "Search pages…"
+                  }
                   className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400"
                 />
                 <Button
@@ -338,15 +507,15 @@ export default function IntegrationsPage() {
                 </Button>
               </div>
 
-              {/* Page list */}
+              {/* Item list */}
               <div className="divide-y max-h-96 overflow-y-auto">
                 {pagesLoading ? (
                   <div className="flex items-center gap-2 text-sm text-gray-400 py-6 px-5">
-                    <Loader2 className="w-4 h-4 animate-spin" /> Fetching pages…
+                    <Loader2 className="w-4 h-4 animate-spin" /> Fetching…
                   </div>
                 ) : pages.length === 0 ? (
                   <p className="text-sm text-gray-400 py-6 px-5 text-center">
-                    No pages found. Try a different search term.
+                    No results. Try a different search term.
                   </p>
                 ) : (
                   pages.map((item) => {
@@ -360,9 +529,14 @@ export default function IntegrationsPage() {
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium text-gray-800 truncate">{item.title}</p>
                           <p className="text-xs text-gray-400 mt-0.5">
-                            {item.updated_at
+                            {item.topic
+                              ? item.topic.slice(0, 60)
+                              : item.updated_at
                               ? new Date(item.updated_at).toLocaleDateString()
                               : "—"}
+                            {item.member_count != null && (
+                              <span className="ml-2">{item.member_count} members</span>
+                            )}
                           </p>
                         </div>
                         <div className="flex items-center gap-2 ml-4 flex-shrink-0">
@@ -410,14 +584,21 @@ export default function IntegrationsPage() {
         </>
       )}
 
-      {/* Connect Modal */}
+      {/* Manual Token Modal */}
       {connectingProvider && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">
-                Connect {PROVIDER_META[connectingProvider]?.label}
-              </h2>
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">
+                  Connect {PROVIDER_META[connectingProvider]?.label}
+                </h2>
+                {OAUTH_PROVIDERS.has(connectingProvider) && (
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    Manual token — for service accounts or CI environments
+                  </p>
+                )}
+              </div>
               <button
                 onClick={() => setConnectingProvider(null)}
                 className="text-gray-400 hover:text-gray-600"
@@ -426,10 +607,10 @@ export default function IntegrationsPage() {
               </button>
             </div>
 
-            {error && (
+            {formError && (
               <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
                 <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                {error}
+                {formError}
               </div>
             )}
 
@@ -478,11 +659,7 @@ export default function IntegrationsPage() {
             </div>
 
             <div className="flex gap-3 pt-2">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={() => setConnectingProvider(null)}
-              >
+              <Button variant="outline" className="flex-1" onClick={() => setConnectingProvider(null)}>
                 Cancel
               </Button>
               <Button
@@ -492,7 +669,7 @@ export default function IntegrationsPage() {
                   (connectingProvider === "jira" && !form.base_url) ||
                   submitting
                 }
-                onClick={handleConnect}
+                onClick={handleManualConnect}
               >
                 {submitting ? (
                   <>

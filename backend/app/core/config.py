@@ -63,6 +63,18 @@ class Settings(BaseSettings):
     # --- Git Webhook Settings (ADHOC-09) ---
     WEBHOOK_SECRET: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
     GITHUB_TOKEN: Optional[str] = Field(default=None, env="GITHUB_TOKEN")
+
+    # --- OAuth Integration Settings (Sprint 8) ---
+    FRONTEND_URL: str = Field(default="http://localhost:3000", env="FRONTEND_URL")
+    BACKEND_URL: str = Field(default="http://localhost:8000", env="BACKEND_URL")
+
+    # Jira / Atlassian OAuth 2.0
+    JIRA_CLIENT_ID: Optional[str] = Field(default=None, env="JIRA_CLIENT_ID")
+    JIRA_CLIENT_SECRET: Optional[str] = Field(default=None, env="JIRA_CLIENT_SECRET")
+
+    # Slack OAuth 2.0
+    SLACK_CLIENT_ID: Optional[str] = Field(default=None, env="SLACK_CLIENT_ID")
+    SLACK_CLIENT_SECRET: Optional[str] = Field(default=None, env="SLACK_CLIENT_SECRET")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
