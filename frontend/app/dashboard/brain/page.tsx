@@ -25,6 +25,7 @@ import {
 import { SystemArchitectureView } from "@/components/ontology/SystemArchitectureView";
 import { CrossProjectMappingPanel } from "@/components/ontology/CrossProjectMappingPanel";
 import SemanticSearch from "@/components/ontology/SemanticSearch";
+import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
 
 // --- Types ---
 
@@ -82,6 +83,12 @@ export default function BrainDashboardPage() {
   const [drillData, setDrillData] = useState<any>(null);
   const [drillLoading, setDrillLoading] = useState(false);
 
+  // L3 diagram view
+  type DiagramType = "graph" | "architecture" | "dataflow" | "er";
+  const [l3View, setL3View] = useState<DiagramType>("graph");
+  const [mermaidData, setMermaidData] = useState<{ syntax: string; diagram_type: string } | null>(null);
+  const [mermaidLoading, setMermaidLoading] = useState(false);
+
   // Fetch top-level meta-graph (Level 5)
   const fetchMetaGraph = useCallback(async () => {
     setLoading(true);
@@ -113,6 +120,26 @@ export default function BrainDashboardPage() {
   useEffect(() => {
     fetchMetaGraph();
   }, [fetchMetaGraph]);
+
+  // Fetch Mermaid diagram when L3 diagram type changes
+  const loadMermaid = useCallback(async (repoId: number, type: string) => {
+    setMermaidLoading(true);
+    setMermaidData(null);
+    try {
+      const data = await api.get<any>(`/ontology/graph/system/${repoId}/mermaid?diagram_type=${type}`);
+      setMermaidData(data);
+    } catch {
+      setMermaidData({ syntax: "graph TD\n    A[Failed to generate diagram]", diagram_type: type });
+    } finally {
+      setMermaidLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (drill.level === 3 && drill.repoId && l3View !== "graph") {
+      loadMermaid(drill.repoId, l3View === "architecture" ? "architecture" : l3View === "dataflow" ? "dataflow" : "er");
+    }
+  }, [l3View, drill.level, drill.repoId, loadMermaid]);
 
   // Drill into a level
   const drillInto = useCallback(
@@ -432,33 +459,77 @@ export default function BrainDashboardPage() {
         ) : drill.level === 3 ? (
           /* Level 3: System Architecture */
           <div>
-            <div className="border-b px-5 py-3">
-              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                <Layers className="h-4 w-4 text-blue-500" />
-                Level 3 — System Architecture: {drill.projectName}
-              </h2>
-              <p className="mt-0.5 text-xs text-gray-400">
-                Domain modules and their relationships. Click a domain to drill
-                into file-level view.
-              </p>
-            </div>
-            {drill.projectId && drill.projectId > 0 && (
-              <button
-                onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
-                className="mr-5 mt-2 rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
-              >
-                View Alignment (L4)
-              </button>
-            )}
-            {drillData?.system_nodes?.length > 0 ? (
-              <div style={{ height: "550px" }}>
-                <SystemArchitectureView
-                  data={drillData}
-                  onSelectDomain={(domainName) =>
-                    drillInto({ ...drill, level: 2, domainName })
-                  }
-                />
+            <div className="border-b px-5 py-3 flex items-start justify-between gap-4">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                  <Layers className="h-4 w-4 text-blue-500" />
+                  Level 3 — System Architecture: {drill.projectName}
+                </h2>
+                <p className="mt-0.5 text-xs text-gray-400">
+                  Domain modules and their relationships. Click a domain to drill into file-level view.
+                </p>
               </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {/* View type selector */}
+                <div className="flex rounded-lg border bg-gray-50 p-0.5 gap-0.5">
+                  {([
+                    { key: "graph", label: "Graph" },
+                    { key: "architecture", label: "Architecture" },
+                    { key: "dataflow", label: "Data Flow" },
+                    { key: "er", label: "ER Diagram" },
+                  ] as { key: DiagramType; label: string }[]).map((v) => (
+                    <button
+                      key={v.key}
+                      onClick={() => setL3View(v.key)}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
+                        l3View === v.key
+                          ? "bg-white text-blue-700 shadow-sm"
+                          : "text-gray-500 hover:text-gray-700"
+                      }`}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
+                {drill.projectId && drill.projectId > 0 && (
+                  <button
+                    onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
+                    className="rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                  >
+                    View Alignment (L4)
+                  </button>
+                )}
+              </div>
+            </div>
+            {drillData?.system_nodes?.length > 0 ? (
+              l3View === "graph" ? (
+                <div style={{ height: "550px" }}>
+                  <SystemArchitectureView
+                    data={drillData}
+                    onSelectDomain={(domainName) =>
+                      drillInto({ ...drill, level: 2, domainName })
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="p-4">
+                  {mermaidLoading ? (
+                    <div className="flex h-48 items-center justify-center gap-2 text-gray-400">
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      <span className="text-sm">Generating diagram...</span>
+                    </div>
+                  ) : mermaidData ? (
+                    <MermaidDiagram
+                      syntax={mermaidData.mermaid_syntax}
+                      title={`${drill.projectName} — ${l3View === "architecture" ? "Architecture" : l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
+                    />
+                  ) : (
+                    <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
+                      Select a diagram type above
+                    </div>
+                  )}
+                </div>
+              )
             ) : drillData?._no_repo ? (
               <div className="flex h-60 flex-col items-center justify-center text-gray-400 gap-3">
                 <Network className="h-8 w-8" />

@@ -848,6 +848,185 @@ def get_system_architecture_graph(
     }
 
 
+@router.get("/graph/system/{repo_id}/mermaid")
+def get_system_mermaid_diagram(
+    repo_id: int,
+    diagram_type: str = Query("architecture", description="architecture | dataflow | er"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Generate a Mermaid diagram for L3 System Architecture view.
+    diagram_type:
+      - architecture: graph TD showing domains and connections
+      - dataflow:     sequenceDiagram showing data flow between domains
+      - er:           erDiagram showing data-layer concepts and relationships
+    """
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_relationship import OntologyRelationship
+    from app.models.ontology_concept import OntologyConcept
+    from sqlalchemy import or_
+    from collections import defaultdict
+    import re
+
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    def _safe_id(name: str) -> str:
+        """Convert domain name to a valid Mermaid node ID."""
+        return re.sub(r"[^a-zA-Z0-9_]", "_", name).strip("_") or "node"
+
+    # ---- Collect domain data (same logic as /graph/system/{repo_id}) ----
+    components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).all()
+
+    if not components:
+        return {"mermaid_syntax": "graph TD\n    A[No components analyzed yet]", "diagram_type": diagram_type}
+
+    comp_to_domain = {c.id: _derive_domain_from_path(c.location or c.name) for c in components}
+    component_ids = {c.id for c in components}
+
+    concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id.in_(component_ids),
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    concept_to_domain: dict = {}
+    domain_concepts: dict = defaultdict(list)
+    for c in concepts:
+        d = comp_to_domain.get(c.source_component_id, "unknown")
+        concept_to_domain[c.id] = d
+        domain_concepts[d].append(c)
+
+    concept_ids = {c.id for c in concepts}
+    rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(concept_ids),
+            OntologyRelationship.target_concept_id.in_(concept_ids),
+        ),
+    ).all() if concept_ids else []
+
+    # Cross-domain relationships
+    cross_domain: dict = defaultdict(lambda: {"count": 0, "types": set()})
+    for r in rels:
+        sd = concept_to_domain.get(r.source_concept_id)
+        td = concept_to_domain.get(r.target_concept_id)
+        if sd and td and sd != td:
+            key = (sd, td)
+            cross_domain[key]["count"] += 1
+            cross_domain[key]["types"].add(r.relationship_type or "relates_to")
+
+    all_domains = sorted(set(comp_to_domain.values()))
+
+    # ---- Architecture Diagram (graph TD) ----
+    if diagram_type == "architecture":
+        lines = ["graph TD"]
+        domain_file_count: dict = defaultdict(int)
+        for c in components:
+            domain_file_count[comp_to_domain[c.id]] += 1
+
+        for d in all_domains:
+            nid = _safe_id(d)
+            fcount = domain_file_count.get(d, 0)
+            ccount = len(domain_concepts.get(d, []))
+            label = f"{d}\\n{fcount} files · {ccount} concepts"
+            lines.append(f'    {nid}["{label}"]')
+
+        added_edges: set = set()
+        for (sd, td), info in cross_domain.items():
+            sid, tid = _safe_id(sd), _safe_id(td)
+            fwd = (sid, tid)
+            rev = (tid, sid)
+            rel_label = list(info["types"])[0] if info["types"] else "relates_to"
+            if fwd not in added_edges and rev not in added_edges:
+                lines.append(f'    {sid} -->|"{rel_label} ({info["count"]})"| {tid}')
+                added_edges.add(fwd)
+
+        mermaid = "\n".join(lines)
+
+    # ---- Data Flow Diagram (sequenceDiagram) ----
+    elif diagram_type == "dataflow":
+        lines = ["sequenceDiagram"]
+        lines.append(f"    Note over {','.join(_safe_id(d) for d in all_domains[:8])}: {repo.name} — Data Flow")
+        for d in all_domains[:10]:
+            lines.append(f"    participant {_safe_id(d)} as {d}")
+
+        seen_flows: set = set()
+        for (sd, td), info in sorted(cross_domain.items(), key=lambda x: -x[1]["count"]):
+            sid, tid = _safe_id(sd), _safe_id(td)
+            key = (sid, tid)
+            if key in seen_flows:
+                continue
+            seen_flows.add(key)
+            rel = list(info["types"])[0] if info["types"] else "data"
+            lines.append(f"    {sid}->>{tid}: {rel} ({info['count']} connections)")
+            if len(seen_flows) >= 15:
+                break
+
+        if not seen_flows:
+            lines.append("    Note over app: No cross-domain data flows detected yet")
+
+        mermaid = "\n".join(lines)
+
+    # ---- ER Diagram ----
+    else:  # er
+        lines = ["erDiagram"]
+        # Find entity-like concepts (DATABASE, TABLE, MODEL, ENTITY types)
+        entity_types = {"DATABASE", "TABLE", "MODEL", "ENTITY", "SCHEMA", "DATA_MODEL", "CLASS"}
+        entities = [c for c in concepts if (c.concept_type or "").upper() in entity_types]
+
+        if not entities:
+            # Fallback: use all concepts grouped by domain, pick top 3 per domain
+            entities = []
+            for d, dconcepts in domain_concepts.items():
+                entities.extend(dconcepts[:3])
+
+        entity_ids = {c.id for c in entities}
+        entity_name_map = {c.id: _safe_id(c.name) for c in entities}
+
+        added_entities: set = set()
+        for c in entities[:20]:
+            eid = _safe_id(c.name)
+            if eid in added_entities:
+                continue
+            added_entities.add(eid)
+            lines.append(f'    {eid} {{')
+            lines.append(f'        string name "{c.name}"')
+            lines.append(f'        string type "{c.concept_type or "entity"}"')
+            if c.source_component_id:
+                domain = comp_to_domain.get(c.source_component_id, "unknown")
+                lines.append(f'        string domain "{domain}"')
+            lines.append(f'    }}')
+
+        for r in rels:
+            if r.source_concept_id in entity_ids and r.target_concept_id in entity_ids:
+                sid = entity_name_map.get(r.source_concept_id)
+                tid = entity_name_map.get(r.target_concept_id)
+                if sid and tid and sid in added_entities and tid in added_entities:
+                    rel = (r.relationship_type or "relates_to").replace("-", "_").replace(" ", "_")
+                    lines.append(f'    {sid} ||--o| {tid} : "{rel}"')
+
+        if len(added_entities) == 0:
+            lines.append('    Entity { string name "No entities found" }')
+
+        mermaid = "\n".join(lines)
+
+    return {
+        "mermaid_syntax": mermaid,
+        "diagram_type": diagram_type,
+        "repo_id": repo_id,
+        "repo_name": repo.name,
+        "domain_count": len(all_domains),
+        "concept_count": len(concepts),
+    }
+
+
 @router.get("/graph/alignment/{initiative_id}")
 def get_alignment_graph(
     initiative_id: int,
