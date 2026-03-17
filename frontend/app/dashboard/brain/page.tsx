@@ -55,7 +55,7 @@ interface MetaGraphData {
 }
 
 interface DrillState {
-  level: 5 | 3 | 2 | 1;
+  level: 5 | 4 | 3 | 2 | 1;
   projectId?: number;
   projectName?: string;
   repoId?: number;
@@ -179,7 +179,9 @@ export default function BrainDashboardPage() {
       try {
         let data: any = null;
 
-        if (next.level === 3) {
+        if (next.level === 4 && next.projectId) {
+          data = await api.get<any>(`/ontology/graph/alignment/${next.projectId}`);
+        } else if (next.level === 3) {
           if (next.repoId) {
             data = await api.get<any>(`/ontology/graph/system/${next.repoId}`);
           } else if (next.projectId) {
@@ -482,6 +484,155 @@ export default function BrainDashboardPage() {
             <Loader2 className="h-6 w-6 animate-spin text-purple-600" />
             <p className="ml-2 text-sm text-gray-500">Loading level {drill.level} data...</p>
           </div>
+        ) : drill.level === 4 ? (
+          /* Level 4: Doc ↔ Code Alignment */
+          <div>
+            <div className="border-b px-5 py-3 flex items-center justify-between">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                  <GitBranch className="h-4 w-4 text-indigo-500" />
+                  Level 4 — Alignment: {drill.projectName}
+                </h2>
+                <p className="mt-0.5 text-xs text-gray-400">
+                  Document requirements mapped to code concepts. Green = mapped, amber = gap.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/ontology/run-mapping", {});
+                      setTimeout(() => drillInto({ ...drill }), 3000);
+                    } catch {}
+                  }}
+                  className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                >
+                  Run Mapping
+                </button>
+                {drill.repoId && (
+                  <button
+                    onClick={() => drillInto({ level: 3, projectId: drill.projectId, projectName: drill.projectName, repoId: drill.repoId })}
+                    className="rounded-md bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                  >
+                    ← System (L3)
+                  </button>
+                )}
+              </div>
+            </div>
+            {drillData ? (
+              <div className="p-5">
+                {/* Coverage Stats Bar */}
+                {drillData.coverage_stats && (
+                  <div className="mb-5 rounded-lg border bg-gray-50 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-gray-700">Documentation Coverage</p>
+                      <span className={`text-sm font-bold ${drillData.coverage_stats.coverage_pct >= 0.7 ? "text-green-600" : drillData.coverage_stats.coverage_pct >= 0.4 ? "text-amber-600" : "text-red-600"}`}>
+                        {Math.round((drillData.coverage_stats.coverage_pct ?? 0) * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full rounded-full bg-gray-200">
+                      <div
+                        className={`h-full rounded-full transition-all ${drillData.coverage_stats.coverage_pct >= 0.7 ? "bg-green-500" : drillData.coverage_stats.coverage_pct >= 0.4 ? "bg-amber-500" : "bg-red-500"}`}
+                        style={{ width: `${Math.round((drillData.coverage_stats.coverage_pct ?? 0) * 100)}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-3 text-center text-xs text-gray-500">
+                      <div><span className="font-bold text-gray-800">{drillData.coverage_stats.total_doc_concepts}</span><br />Doc Concepts</div>
+                      <div><span className="font-bold text-green-600">{drillData.coverage_stats.mapped_doc_concepts}</span><br />Mapped</div>
+                      <div><span className="font-bold text-gray-800">{drillData.coverage_stats.total_code_concepts}</span><br />Code Concepts</div>
+                      <div><span className="font-bold text-amber-600">{drillData.gap_analysis?.total_gaps ?? 0}</span><br />Gaps</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Bipartite alignment view */}
+                <div className="grid grid-cols-3 gap-4 max-h-[480px] overflow-y-auto">
+                  {/* Document concepts */}
+                  <div>
+                    <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-blue-600">
+                      Documents ({drillData.document_nodes?.length ?? 0})
+                    </p>
+                    <div className="space-y-1">
+                      {(drillData.document_nodes ?? []).slice(0, 40).map((n: any) => {
+                        const isMapped = (drillData.mappings ?? []).some((m: any) => m.document_concept_id === n.id);
+                        return (
+                          <div key={n.id} className={`rounded px-2 py-1.5 text-xs border ${isMapped ? "bg-green-50 border-green-200 text-green-800" : "bg-amber-50 border-amber-200 text-amber-800"}`}>
+                            <span className="font-medium truncate block">{n.name}</span>
+                            <span className="text-[9px] opacity-70">{n.concept_type}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Mappings */}
+                  <div>
+                    <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-indigo-600">
+                      Mappings ({drillData.mappings?.length ?? 0})
+                    </p>
+                    <div className="space-y-1">
+                      {(drillData.mappings ?? []).slice(0, 40).map((m: any) => (
+                        <div key={m.id} className={`rounded px-2 py-1.5 text-xs border ${m.status === "confirmed" ? "bg-green-50 border-green-300" : "bg-indigo-50 border-indigo-200"}`}>
+                          <div className="flex items-center gap-1 text-[9px] font-medium text-indigo-700 mb-0.5">
+                            <span className={`rounded-full px-1.5 py-0.5 ${m.status === "confirmed" ? "bg-green-100 text-green-700" : "bg-indigo-100"}`}>{m.status}</span>
+                            <span className="opacity-70">{m.mapping_method}</span>
+                            {m.confidence_score && <span className="ml-auto opacity-70">{Math.round(m.confidence_score * 100)}%</span>}
+                          </div>
+                          <p className="text-[10px] text-gray-600 truncate">{m.document_concept_name} → {m.code_concept_name}</p>
+                        </div>
+                      ))}
+                      {(drillData.mappings?.length ?? 0) === 0 && (
+                        <div className="rounded border-2 border-dashed border-indigo-200 p-4 text-center text-xs text-indigo-400">
+                          No mappings yet.<br/>Click "Run Mapping" to auto-map doc→code
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Code concepts */}
+                  <div>
+                    <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-purple-600">
+                      Code ({drillData.code_nodes?.length ?? 0})
+                    </p>
+                    <div className="space-y-1">
+                      {(drillData.code_nodes ?? []).slice(0, 40).map((n: any) => {
+                        const isMapped = (drillData.mappings ?? []).some((m: any) => m.code_concept_id === n.id);
+                        return (
+                          <div key={n.id} className={`rounded px-2 py-1.5 text-xs border ${isMapped ? "bg-green-50 border-green-200 text-green-800" : "bg-gray-50 border-gray-200 text-gray-600"}`}>
+                            <span className="font-medium truncate block">{n.name}</span>
+                            <span className="text-[9px] opacity-70">{n.concept_type}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Gap Analysis */}
+                {drillData.gap_analysis?.total_gaps > 0 && (
+                  <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-xs font-semibold text-amber-800 mb-2">
+                      {drillData.gap_analysis.total_gaps} Requirement Gaps (documented but not implemented)
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      {drillData.gap_analysis.gaps.slice(0, 15).map((g: any) => (
+                        <span key={g.id} className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] text-amber-800 border border-amber-200">
+                          {g.name}
+                        </span>
+                      ))}
+                      {drillData.gap_analysis.total_gaps > 15 && (
+                        <span className="text-[10px] text-amber-600">+{drillData.gap_analysis.total_gaps - 15} more</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex h-60 items-center justify-center text-gray-400">
+                <p className="text-sm">No alignment data available</p>
+              </div>
+            )}
+          </div>
         ) : drill.level === 3 ? (
           /* Level 3: System Architecture */
           <div>
@@ -519,7 +670,7 @@ export default function BrainDashboardPage() {
                 </div>
                 {drill.projectId && drill.projectId > 0 && (
                   <button
-                    onClick={() => router.push(`/dashboard/projects/${drill.projectId}`)}
+                    onClick={() => drillInto({ level: 4, projectId: drill.projectId, projectName: drill.projectName, repoId: drill.repoId })}
                     className="rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
                   >
                     View Alignment (L4)
@@ -880,7 +1031,7 @@ export default function BrainDashboardPage() {
                   if (l.level === 5) {
                     drillInto({ level: 5 });
                   } else if (l.level === 4 && drill.projectId) {
-                    router.push(`/dashboard/projects/${drill.projectId}`);
+                    drillInto({ level: 4, projectId: drill.projectId, projectName: drill.projectName, repoId: drill.repoId });
                   } else if (l.level === 3 && drill.projectId) {
                     drillInto({
                       level: 3,
