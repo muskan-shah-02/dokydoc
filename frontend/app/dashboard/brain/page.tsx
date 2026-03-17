@@ -89,6 +89,12 @@ export default function BrainDashboardPage() {
   const [mermaidData, setMermaidData] = useState<{ syntax: string; diagram_type: string } | null>(null);
   const [mermaidLoading, setMermaidLoading] = useState(false);
 
+  // L2 concept filter + detail panel
+  const [l2TypeFilter, setL2TypeFilter] = useState<string>("ALL");
+  const [selectedConceptId, setSelectedConceptId] = useState<number | null>(null);
+  const [conceptDetail, setConceptDetail] = useState<any>(null);
+  const [conceptDetailLoading, setConceptDetailLoading] = useState(false);
+
   // Fetch top-level meta-graph (Level 5)
   const fetchMetaGraph = useCallback(async () => {
     setLoading(true);
@@ -140,6 +146,26 @@ export default function BrainDashboardPage() {
       loadMermaid(drill.repoId, l3View === "architecture" ? "architecture" : l3View === "dataflow" ? "dataflow" : "er");
     }
   }, [l3View, drill.level, drill.repoId, loadMermaid]);
+
+  const loadConceptDetail = useCallback(async (conceptId: number) => {
+    setConceptDetailLoading(true);
+    setConceptDetail(null);
+    try {
+      const data = await api.get<any>(`/ontology/concepts/${conceptId}`);
+      setConceptDetail(data);
+    } catch {
+      setConceptDetail(null);
+    } finally {
+      setConceptDetailLoading(false);
+    }
+  }, []);
+
+  // Reset L2 state when drilling changes
+  useEffect(() => {
+    setL2TypeFilter("ALL");
+    setSelectedConceptId(null);
+    setConceptDetail(null);
+  }, [drill.domainName]);
 
   // Drill into a level
   const drillInto = useCallback(
@@ -553,62 +579,192 @@ export default function BrainDashboardPage() {
             )}
           </div>
         ) : drill.level === 2 ? (
-          /* Level 2: Domain Cluster — OntologyGraph view */
-          <div>
-            <div className="border-b px-5 py-3">
-              <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                <Network className="h-4 w-4 text-green-500" />
-                Level 2 — Domain: {drill.domainName}
-              </h2>
-            </div>
-            {drillData?.domains?.length > 0 ? (
-              <div style={{ height: "500px" }}>
-                {(() => {
-                  const domain = drillData.domains.find(
-                    (d: any) => d.name === drill.domainName
-                  );
-                  if (!domain) return null;
-                  return (
-                    <OntologyGraph
-                      nodes={domain.nodes.map((n: any) => ({
-                        id: n.id,
-                        name: n.name,
-                        concept_type: n.concept_type,
-                        confidence_score: n.confidence_score,
-                        description: n.description,
-                        source_component_id: n.source_component_id,
-                      }))}
-                      edges={domain.edges.map((e: any) => ({
-                        id: e.id,
-                        source_concept_id: e.source_concept_id,
-                        target_concept_id: e.target_concept_id,
-                        relationship_type: e.relationship_type,
-                        confidence_score: e.confidence_score,
-                      }))}
-                      selectedId={null}
-                      onSelectNode={(id) => {
-                        if (!id) return;
-                        // Find the node — if it has a source_component_id, drill to file level
-                        const node = domain.nodes.find((n: any) => n.id === id);
-                        if (node?.source_component_id) {
-                          drillInto({
-                            ...drill,
-                            level: 1,
-                            componentId: node.source_component_id,
-                            componentName: node.name,
-                          });
-                        }
-                      }}
-                    />
-                  );
-                })()}
+          /* Level 2: Domain Cluster — filtered by domain name */
+          (() => {
+            // Nodes for this domain (drillData.nodes has a "domain" field)
+            const allDomainNodes: any[] = (drillData?.nodes ?? []).filter(
+              (n: any) => n.domain === drill.domainName
+            );
+            const domainNodeIds = new Set(allDomainNodes.map((n: any) => n.id));
+
+            // Edges between these nodes only
+            const domainEdges: any[] = (drillData?.edges ?? []).filter(
+              (e: any) => domainNodeIds.has(e.source_concept_id) && domainNodeIds.has(e.target_concept_id)
+            );
+
+            // Available concept types for tabs
+            const typeSet = new Set(allDomainNodes.map((n: any) => n.concept_type).filter(Boolean));
+            const types = ["ALL", ...Array.from(typeSet).sort()];
+
+            // Filtered nodes by type
+            const visibleNodes = l2TypeFilter === "ALL"
+              ? allDomainNodes
+              : allDomainNodes.filter((n: any) => n.concept_type === l2TypeFilter);
+            const visibleNodeIds = new Set(visibleNodes.map((n: any) => n.id));
+            const visibleEdges = domainEdges.filter(
+              (e: any) => visibleNodeIds.has(e.source_concept_id) && visibleNodeIds.has(e.target_concept_id)
+            );
+
+            const selectedNode = allDomainNodes.find((n: any) => n.id === selectedConceptId);
+
+            return (
+              <div>
+                <div className="border-b px-5 py-3 flex items-center justify-between">
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                    <Network className="h-4 w-4 text-green-500" />
+                    Level 2 — Domain: {drill.domainName}
+                    <span className="ml-1 rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-semibold text-green-700">
+                      {allDomainNodes.length} concepts
+                    </span>
+                  </h2>
+                  {/* Type filter tabs */}
+                  {types.length > 1 && (
+                    <div className="flex gap-1 flex-wrap">
+                      {types.map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => setL2TypeFilter(t)}
+                          className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium transition-all ${
+                            l2TypeFilter === t
+                              ? "bg-green-600 text-white"
+                              : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                          }`}
+                        >
+                          {t === "ALL" ? `All (${allDomainNodes.length})` : t}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {allDomainNodes.length > 0 ? (
+                  <div className="flex" style={{ height: "520px" }}>
+                    {/* Graph */}
+                    <div className={selectedConceptId ? "flex-1" : "w-full"} style={{ minWidth: 0 }}>
+                      <OntologyGraph
+                        nodes={visibleNodes.map((n: any) => ({
+                          id: n.id,
+                          name: n.name,
+                          concept_type: n.concept_type,
+                          confidence_score: n.confidence_score,
+                          description: n.description,
+                          source_component_id: n.source_component_id,
+                        }))}
+                        edges={visibleEdges.map((e: any) => ({
+                          id: e.id,
+                          source_concept_id: e.source_concept_id,
+                          target_concept_id: e.target_concept_id,
+                          relationship_type: e.relationship_type,
+                          confidence_score: e.confidence_score,
+                        }))}
+                        selectedId={selectedConceptId}
+                        onSelectNode={(id) => {
+                          if (!id) {
+                            setSelectedConceptId(null);
+                            setConceptDetail(null);
+                            return;
+                          }
+                          const node = allDomainNodes.find((n: any) => n.id === id);
+                          setSelectedConceptId(id as number);
+                          loadConceptDetail(id as number);
+                          // Double-click or source_component_id → L1
+                          if (node?.source_component_id && id === selectedConceptId) {
+                            drillInto({ ...drill, level: 1, componentId: node.source_component_id, componentName: node.name });
+                          }
+                        }}
+                      />
+                    </div>
+
+                    {/* Concept Detail Panel */}
+                    {selectedConceptId && (
+                      <div className="w-72 border-l bg-gray-50 flex flex-col overflow-y-auto flex-shrink-0">
+                        <div className="border-b bg-white px-4 py-3 flex items-center justify-between">
+                          <p className="text-xs font-semibold text-gray-700">Concept Detail</p>
+                          <button
+                            onClick={() => { setSelectedConceptId(null); setConceptDetail(null); }}
+                            className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+                          >×</button>
+                        </div>
+                        {conceptDetailLoading ? (
+                          <div className="flex flex-1 items-center justify-center gap-2 text-gray-400">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <span className="text-xs">Loading...</span>
+                          </div>
+                        ) : conceptDetail ? (
+                          <div className="p-4 space-y-4 text-xs">
+                            <div>
+                              <p className="font-bold text-gray-900 text-sm">{conceptDetail.name}</p>
+                              <span className="mt-1 inline-block rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">
+                                {conceptDetail.concept_type}
+                              </span>
+                              {conceptDetail.source_type && (
+                                <span className="ml-1 inline-block rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700">
+                                  {conceptDetail.source_type}
+                                </span>
+                              )}
+                            </div>
+                            {conceptDetail.description && (
+                              <div>
+                                <p className="font-semibold text-gray-500 uppercase tracking-wide text-[9px] mb-1">Description</p>
+                                <p className="text-gray-700 leading-relaxed">{conceptDetail.description}</p>
+                              </div>
+                            )}
+                            {conceptDetail.confidence_score != null && (
+                              <div>
+                                <p className="font-semibold text-gray-500 uppercase tracking-wide text-[9px] mb-1">Confidence</p>
+                                <div className="flex items-center gap-2">
+                                  <div className="flex-1 h-1.5 rounded-full bg-gray-200">
+                                    <div className="h-full rounded-full bg-green-500" style={{ width: `${(conceptDetail.confidence_score * 100).toFixed(0)}%` }} />
+                                  </div>
+                                  <span className="text-gray-600">{(conceptDetail.confidence_score * 100).toFixed(0)}%</span>
+                                </div>
+                              </div>
+                            )}
+                            {/* Outgoing relationships */}
+                            {conceptDetail.outgoing_relationships?.length > 0 && (
+                              <div>
+                                <p className="font-semibold text-gray-500 uppercase tracking-wide text-[9px] mb-2">
+                                  Relationships ({conceptDetail.outgoing_relationships.length})
+                                </p>
+                                <div className="space-y-1">
+                                  {conceptDetail.outgoing_relationships.slice(0, 8).map((r: any) => (
+                                    <div key={r.id} className="flex items-center gap-1.5 rounded bg-white border px-2 py-1">
+                                      <span className="text-gray-400">→</span>
+                                      <span className="text-[10px] text-indigo-600 font-medium">{r.relationship_type}</span>
+                                      <span className="text-gray-600 truncate">{r.target_concept?.name ?? `#${r.target_concept_id}`}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {/* Source file drill-down */}
+                            {selectedNode?.source_component_id && (
+                              <div className="pt-2 border-t">
+                                <button
+                                  onClick={() => drillInto({ ...drill, level: 1, componentId: selectedNode.source_component_id, componentName: selectedNode.name })}
+                                  className="w-full rounded-md bg-orange-50 px-3 py-2 text-xs font-medium text-orange-700 hover:bg-orange-100"
+                                >
+                                  Drill into File (L1) →
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex flex-1 items-center justify-center text-gray-400 text-xs">
+                            Select a concept node
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex h-60 items-center justify-center text-gray-400">
+                    <p className="text-sm">No concepts in this domain yet</p>
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="flex h-60 items-center justify-center text-gray-400">
-                <p className="text-sm">No domain data available</p>
-              </div>
-            )}
-          </div>
+            );
+          })()
         ) : (
           /* Level 1: File subgraph */
           <div>
