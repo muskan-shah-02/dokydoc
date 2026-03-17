@@ -18,7 +18,7 @@
 | Sprint 6 | Approval Workflow (model + API + UI), RBAC, Audit Export | ✅ COMPLETE |
 | Sprint 7 | RAG/Chat Assistant (models + API + UI), Conversation history, Multi-turn | ✅ COMPLETE |
 | Sprint 8 | Jira/Slack integrations (config model), Auto-Docs, Notification Preferences, API Keys | ✅ BACKEND COMPLETE |
-| **Sprint 8 Remaining** | Analytics Dashboard (service + API + UI) | ❌ NOT BUILT |
+| **Sprint 8 Remaining** | Analytics Dashboard (service + API + UI) | ✅ COMPLETE |
 
 ---
 
@@ -84,34 +84,34 @@ L5 — Organization (Current: All projects as clusters)
 
 ### Brain Enhancement Plan (Post-Sprint 8)
 
-#### B1 — Fix L5→L4→L3→L2→L1 Navigation (Priority: HIGH)
+#### B1 — Fix L5→L4→L3→L2→L1 Navigation ✅ COMPLETE
 - **File:** `frontend/app/dashboard/brain/page.tsx`
-- L5 → click project node → load L4 (Alignment/doc-code mapping)
-- L4 → click → load L3 (System architecture with auto-diagrams)
-- L3 → click a service/module node → load L2 (Domain: tables, modules)
-- L2 → click a table → load L1 (Columns, methods, schemas)
-- Each level shows a breadcrumb trail (already built in `BrainBreadcrumb.tsx`)
+- L5 → click project node → load L4 (Alignment/doc-code mapping) — DONE
+- L4 → click → load L3 (System architecture with auto-diagrams) — DONE
+- L3 → click a service/module node → load L2 (Domain: tables, modules) — DONE
+- L2 → click a table → load L1 (Columns, methods, schemas) — DONE
+- Each level shows a breadcrumb trail — DONE
 
-#### B2 — Auto-Generated Architecture Diagrams at L3 (Priority: HIGH)
-- **File:** `backend/app/api/endpoints/ontology.py` (enhance `/graph/system/{repo_id}`)
-- From `code_components` data → auto-generate:
-  - **Architecture Flow Diagram** (Mermaid `graph TD`) — services, APIs, databases and their connections
-  - **Data Flow Diagram** (Mermaid `sequenceDiagram`) — how data moves through the system
-  - **ER Diagram** (Mermaid `erDiagram`) — database tables and relationships
-- **Frontend:** Diagram type selector (`Architecture | Data Flow | ER Diagram`) with Mermaid renderer
-- **Libraries:** Use `mermaid` npm package (already available) or `react-flow` for interactive versions
+#### B2 — Auto-Generated Architecture Diagrams at L3 ✅ COMPLETE
+- **File:** `backend/app/api/endpoints/ontology.py`
+- Auto-generates 3 diagram types from code_components:
+  - **Architecture Flow Diagram** (`graph TD`) — DONE
+  - **Data Flow Diagram** (`sequenceDiagram`) — DONE
+  - **ER Diagram** (`erDiagram`) — DONE
+- **Frontend:** 4-tab selector `[Graph][Architecture][Data Flow][ER Diagram]` — DONE
+- **Component:** `frontend/components/ontology/MermaidDiagram.tsx` — DONE
 
-#### B3 — L2 Interactive Storage Drill-Down (Priority: MEDIUM)
-- Click "Storage" node → shows all DB tables
-- Click a table → shows columns with types and constraints
-- Click "Services" node → shows modules/classes
-- Click a service → shows methods/endpoints
-- Click "APIs" node → shows endpoint list with schemas
+#### B3 — L2 Interactive Concept Drill-Down ✅ COMPLETE
+- L2 domain view: concept type filter pills (ALL / REQUIREMENT / ENTITY / etc.) — DONE
+- Concept detail side panel: name, type, confidence, relationships, source — DONE
+- L2 bug fixed: was calling `domain.nodes` on summary objects; now filters `drillData.nodes` by domain — DONE
 
-#### B4 — Project Isolation (Priority: HIGH — already partially fixed)
-- ✅ Concepts no longer show 4408 for empty projects
-- Brain/graph should show **empty state** when no docs/repos connected
-- Add CTA: "Connect a repository or document to start building the Brain"
+#### B4 — L4 Alignment Inline View ✅ COMPLETE
+- L4 now renders inline inside Brain (no routing to projects page)
+- Bipartite 3-column layout: Document concepts | Mappings | Code concepts — DONE
+- Coverage stats bar with color coding — DONE
+- Gap analysis panel for unmapped requirement concepts — DONE
+- Run Mapping button + back-to-L3 navigation — DONE
 
 #### B5 — Cross-Project L4 Mappings (Priority: MEDIUM)
 - L4 shows concept bridges between Project A and Project B
@@ -128,14 +128,13 @@ L5 — Organization (Current: All projects as clusters)
 ## Execution Order
 
 ```
-NOW → Sprint 8 Analytics (P8-1, P8-2, P8-3)
+✅ Sprint 8 Analytics (P8-1, P8-2, P8-3) — COMPLETE
+✅ Brain Bug Fixes (B1 — navigation) — COMPLETE
+✅ Brain Enhancements (B2 — auto-diagrams, B3 — drill-down, B4 — L4 alignment) — COMPLETE
       ↓
-NEXT → Brain Bug Fixes (B1 — navigation)
-      ↓
-NEXT → Brain Enhancements (B2 — auto-diagrams, B3 — drill-down, B4 — isolation)
-      ↓
-FUTURE → B5 Cross-project mappings, B6 diagram export
-         → Jira OAuth full implementation (config model exists, UI exists)
+NEXT → B5 Cross-project mappings (L4 shows concept bridges between projects)
+NEXT → B6 Diagram Export improvements
+FUTURE → Jira OAuth full implementation (config model exists, UI exists)
          → Slack OAuth full implementation
 ```
 
@@ -156,13 +155,13 @@ FUTURE → B5 Cross-project mappings, B6 diagram export
 
 | Area | File | Status |
 |------|------|--------|
-| Brain page | `frontend/app/dashboard/brain/page.tsx` | Built, navigation broken |
+| Brain page | `frontend/app/dashboard/brain/page.tsx` | ✅ Built, L1-L5 navigation complete |
 | Brain breadcrumb | `frontend/components/ontology/BrainBreadcrumb.tsx` | Built |
 | Meta graph view | `frontend/components/ontology/MetaGraphView.tsx` | Built |
 | Ontology graph | `frontend/components/ontology/OntologyGraph.tsx` | Built |
-| Analytics service | `backend/app/services/analytics_service.py` | ❌ NOT BUILT |
-| Analytics API | `backend/app/api/endpoints/analytics.py` | ❌ NOT BUILT |
-| Analytics dashboard | `frontend/app/dashboard/analytics/page.tsx` | ❌ NOT BUILT |
+| Analytics service | `backend/app/services/analytics_service.py` | ✅ Built |
+| Analytics API | `backend/app/api/endpoints/analytics.py` | ✅ Built |
+| Analytics dashboard | `frontend/app/dashboard/analytics/page.tsx` | ✅ Built |
 | Auto-docs page | `frontend/app/dashboard/auto-docs/page.tsx` | Built (crash fixed) |
 | Projects page | `frontend/app/dashboard/projects/page.tsx` | Built (count fixed) |
 | Ontology CRUD | `backend/app/crud/crud_ontology_concept.py` | Built (count fixed) |
