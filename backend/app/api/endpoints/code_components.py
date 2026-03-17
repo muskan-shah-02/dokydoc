@@ -28,6 +28,48 @@ code_component_endpoints = CodeComponentEndpoints()
 router = APIRouter()
 
 
+@router.get("/check-name")
+def check_component_name(
+    name: str = Query(..., description="Component name (or filename) to check"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Check whether a component with the given name already exists in any repository
+    for this tenant. Used by the frontend to surface an override confirmation dialog
+    before the user registers a standalone component.
+
+    Returns a list of matching components (only those linked to a repository).
+    """
+    from app.models.code_component import CodeComponent
+    from app.models.repository import Repository
+
+    basename = name.strip().rstrip("/").rsplit("/", 1)[-1]  # extract filename from path
+    matches = (
+        db.query(CodeComponent, Repository.name.label("repo_name"))
+        .join(Repository, CodeComponent.repository_id == Repository.id)
+        .filter(
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.repository_id.isnot(None),
+            CodeComponent.name == basename,
+        )
+        .limit(5)
+        .all()
+    )
+
+    return [
+        {
+            "id": comp.id,
+            "name": comp.name,
+            "location": comp.location,
+            "repository_id": comp.repository_id,
+            "repo_name": repo_name,
+        }
+        for comp, repo_name in matches
+    ]
+
+
 @router.get("/", response_model=List[schemas.CodeComponentWithProgress])
 def read_code_components(
     tenant_id: int = Depends(deps.get_tenant_id),
@@ -144,31 +186,8 @@ def create_code_component(
             db=db, obj_in=code_component_in, owner_id=current_user.id, tenant_id=tenant_id
         )
 
-        # Auto-link standalone file to matching repository for context enrichment
-        if not code_component.repository_id and code_component.location:
-            try:
-                from app.models.repository import Repository
-                repos = db.query(Repository).filter(
-                    Repository.tenant_id == tenant_id,
-                ).all()
-                loc = code_component.location.lower()
-                for repo in repos:
-                    # Match if the file URL contains the repo URL domain/path
-                    repo_url = repo.url.lower().rstrip("/")
-                    # Extract repo identifier (e.g., "owner/repo" from github.com/owner/repo)
-                    parts = repo_url.replace("https://", "").replace("http://", "").split("/")
-                    if len(parts) >= 3:
-                        repo_slug = "/".join(parts[1:3])  # "owner/repo"
-                        if repo_slug in loc:
-                            code_component.repository_id = repo.id
-                            db.commit()
-                            logger.info(
-                                f"Auto-linked standalone component {code_component.id} "
-                                f"to repository {repo.id} ({repo.name}) via URL match"
-                            )
-                            break
-            except Exception as link_err:
-                logger.warning(f"Auto-link check failed (non-fatal): {link_err}")
+        # Standalone components remain independent — no auto-linking to repositories.
+        # Users can explicitly choose to update a repo's file via the UI override flow.
 
         # Add the new analysis service to the background queue
         # This triggers our new pipeline without making the user wait
@@ -212,6 +231,22 @@ def read_code_component(
 
     logger.info(f"Successfully retrieved component {id} ('{component.name}') for user {current_user.email}")
     return component
+
+
+@router.put("/{id}", response_model=schemas.CodeComponent)
+def update_code_component(
+    *,
+    id: int,
+    obj_in: schemas.CodeComponentUpdate,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Update a code component's metadata (e.g. location when overriding a repo file)."""
+    component = crud.code_component.get(db=db, id=id, tenant_id=tenant_id)
+    if not component:
+        raise HTTPException(status_code=404, detail="CodeComponent not found")
+    return crud.code_component.update(db=db, db_obj=component, obj_in=obj_in)
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)

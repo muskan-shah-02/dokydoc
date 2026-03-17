@@ -245,6 +245,14 @@ def trigger_analysis(
                 detail="Each file must have 'path' and 'url' fields"
             )
 
+    # Set total_files upfront so the UI can display the full expected count immediately,
+    # before the Celery worker starts processing files.
+    crud.repository.update_analysis_progress(
+        db=db, repo_id=repo_id, tenant_id=tenant_id,
+        analyzed_files=0, total_files=len(file_list),
+        status="analyzing"
+    )
+
     # Dispatch Celery task
     from app.tasks.code_analysis_tasks import repo_analysis_task
     task = repo_analysis_task.delay(repo_id, tenant_id, file_list)

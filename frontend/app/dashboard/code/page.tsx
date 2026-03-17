@@ -432,6 +432,13 @@ export default function CodePage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
+  // Override popup: shown when a registered standalone file matches an existing repo file
+  const [overrideMatches, setOverrideMatches] = useState<
+    { id: number; name: string; location: string; repository_id: number; repo_name: string }[]
+  >([]);
+  const [showOverrideDialog, setShowOverrideDialog] = useState(false);
+  const [pendingNewComponentLocation, setPendingNewComponentLocation] = useState("");
+
   const router = useRouter();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -679,6 +686,29 @@ export default function CodePage() {
     setNewComponent((prev) => ({ ...prev, [name]: value }));
   };
 
+  const registerComponent = async () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    const res = await fetch("http://localhost:8000/api/v1/code-components/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(newComponent),
+    });
+    if (res.ok) {
+      setIsDialogOpen(false);
+      setNewComponent({ name: "", component_type: "File", location: "", version: "" });
+      setSuccessMessage("Component registered! Analysis is running in the background.");
+      setTimeout(() => setSuccessMessage(null), 6000);
+      fetchData(true);
+    } else {
+      const errorData = await res.json();
+      throw new Error(errorData.detail?.[0]?.msg || errorData.detail || "Failed to create component.");
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -690,28 +720,52 @@ export default function CodePage() {
       return;
     }
     try {
-      const res = await fetch("http://localhost:8000/api/v1/code-components/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(newComponent),
-      });
-      if (res.ok) {
-        setIsDialogOpen(false);
-        setNewComponent({ name: "", component_type: "File", location: "", version: "" });
-        setSuccessMessage("Component registered! Analysis is running in the background.");
-        setTimeout(() => setSuccessMessage(null), 6000);
-        fetchData(true);
-      } else {
-        const errorData = await res.json();
-        throw new Error(errorData.detail?.[0]?.msg || errorData.detail || "Failed to create component.");
+      // Check if a file with this name already exists in any repository
+      const basename = newComponent.name.trim().replace(/\/+$/, "").split("/").pop() || newComponent.name;
+      const checkRes = await fetch(
+        `http://localhost:8000/api/v1/code-components/check-name?name=${encodeURIComponent(basename)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (checkRes.ok) {
+        const matches = await checkRes.json();
+        if (matches.length > 0) {
+          // Store pending data and show override dialog
+          setPendingNewComponentLocation(newComponent.location);
+          setOverrideMatches(matches);
+          setShowOverrideDialog(true);
+          setIsSubmitting(false);
+          return;
+        }
       }
+      await registerComponent();
     } catch (error: any) {
       setSubmissionError(error.message);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleOverrideConfirm = async (updateRepo: boolean) => {
+    setShowOverrideDialog(false);
+    setIsSubmitting(true);
+    const token = localStorage.getItem("accessToken");
+    try {
+      if (updateRepo && overrideMatches.length > 0) {
+        // Update the repo's matching component location to point to the new file
+        const match = overrideMatches[0];
+        await fetch(`http://localhost:8000/api/v1/code-components/${match.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ location: pendingNewComponentLocation }),
+        });
+      }
+      await registerComponent();
+    } catch (error: any) {
+      setSubmissionError(error.message);
+    } finally {
+      setIsSubmitting(false);
+      setOverrideMatches([]);
+      setPendingNewComponentLocation("");
     }
   };
 
@@ -1025,6 +1079,36 @@ export default function CodePage() {
           </Dialog>
         </div>
       </div>
+
+      {/* Override confirmation dialog */}
+      <AlertDialog open={showOverrideDialog} onOpenChange={setShowOverrideDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>File already exists in a repository</AlertDialogTitle>
+            <AlertDialogDescription>
+              A file named <strong>&quot;{newComponent.name}&quot;</strong> already exists in the following
+              {overrideMatches.length === 1 ? " repository" : " repositories"}:{" "}
+              {overrideMatches.map((m) => (
+                <span key={m.id} className="font-medium text-gray-700"> {m.repo_name}</span>
+              ))}.
+              <br /><br />
+              Do you want to update the repository&apos;s version of this file with your uploaded file?
+              The standalone component will be registered either way.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => handleOverrideConfirm(false)}>
+              No, keep separate
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => handleOverrideConfirm(true)}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              Yes, update repository
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {successMessage && (
         <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">

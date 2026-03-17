@@ -357,6 +357,13 @@ class CodeAnalysisService(LoggerMixin):
             crud.repository.update(db=db, db_obj=repo, obj_in={"skipped_files": skipped_files})
             db.commit()
 
+        # Set total_files upfront so the UI shows the full expected count immediately.
+        crud.repository.update_analysis_progress(
+            db=db, repo_id=repo.id, tenant_id=tenant_id,
+            analyzed_files=0, total_files=len(file_list),
+            status="analyzing"
+        )
+
         # Dispatch repo_analysis_task via Celery
         from app.tasks.code_analysis_tasks import repo_analysis_task
         task = repo_analysis_task.delay(repo.id, tenant_id, file_list)
