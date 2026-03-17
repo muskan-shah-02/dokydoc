@@ -310,7 +310,7 @@ class AutoDocsService(LoggerMixin):
             lines = []
             for c in components:
                 summary = (getattr(c, "summary", None) or "")[:200]
-                lines.append(f"  - {c.file_path}: {summary}")
+                lines.append(f"  - {c.location}: {summary}")
             parts.append("CODE COMPONENTS:\n" + "\n".join(lines))
 
         return parts

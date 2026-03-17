@@ -69,7 +69,7 @@ class PRCommentService(LoggerMixin):
         components = db.query(CodeComponent).filter(
             CodeComponent.tenant_id == tenant_id,
             CodeComponent.repository_id == repo_id,
-            CodeComponent.file_path.in_(changed_files),
+            CodeComponent.location.in_(changed_files),
         ).all()
 
         analyzed_count = sum(1 for c in components if c.analysis_status == "completed")

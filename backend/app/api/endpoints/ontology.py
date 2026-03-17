@@ -317,23 +317,31 @@ def get_ontology_stats(
         db=db, tenant_id=tenant_id, initiative_id=initiative_id
     )
     # For relationships, filter by counting edges between project-scoped concepts
-    if initiative_id:
-        concepts = crud.ontology_concept.get_all_active(
-            db=db, tenant_id=tenant_id, initiative_id=initiative_id
-        )
-        concept_ids = {c.id for c in concepts}
-        all_rels = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
-        total_rels = sum(
-            1 for r in all_rels
-            if r.source_concept_id in concept_ids and r.target_concept_id in concept_ids
-        )
-        concept_types = list({c.concept_type for c in concepts})
-    else:
-        total_rels = crud.ontology_relationship.count_by_tenant(db=db, tenant_id=tenant_id)
-        concept_types = crud.ontology_concept.get_concept_types(db=db, tenant_id=tenant_id)
+    try:
+        if initiative_id:
+            concepts = crud.ontology_concept.get_all_active(
+                db=db, tenant_id=tenant_id, initiative_id=initiative_id
+            )
+            concept_ids = {c.id for c in concepts}
+            all_rels = crud.ontology_relationship.get_full_graph(db=db, tenant_id=tenant_id)
+            total_rels = sum(
+                1 for r in all_rels
+                if r.source_concept_id in concept_ids and r.target_concept_id in concept_ids
+            )
+            concept_types = list({c.concept_type for c in concepts})
+        else:
+            total_rels = crud.ontology_relationship.count_by_tenant(db=db, tenant_id=tenant_id)
+            concept_types = crud.ontology_concept.get_concept_types(db=db, tenant_id=tenant_id)
+    except Exception:
+        total_rels = 0
+        concept_types = []
 
-    # Count cross-graph mappings
-    total_mappings = crud.concept_mapping.count_by_tenant(db=db, tenant_id=tenant_id)
+    # Count cross-graph mappings — wrapped in try/except so a missing/uninitialized
+    # concept_mappings table doesn't crash the whole stats call
+    try:
+        total_mappings = crud.concept_mapping.count_by_tenant(db=db, tenant_id=tenant_id)
+    except Exception:
+        total_mappings = 0
 
     return {
         "total_concepts": total_concepts,
