@@ -240,13 +240,14 @@ interface FileTreeRowsProps {
   onFileClick: (id: number) => void;
   retryingIds: Set<number>;
   onRetry: (id: number, e: any) => void;
+  onDelete: (id: number, e: React.MouseEvent) => void;
   getStatusBadge: (status: string) => JSX.Element;
   getStatusIcon: (status: string) => JSX.Element;
 }
 
 function FileTreeRows({
   nodes, depth, expandedFolders, onToggleFolder,
-  fileIndexRef, onFileClick, retryingIds, onRetry,
+  fileIndexRef, onFileClick, retryingIds, onRetry, onDelete,
   getStatusBadge, getStatusIcon,
 }: FileTreeRowsProps): JSX.Element {
   return (
@@ -292,6 +293,7 @@ function FileTreeRows({
                   onFileClick={onFileClick}
                   retryingIds={retryingIds}
                   onRetry={onRetry}
+                  onDelete={onDelete}
                   getStatusBadge={getStatusBadge}
                   getStatusIcon={getStatusIcon}
                 />
@@ -305,7 +307,7 @@ function FileTreeRows({
           return (
             <div
               key={comp.id}
-              className={`grid items-center border-b border-muted/20 text-sm hover:bg-muted/30 cursor-pointer ${
+              className={`group grid items-center border-b border-muted/20 text-sm hover:bg-muted/30 cursor-pointer ${
                 comp.analysis_status === "processing"
                   ? "bg-blue-50/70 dark:bg-blue-950/30 border-l-2 border-l-blue-500"
                   : comp.analysis_status === "pending"
@@ -379,7 +381,7 @@ function FileTreeRows({
                     ? <span className="text-muted-foreground text-xs">cached</span>
                     : <span className="text-muted-foreground">—</span>}
               </div>
-              <div className="text-right px-2 py-2">
+              <div className="flex items-center justify-end gap-1 px-2 py-2">
                 {comp.analysis_status === "failed" && (
                   <Button
                     variant="outline"
@@ -394,6 +396,15 @@ function FileTreeRows({
                     Retry
                   </Button>
                 )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 text-red-400 hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                  onClick={(e) => { e.stopPropagation(); onDelete(comp.id, e); }}
+                  title="Delete file"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </Button>
               </div>
             </div>
           );
@@ -432,12 +443,16 @@ export default function CodePage() {
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
-  // Override popup: shown when a registered standalone file matches an existing repo file
-  const [overrideMatches, setOverrideMatches] = useState<
-    { id: number; name: string; location: string; repository_id: number; repo_name: string }[]
-  >([]);
-  const [showOverrideDialog, setShowOverrideDialog] = useState(false);
-  const [pendingNewComponentLocation, setPendingNewComponentLocation] = useState("");
+  // Delete confirmation for files inside the repo tree
+  const [deletingComponentId, setDeletingComponentId] = useState<number | null>(null);
+
+  // Post-analysis push flow: after a standalone file completes, check if a same-named repo file exists
+  const checkedForPushRef = useRef<Set<number>>(new Set());
+  const [pendingPushMap, setPendingPushMap] = useState<Record<number, { matchId: number; repoName: string }[]>>({});
+  const [activePushDialog, setActivePushDialog] = useState<{
+    compId: number; compName: string; compLocation: string;
+    matches: { matchId: number; repoName: string }[];
+  } | null>(null);
 
   const router = useRouter();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -610,6 +625,34 @@ export default function CodePage() {
     });
   }, []);
 
+  // Post-analysis push detection: when a standalone file finishes analysis, check for same-named repo files
+  useEffect(() => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    for (const comp of standaloneComponents) {
+      if (comp.analysis_status === "completed" && !checkedForPushRef.current.has(comp.id)) {
+        checkedForPushRef.current.add(comp.id);
+        const basename = comp.name.trim().split("/").pop() || comp.name;
+        fetch(
+          `http://localhost:8000/api/v1/code-components/check-name?name=${encodeURIComponent(basename)}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+          .then((r) => r.json())
+          .then((matches: { id: number; name: string; location: string; repository_id: number; repo_name: string }[]) => {
+            if (matches.length > 0) {
+              setActivePushDialog({
+                compId: comp.id,
+                compName: comp.name,
+                compLocation: comp.location,
+                matches: matches.map((m) => ({ matchId: m.id, repoName: m.repo_name })),
+              });
+            }
+          })
+          .catch(() => {/* ignore */});
+      }
+    }
+  }, [standaloneComponents]);
+
   // Check if any repo is actively being analyzed
   const hasActiveAnalysis = repositories.some(
     (r) => r.analysis_status === "analyzing" || r.analysis_status === "pending"
@@ -720,23 +763,6 @@ export default function CodePage() {
       return;
     }
     try {
-      // Check if a file with this name already exists in any repository
-      const basename = newComponent.name.trim().replace(/\/+$/, "").split("/").pop() || newComponent.name;
-      const checkRes = await fetch(
-        `http://localhost:8000/api/v1/code-components/check-name?name=${encodeURIComponent(basename)}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (checkRes.ok) {
-        const matches = await checkRes.json();
-        if (matches.length > 0) {
-          // Store pending data and show override dialog
-          setPendingNewComponentLocation(newComponent.location);
-          setOverrideMatches(matches);
-          setShowOverrideDialog(true);
-          setIsSubmitting(false);
-          return;
-        }
-      }
       await registerComponent();
     } catch (error: any) {
       setSubmissionError(error.message);
@@ -745,27 +771,33 @@ export default function CodePage() {
     }
   };
 
-  const handleOverrideConfirm = async (updateRepo: boolean) => {
-    setShowOverrideDialog(false);
-    setIsSubmitting(true);
+  // Called when user clicks Push (now or from the persistent button)
+  const handlePushToRepo = async (compId: number, compLocation: string, matchId: number) => {
     const token = localStorage.getItem("accessToken");
+    if (!token) return;
     try {
-      if (updateRepo && overrideMatches.length > 0) {
-        // Update the repo's matching component location to point to the new file
-        const match = overrideMatches[0];
-        await fetch(`http://localhost:8000/api/v1/code-components/${match.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ location: pendingNewComponentLocation }),
-        });
-      }
-      await registerComponent();
-    } catch (error: any) {
-      setSubmissionError(error.message);
-    } finally {
-      setIsSubmitting(false);
-      setOverrideMatches([]);
-      setPendingNewComponentLocation("");
+      await fetch(`http://localhost:8000/api/v1/code-components/${matchId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ location: compLocation }),
+      });
+      setSuccessMessage("Repository file updated with the uploaded version.");
+      setTimeout(() => setSuccessMessage(null), 5000);
+      setPendingPushMap((prev) => { const n = { ...prev }; delete n[compId]; return n; });
+    } catch {
+      // silently ignore; user can retry
+    }
+  };
+
+  const handlePushDialogAction = async (push: boolean) => {
+    if (!activePushDialog) return;
+    const { compId, compLocation, matches } = activePushDialog;
+    setActivePushDialog(null);
+    if (push) {
+      await handlePushToRepo(compId, compLocation, matches[0].matchId);
+    } else {
+      // Keep push button visible on the standalone row
+      setPendingPushMap((prev) => ({ ...prev, [compId]: matches }));
     }
   };
 
@@ -1080,31 +1112,60 @@ export default function CodePage() {
         </div>
       </div>
 
-      {/* Override confirmation dialog */}
-      <AlertDialog open={showOverrideDialog} onOpenChange={setShowOverrideDialog}>
+      {/* Post-analysis push dialog: shown when a standalone file's name matches a repo file */}
+      <AlertDialog open={!!activePushDialog} onOpenChange={(open) => { if (!open) handlePushDialogAction(false); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>File already exists in a repository</AlertDialogTitle>
+            <AlertDialogTitle>File match found in repository</AlertDialogTitle>
             <AlertDialogDescription>
-              A file named <strong>&quot;{newComponent.name}&quot;</strong> already exists in the following
-              {overrideMatches.length === 1 ? " repository" : " repositories"}:{" "}
-              {overrideMatches.map((m) => (
-                <span key={m.id} className="font-medium text-gray-700"> {m.repo_name}</span>
+              Analysis of <strong>&quot;{activePushDialog?.compName}&quot;</strong> is complete.
+              A file with the same name exists in{" "}
+              {activePushDialog?.matches.map((m, i) => (
+                <span key={m.matchId}>
+                  {i > 0 && ", "}
+                  <span className="font-medium text-gray-700">{m.repoName}</span>
+                </span>
               ))}.
               <br /><br />
-              Do you want to update the repository&apos;s version of this file with your uploaded file?
-              The standalone component will be registered either way.
+              Do you want to push your uploaded version to the repository? If you click Cancel, a{" "}
+              <strong>Push</strong> button will appear on the file row so you can do it later.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => handleOverrideConfirm(false)}>
-              No, keep separate
+            <AlertDialogCancel onClick={() => handlePushDialogAction(false)}>
+              Cancel — remind me later
             </AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => handleOverrideConfirm(true)}
+              onClick={() => handlePushDialogAction(true)}
               className="bg-blue-600 hover:bg-blue-700"
             >
-              Yes, update repository
+              Push to repository
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete confirmation dialog for tree file rows */}
+      <AlertDialog open={deletingComponentId !== null} onOpenChange={(open) => { if (!open) setDeletingComponentId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this file?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove the file and its analysis data. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={() => {
+                if (deletingComponentId !== null) {
+                  handleDeleteComponent(deletingComponentId);
+                  setDeletingComponentId(null);
+                }
+              }}
+            >
+              Delete
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1596,6 +1657,7 @@ export default function CodePage() {
                                       onFileClick={(id) => router.push(`/dashboard/code/${id}`)}
                                       retryingIds={retryingIds}
                                       onRetry={handleRetryComponent}
+                                      onDelete={(id, e) => { e.stopPropagation(); setDeletingComponentId(id); }}
                                       getStatusBadge={getStatusBadge}
                                       getStatusIcon={getStatusIcon}
                                     />
@@ -1853,27 +1915,45 @@ export default function CodePage() {
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100">
-                            <Trash2 className="w-4 h-4 text-destructive" />
+                      <div className="flex items-center justify-end gap-2">
+                        {/* Push button: shown after user cancels the post-analysis push popup */}
+                        {pendingPushMap[comp.id] && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs border-blue-300 text-blue-600 hover:bg-blue-50"
+                            onClick={() => handlePushToRepo(
+                              comp.id,
+                              comp.location,
+                              pendingPushMap[comp.id][0].matchId
+                            )}
+                            title={`Push to ${pendingPushMap[comp.id][0].repoName}`}
+                          >
+                            Push → {pendingPushMap[comp.id][0].repoName}
                           </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              This will permanently delete &quot;{comp.name}&quot; and its analysis data.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction onClick={() => handleDeleteComponent(comp.id)}>
-                              Delete
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
+                        )}
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="icon" className="opacity-0 group-hover:opacity-100">
+                              <Trash2 className="w-4 h-4 text-destructive" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                This will permanently delete &quot;{comp.name}&quot; and its analysis data.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction onClick={() => handleDeleteComponent(comp.id)}>
+                                Delete
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
