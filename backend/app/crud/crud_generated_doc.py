@@ -34,7 +34,7 @@ class CRUDGeneratedDoc:
             doc_type=doc_type,
             title=title,
             content=content,
-            metadata=metadata,
+            doc_metadata=metadata,
             status=status,
         )
         db.add(obj)

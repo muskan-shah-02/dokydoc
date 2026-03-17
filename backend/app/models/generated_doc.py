@@ -33,7 +33,7 @@ class GeneratedDoc(Base):
 
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)  # Markdown output
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # tokens, cost, etc.
+    doc_metadata: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)  # tokens, cost, etc.
 
     status: Mapped[str] = mapped_column(String(20), default="completed", nullable=False)
     # completed | failed | generating

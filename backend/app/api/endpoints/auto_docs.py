@@ -107,7 +107,7 @@ async def generate_doc(
         "doc_type": obj.doc_type,
         "title": obj.title,
         "content": obj.content,
-        "metadata": obj.metadata,
+        "metadata": obj.doc_metadata,
         "status": obj.status,
         "created_at": obj.created_at.isoformat(),
     }
@@ -174,7 +174,7 @@ def get_generated_doc(
         "doc_type": obj.doc_type,
         "title": obj.title,
         "content": obj.content,
-        "metadata": obj.metadata,
+        "metadata": obj.doc_metadata,
         "status": obj.status,
         "created_at": obj.created_at.isoformat(),
     }
