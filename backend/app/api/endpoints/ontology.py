@@ -1361,19 +1361,51 @@ def adaptive_path_drill(
         return re.sub(r"[^a-zA-Z0-9_]", "_", name).strip("_") or "node"
 
     def _normalize(location: str) -> str:
-        """Strip repo-specific URL and common root prefixes to get a clean relative path."""
+        """Strip repo-specific URL and common root prefixes to get a clean relative path.
+
+        Handles all location formats stored in the DB:
+          - Full HTTPS URLs: https://github.com/org/repo/blob/main/backend/app/file.py
+          - Raw GitHub URLs: https://raw.githubusercontent.com/org/repo/main/backend/app/file.py
+          - Partial blob paths: blob/main/backend/app/file.py
+          - Plain relative paths: backend/app/file.py
+        """
         loc = (location or "").replace("\\", "/")
-        # Handle GitHub blob/tree URLs: strip everything before and including the branch segment
-        for marker in ("blob/", "tree/"):
-            idx = loc.find(marker)
-            if idx >= 0:
-                after = loc[idx + len(marker):]
-                slash = after.find("/")
-                if slash >= 0:
-                    loc = after[slash + 1:]
-                break
-        loc = loc.lstrip("./")
-        # Strip standard root prefixes
+
+        # ── Full URL (http:// or https://) ──────────────────────────────
+        if loc.startswith("http://") or loc.startswith("https://"):
+            # Strip protocol + host: everything up to and including the third "/"
+            # e.g. "https://github.com/" → start_of_path = "org/repo/blob/main/..."
+            try:
+                proto_end = loc.index("//") + 2          # after "https://"
+                host_end = loc.index("/", proto_end)      # first "/" after host
+                path_part = loc[host_end + 1:]            # "org/repo/blob/main/..."
+                parts = [p for p in path_part.split("/") if p]
+
+                if "blob" in parts:
+                    bi = parts.index("blob")
+                    loc = "/".join(parts[bi + 2:])        # skip blob/<branch>
+                elif "tree" in parts:
+                    ti = parts.index("tree")
+                    loc = "/".join(parts[ti + 2:])        # skip tree/<branch>
+                else:
+                    # raw.githubusercontent.com style: org/repo/branch/actual/path
+                    loc = "/".join(parts[3:]) if len(parts) > 3 else "/".join(parts)
+            except (ValueError, IndexError):
+                pass  # leave loc unchanged; prefix stripping below may still help
+
+        else:
+            # ── Relative path that may still contain blob/tree marker ────
+            for marker in ("blob/", "tree/"):
+                idx = loc.find(marker)
+                if idx >= 0:
+                    after = loc[idx + len(marker):]
+                    slash = after.find("/")
+                    if slash >= 0:
+                        loc = after[slash + 1:]
+                    break
+            loc = loc.lstrip("./")
+
+        # ── Strip standard repo-root prefixes ───────────────────────────
         for prefix in (
             "backend/app/", "backend/", "frontend/src/", "frontend/app/",
             "frontend/", "src/app/", "src/", "app/", "lib/",
@@ -1469,7 +1501,7 @@ def adaptive_path_drill(
             OntologyConcept.source_component_id.in_({c.id for c in all_components}),
             OntologyConcept.tenant_id == tenant_id,
             OntologyConcept.is_active == True,
-        ).all()
+        ).limit(2000).all()  # cap to avoid massive memory/query for large repos
         for c in concepts_all:
             all_concept_ids_by_comp[c.source_component_id] += 1
 
@@ -1495,13 +1527,16 @@ def adaptive_path_drill(
             concept_to_domain[c.id] = d
 
         concept_ids_set = {c.id for c in concepts_all}
+        # Cap to 300 concept IDs for the IN-clause — cross-domain edges are
+        # decorative; a sample is sufficient and avoids 1000-param queries.
+        concept_ids_sample = list(concept_ids_set)[:300]
         rels_all = db.query(OntologyRelationship).filter(
             OntologyRelationship.tenant_id == tenant_id,
             or_(
-                OntologyRelationship.source_concept_id.in_(concept_ids_set),
-                OntologyRelationship.target_concept_id.in_(concept_ids_set),
+                OntologyRelationship.source_concept_id.in_(concept_ids_sample),
+                OntologyRelationship.target_concept_id.in_(concept_ids_sample),
             ),
-        ).all() if concept_ids_set else []
+        ).limit(800).all() if concept_ids_sample else []
 
         cross_domain: dict = defaultdict(lambda: {"count": 0, "types": set()})
         for r in rels_all:
@@ -1649,13 +1684,13 @@ def adaptive_path_drill(
     # Determine view type: groups = at least one sub-directory exists; files = all are leaves
     has_groups = any(info["has_subdirs"] for info in next_items.values())
 
-    # Fetch concepts for matching components
+    # Fetch concepts for matching components (capped to prevent huge IN-clauses)
     matching_comp_ids = {comp.id for comp, _ in matching}
     concepts = db.query(OntologyConcept).filter(
         OntologyConcept.source_component_id.in_(matching_comp_ids),
         OntologyConcept.tenant_id == tenant_id,
         OntologyConcept.is_active == True,
-    ).all()
+    ).limit(1000).all()
 
     concept_ids = {c.id for c in concepts}
     concept_to_comp: dict = {c.id: c.source_component_id for c in concepts}
@@ -1666,13 +1701,17 @@ def adaptive_path_drill(
         if len(comp_key_concepts[c.source_component_id]) < 3:
             comp_key_concepts[c.source_component_id].append(c.name)
 
+    # Cap the IN-clause to 200 concept IDs to avoid 1000-param queries that
+    # cause PostgreSQL plan thrash and SQLAlchemy ROLLBACKs.  Relationships
+    # are only used for drawing edges between groups — a sample is enough.
+    concept_ids_for_rels = list(concept_ids)[:200]
     rels = db.query(OntologyRelationship).filter(
         OntologyRelationship.tenant_id == tenant_id,
         or_(
-            OntologyRelationship.source_concept_id.in_(concept_ids),
-            OntologyRelationship.target_concept_id.in_(concept_ids),
+            OntologyRelationship.source_concept_id.in_(concept_ids_for_rels),
+            OntologyRelationship.target_concept_id.in_(concept_ids_for_rels),
         ),
-    ).all() if concept_ids else []
+    ).limit(500).all() if concept_ids_for_rels else []
 
     # Count cross-item relationships (between items at the current level)
     def seg_for_comp(comp_id: int) -> str:
