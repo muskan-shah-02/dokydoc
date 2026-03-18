@@ -178,7 +178,14 @@ export default function ChatPage() {
       });
       if (!res.ok) return;
       const data = await res.json();
-      setMessages(data.messages || []);
+      // Deduplicate by id in case of concurrent updates
+      const seen = new Set<number>();
+      const unique = (data.messages || []).filter((m: ChatMessage) => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+      setMessages(unique);
       setTimeout(scrollToBottom, 100);
     } catch (e) {
       console.error("Failed to load messages:", e);
@@ -426,11 +433,16 @@ export default function ChatPage() {
 
       const data = await res.json();
 
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== optimisticMsg.id),
-        data.user_message,
-        data.assistant_message,
-      ]);
+      // Merge real messages, deduplicating by ID to prevent duplicate-key React errors
+      // (race condition: loadMessages may have already added these while AI was thinking)
+      setMessages((prev) => {
+        const incoming = [data.user_message, data.assistant_message];
+        const incomingIds = new Set(incoming.map((m: ChatMessage) => m.id));
+        const filtered = prev.filter(
+          (m) => m.id !== optimisticMsg.id && !incomingIds.has(m.id)
+        );
+        return [...filtered, ...incoming];
+      });
 
       // Store approval references for this assistant message
       if (data.approval_references && data.approval_references.length > 0) {

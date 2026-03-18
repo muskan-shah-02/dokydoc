@@ -353,18 +353,25 @@ async def send_message(
     db.commit()
 
     # Task 8: Log usage for billing analytics
+    # Wrapped in try/except: a logging failure must NOT crash the response —
+    # the user message + AI answer are already committed to the DB at this point.
     processing_time = time.time() - start_time
-    _log_chat_usage(
-        db,
-        tenant_id=tenant_id,
-        user_id=current_user.id,
-        input_tokens=result["input_tokens"],
-        output_tokens=result["output_tokens"],
-        cost_usd=result["cost_usd"],
-        model_used=result["model_used"],
-        processing_time=processing_time,
-        conversation_id=conversation_id,
-    )
+    try:
+        _log_chat_usage(
+            db,
+            tenant_id=tenant_id,
+            user_id=current_user.id,
+            input_tokens=result["input_tokens"],
+            output_tokens=result["output_tokens"],
+            cost_usd=result["cost_usd"],
+            # model_used can be None when AI call falls back to error message;
+            # the DB column is NOT NULL so supply a default to prevent a crash.
+            model_used=result["model_used"] or "unknown",
+            processing_time=processing_time,
+            conversation_id=conversation_id,
+        )
+    except Exception as log_err:
+        logger.warning(f"Chat usage logging failed (non-fatal): {log_err}")
 
     return {
         "user_message": user_msg,
