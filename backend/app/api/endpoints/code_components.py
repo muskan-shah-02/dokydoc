@@ -14,7 +14,7 @@ from app.core.logging import LoggerMixin
 from app.core.exceptions import NotFoundException, ValidationException
 
 # How long before we consider a "processing" analysis to be stuck
-STALE_ANALYSIS_THRESHOLD_MINUTES = 30
+STALE_ANALYSIS_THRESHOLD_MINUTES = 10
 
 class CodeComponentEndpoints(LoggerMixin):
     """Code component endpoints with enhanced logging and error handling."""
@@ -186,12 +186,9 @@ def create_code_component(
             db=db, obj_in=code_component_in, owner_id=current_user.id, tenant_id=tenant_id
         )
 
-        # Standalone components remain independent — no auto-linking to repositories.
-        # Users can explicitly choose to update a repo's file via the UI override flow.
-
-        # Add the new analysis service to the background queue
-        # This triggers our new pipeline without making the user wait
-        # SPRINT 2 Phase 6: Pass tenant_id to background task for isolation
+        # Dispatch analysis via Celery for reliability (no daemon threads that can die silently).
+        # The code_analysis_service handles URL detection: repo URLs → redirect to repo pipeline,
+        # single file URLs → static_analysis_worker, non-GitHub → fetch then static_analysis_worker.
         background_tasks.add_task(
             code_analysis_service.analyze_component_in_background,
             component_id=code_component.id,
@@ -349,15 +346,32 @@ def retry_failed_component(
         )
         logger.info(f"Retrying repo component {id} via static_analysis_worker")
     else:
-        # Standalone component: use the service
-        from app.services.code_analysis_service import code_analysis_service
-        import threading
-        threading.Thread(
-            target=code_analysis_service.analyze_component_in_background,
-            args=(component.id, tenant_id),
-            daemon=True,
-        ).start()
-        logger.info(f"Retrying standalone component {id} via code_analysis_service")
+        # Standalone component: use static_analysis_worker via Celery for reliability
+        import httpx as _httpx
+        try:
+            _resp = _httpx.get(component.location, timeout=30, follow_redirects=True)
+            _code_content = _resp.text if _resp.status_code == 200 else ""
+        except Exception:
+            _code_content = ""
+
+        if not _code_content:
+            crud.code_component.update(
+                db, db_obj=component,
+                obj_in={"analysis_status": "failed", "summary": "Could not fetch file content from URL."}
+            )
+            raise HTTPException(status_code=400, detail="Could not fetch file content from URL")
+
+        _ext = component.name.rsplit(".", 1)[-1].lower() if "." in component.name else ""
+        _lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "tsx": "typescript",
+                     "jsx": "javascript", "java": "java", "go": "go", "rs": "rust", "rb": "ruby"}
+        _language = _lang_map.get(_ext, _ext)
+
+        from app.tasks.code_analysis_tasks import static_analysis_worker
+        static_analysis_worker.delay(
+            component.id, tenant_id, _code_content,
+            repo_name="", file_path=component.name, language=_language
+        )
+        logger.info(f"Retrying standalone component {id} via static_analysis_worker (Celery)")
 
     # Return the updated component
     db.refresh(component)

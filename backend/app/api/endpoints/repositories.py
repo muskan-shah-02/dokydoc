@@ -213,6 +213,76 @@ def delete_repository(
 
 
 # ============================================================
+# SCAN PREVIEW (classify files without running LLM analysis)
+# ============================================================
+
+@router.post("/scan-preview", status_code=status.HTTP_200_OK)
+def scan_repo_preview(
+    *,
+    body: dict,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Phase 1 of two-phase repo onboarding: scan a GitHub repo URL and classify
+    files into to_analyze / skipped WITHOUT starting any LLM analysis.
+    Returns a breakdown so the user can review before committing to analysis.
+
+    Body: {"url": "https://github.com/owner/repo", "branch": "main"}
+    Response: {
+      "to_analyze": [{"path": ..., "language": ...}],
+      "skipped": [{"path": ..., "category": ..., "ext": ...}],
+      "summary": {"total": N, "analyze_count": N, "skipped_count": N,
+                  "by_language": {...}, "skipped_by_category": {...}}
+    }
+    """
+    import asyncio
+    from app.services.code_analysis_service import code_analysis_service
+
+    url = body.get("url", "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    try:
+        # Run the async scan synchronously
+        scan_result = asyncio.run(
+            code_analysis_service._get_repo_file_list(
+                *code_analysis_service._detect_github_url_type(url)[1:3],  # owner, repo
+                body.get("branch")  # branch (optional, None = auto-detect)
+            )
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not scan repository: {e}")
+
+    to_analyze = scan_result.get("to_analyze", [])
+    skipped = scan_result.get("skipped", [])
+
+    # Build summary
+    by_language: dict = {}
+    for f in to_analyze:
+        lang = f.get("language") or "unknown"
+        by_language[lang] = by_language.get(lang, 0) + 1
+
+    skipped_by_category: dict = {}
+    for s in skipped:
+        cat = s.get("category", "Other")
+        skipped_by_category[cat] = skipped_by_category.get(cat, 0) + 1
+
+    return {
+        "to_analyze": [{"path": f["path"], "language": f.get("language", "")} for f in to_analyze],
+        "skipped": skipped,
+        "summary": {
+            "total": len(to_analyze) + len(skipped),
+            "analyze_count": len(to_analyze),
+            "skipped_count": len(skipped),
+            "by_language": by_language,
+            "skipped_by_category": skipped_by_category,
+        },
+    }
+
+
+# ============================================================
 # ANALYSIS TRIGGER
 # ============================================================
 

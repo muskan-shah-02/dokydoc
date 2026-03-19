@@ -422,9 +422,17 @@ export default function CodePage() {
   const [repoComponents, setRepoComponents] = useState<Record<number, CodeComponent[]>>({});
   const [loadingRepoComponents, setLoadingRepoComponents] = useState<Set<number>>(new Set());
   const [repoStats, setRepoStats] = useState<Record<number, any>>({});
+  const [repoActiveTab, setRepoActiveTab] = useState<Record<number, string>>({});
+  // Legacy folder-tree state kept for backward compat (no longer used in render)
   const [expandedFolders, setExpandedFolders] = useState<Record<number, Set<string>>>({});
   const [expandedSkipped, setExpandedSkipped] = useState<Set<number>>(new Set());
   const [expandedSkippedCategories, setExpandedSkippedCategories] = useState<Record<number, Set<string>>>({});
+  // Scan preview state for Add Component dialog
+  const [scanPreview, setScanPreview] = useState<{
+    analyze_count: number; skipped_count: number; total: number;
+    by_language: Record<string, number>; skipped_by_category: Record<string, number>;
+  } | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
 
   // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
@@ -727,6 +735,30 @@ export default function CodePage() {
   ) => {
     const { name, value } = e.target;
     setNewComponent((prev) => ({ ...prev, [name]: value }));
+    // Clear scan preview when URL changes
+    if (name === "location") setScanPreview(null);
+  };
+
+  const handleScanPreview = async () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token || !newComponent.location) return;
+    setIsScanning(true);
+    setScanPreview(null);
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/repositories/scan-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ url: newComponent.location }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setScanPreview(data.summary);
+      }
+    } catch (e) {
+      console.error("Scan preview failed:", e);
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const registerComponent = async () => {
@@ -1077,11 +1109,45 @@ export default function CodePage() {
                 </div>
                 <div>
                   <Label htmlFor="location" className="text-sm font-medium">Location URL</Label>
-                  <div className="relative mt-1">
-                    <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-                    <Input id="location" name="location" value={newComponent.location}
-                      onChange={handleInputChange} placeholder="https://..." className="pl-10" required />
+                  <div className="relative mt-1 flex gap-2">
+                    <div className="relative flex-1">
+                      <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+                      <Input id="location" name="location" value={newComponent.location}
+                        onChange={handleInputChange} placeholder="https://github.com/owner/repo  or file URL" className="pl-10" required />
+                    </div>
+                    {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
+                      <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"
+                        onClick={handleScanPreview} disabled={isScanning}>
+                        {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                        <span className="ml-1.5 text-xs">Scan</span>
+                      </Button>
+                    )}
                   </div>
+                  {/* Scan preview result */}
+                  {scanPreview && (
+                    <div className="mt-2 rounded-lg border bg-slate-50 dark:bg-slate-900 p-3 space-y-2">
+                      <div className="flex items-center gap-3 text-sm">
+                        <span className="font-medium text-foreground">{scanPreview.total} total files</span>
+                        <span className="text-green-700 font-medium">✓ {scanPreview.analyze_count} will be analyzed</span>
+                        <span className="text-slate-400">⊘ {scanPreview.skipped_count} skipped</span>
+                      </div>
+                      {Object.keys(scanPreview.by_language).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {Object.entries(scanPreview.by_language).sort((a,b) => b[1]-a[1]).slice(0, 8).map(([lang, cnt]) => (
+                            <span key={lang} className="text-[11px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-mono">{lang}: {cnt}</span>
+                          ))}
+                        </div>
+                      )}
+                      {Object.keys(scanPreview.skipped_by_category).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          <span className="text-[11px] text-slate-400 self-center">Skipped:</span>
+                          {Object.entries(scanPreview.skipped_by_category).sort((a,b) => b[1]-a[1]).map(([cat, cnt]) => (
+                            <span key={cat} className="text-[11px] bg-slate-100 text-slate-500 rounded px-1.5 py-0.5">{cat}: {cnt}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <Label htmlFor="version" className="text-sm font-medium">Version / Git Hash</Label>
@@ -1291,34 +1357,43 @@ export default function CodePage() {
 
       {/* ── Currently Analyzing Banner ── */}
       {(() => {
-        const processing = Object.entries(repoComponents).flatMap(([repoId, comps]) =>
+        const repoProcessing = Object.entries(repoComponents).flatMap(([repoId, comps]) =>
           comps
             .filter((c) => c.analysis_status === "processing")
-            .map((c) => ({ ...c, repoName: repositories.find((r) => r.id === Number(repoId))?.name ?? `Repo #${repoId}` }))
+            .map((c) => ({ ...c, context: repositories.find((r) => r.id === Number(repoId))?.name ?? `Repo #${repoId}` }))
         );
+        const standaloneProcessing = standaloneComponents
+          .filter(c => c.analysis_status === "processing")
+          .map(c => ({ ...c, context: "Standalone" }));
+        const processing = [...repoProcessing, ...standaloneProcessing];
         if (processing.length === 0) return null;
         return (
-          <div className="rounded-lg border-2 border-blue-400 bg-blue-50 dark:bg-blue-950 p-4 space-y-2">
+          <div className="rounded-lg border-2 border-blue-400 bg-blue-50 dark:bg-blue-950 p-3 space-y-2">
             <div className="flex items-center gap-2 text-sm font-semibold text-blue-700 dark:text-blue-300">
               <Activity className="w-4 h-4 animate-pulse" />
-              Now Analyzing ({processing.length} file{processing.length > 1 ? "s" : ""})
-              <span className="ml-auto text-xs font-normal text-blue-500">These files move to their repo folder once complete</span>
+              Analyzing {processing.length} file{processing.length > 1 ? "s" : ""}
+              <div className="ml-auto flex items-center gap-2">
+                <div className="w-24 h-1.5 bg-blue-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500 animate-pulse rounded-full" style={{ width: "100%" }} />
+                </div>
+                <span className="text-xs font-normal text-blue-400">AI processing · 3 files/batch</span>
+              </div>
             </div>
-            <div className="space-y-1">
+            <div className="grid gap-1 sm:grid-cols-2">
               {processing.map((comp) => {
-                const fileName = comp.location?.split("/").pop() ?? comp.name;
+                const fileName = comp.name || comp.location?.split("/").pop() || "unknown";
                 const elapsed = comp.analysis_started_at
                   ? Math.round((Date.now() - new Date(comp.analysis_started_at).getTime()) / 1000)
                   : null;
                 return (
-                  <div key={comp.id} className="flex items-center gap-3 rounded-md bg-white dark:bg-blue-900/40 border border-blue-200 px-3 py-2 text-xs">
-                    <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin flex-shrink-0" />
+                  <div key={comp.id} className="flex items-center gap-2 rounded-md bg-white dark:bg-blue-900/40 border border-blue-200 px-3 py-2 text-xs">
+                    <Loader2 className="w-3 h-3 text-blue-500 animate-spin flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <span className="font-mono font-medium text-gray-800 dark:text-gray-100 truncate block">{fileName}</span>
-                      <span className="text-gray-400">{comp.repoName}</span>
+                      <span className="text-gray-400 text-[10px]">{comp.context}</span>
                     </div>
                     {elapsed !== null && (
-                      <span className="text-blue-500 font-mono flex-shrink-0">{elapsed}s</span>
+                      <span className={`font-mono flex-shrink-0 ${elapsed > 30 ? "text-amber-500" : "text-blue-400"}`}>{elapsed}s</span>
                     )}
                   </div>
                 );
@@ -1627,107 +1702,167 @@ export default function CodePage() {
                                 );
                               })()}
 
-                              {/* Hierarchical folder tree view */}
-                              <div className="border rounded-md overflow-hidden">
-                                {/* Header row */}
-                                <div
-                                  className="grid bg-muted/50 border-b text-xs font-medium text-muted-foreground py-2"
-                                  style={{ gridTemplateColumns: "44px 1fr 80px 120px 70px 80px 80px" }}
-                                >
-                                  <div className="text-center">#</div>
-                                  <div className="pl-3">File</div>
-                                  <div className="px-2">Version</div>
-                                  <div className="px-2">Status</div>
-                                  <div className="text-right px-2">Duration</div>
-                                  <div className="text-right px-2">Cost</div>
-                                  <div className="text-right px-2">Actions</div>
-                                </div>
-                                {/* Tree rows */}
-                                {(() => {
-                                  const tree = buildFileTree(components);
-                                  const repoExpanded = expandedFolders[repo.id] ?? new Set<string>();
-                                  const fileIndexRef = { value: 0 };
-                                  return (
-                                    <FileTreeRows
-                                      nodes={tree.children}
-                                      depth={0}
-                                      expandedFolders={repoExpanded}
-                                      onToggleFolder={(path) => toggleFolder(repo.id, path)}
-                                      fileIndexRef={fileIndexRef}
-                                      onFileClick={(id) => router.push(`/dashboard/code/${id}`)}
-                                      retryingIds={retryingIds}
-                                      onRetry={handleRetryComponent}
-                                      onDelete={(id, e) => { e.stopPropagation(); setDeletingComponentId(id); }}
-                                      getStatusBadge={getStatusBadge}
-                                      getStatusIcon={getStatusIcon}
-                                    />
-                                  );
-                                })()}
-                              </div>
+                              {/* ── Status Tabs + Flat File List ── */}
+                              {(() => {
+                                const activeTab = repoActiveTab[repo.id] ?? "all";
+                                const skippedBreakdown: any[] = repoStats[repo.id]?.skipped_category_breakdown ?? [];
+                                const skippedCount = repoStats[repo.id]?.skipped_files_count ?? 0;
 
-                              {/* Evaluation Not Required section */}
-                              {repoStats[repo.id]?.skipped_files_count > 0 && (
-                                <div className="border rounded-md overflow-hidden">
-                                  <div
-                                    className="flex items-center gap-2 px-3 py-2 bg-slate-50/70 dark:bg-slate-900/50 cursor-pointer hover:bg-muted/50 select-none"
-                                    onClick={() => toggleSkippedSection(repo.id)}
-                                  >
-                                    {expandedSkipped.has(repo.id)
-                                      ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
-                                      : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
-                                    <EyeOff className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                                    <span className="text-sm font-medium text-muted-foreground">Evaluation Not Required</span>
-                                    <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-                                      {repoStats[repo.id].skipped_category_breakdown?.slice(0, 4).map((cat: any) => (
-                                        <span key={cat.category} className="bg-muted rounded px-1.5 py-0.5">
-                                          {cat.category}: {cat.count}
-                                        </span>
+                                const analyzingComps = components.filter(c => c.analysis_status === "processing");
+                                const completedComps = components.filter(c => c.analysis_status === "completed" || c.analysis_status === "redirected");
+                                const failedComps = components.filter(c => c.analysis_status === "failed");
+                                const pendingComps = components.filter(c => c.analysis_status === "pending");
+
+                                const tabs = [
+                                  { id: "all", label: "All", count: components.length, color: "text-gray-600" },
+                                  { id: "analyzing", label: "Analyzing", count: analyzingComps.length, color: "text-blue-600" },
+                                  { id: "completed", label: "Done", count: completedComps.length, color: "text-green-600" },
+                                  { id: "failed", label: "Failed", count: failedComps.length, color: "text-red-600" },
+                                  { id: "pending", label: "Queued", count: pendingComps.length, color: "text-amber-600" },
+                                  { id: "skipped", label: "Skipped", count: skippedCount, color: "text-slate-500" },
+                                ];
+
+                                let visibleComps: CodeComponent[] = components;
+                                if (activeTab === "analyzing") visibleComps = analyzingComps;
+                                else if (activeTab === "completed") visibleComps = completedComps;
+                                else if (activeTab === "failed") visibleComps = failedComps;
+                                else if (activeTab === "pending") visibleComps = pendingComps;
+
+                                return (
+                                  <div className="border rounded-lg overflow-hidden">
+                                    {/* Tab bar */}
+                                    <div className="flex items-center border-b bg-slate-50 dark:bg-slate-900 overflow-x-auto">
+                                      {tabs.map(tab => (
+                                        <button
+                                          key={tab.id}
+                                          onClick={() => setRepoActiveTab(prev => ({ ...prev, [repo.id]: tab.id }))}
+                                          className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium whitespace-nowrap border-b-2 transition-colors ${
+                                            activeTab === tab.id
+                                              ? `border-blue-500 ${tab.color} bg-white dark:bg-slate-950`
+                                              : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/60"
+                                          }`}
+                                        >
+                                          {tab.label}
+                                          {tab.count > 0 && (
+                                            <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                                              activeTab === tab.id ? "bg-blue-100 text-blue-700" : "bg-muted"
+                                            }`}>
+                                              {tab.count}
+                                            </span>
+                                          )}
+                                        </button>
                                       ))}
-                                      <span className="font-medium">{repoStats[repo.id].skipped_files_count} files</span>
                                     </div>
-                                  </div>
 
-                                  {expandedSkipped.has(repo.id) && (
-                                    <div>
-                                      {repoStats[repo.id].skipped_category_breakdown?.map((cat: any) => {
-                                        const categoryFiles = (repoStats[repo.id].skipped_files || []).filter((f: any) => f.category === cat.category);
-                                        const isCatExpanded = expandedSkippedCategories[repo.id]?.has(cat.category);
-                                        return (
-                                          <div key={cat.category}>
-                                            <div
-                                              className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/30 cursor-pointer border-t border-muted/30 select-none"
-                                              style={{ paddingLeft: "28px" }}
-                                              onClick={() => toggleSkippedCategory(repo.id, cat.category)}
-                                            >
-                                              {isCatExpanded
-                                                ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-                                                : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
-                                              <Folder className="w-4 h-4 text-slate-400 flex-shrink-0" />
-                                              <span className="text-sm flex-1">{cat.category}</span>
-                                              <span className="text-xs text-muted-foreground">{cat.count} files</span>
+                                    {/* Skipped tab: category summary */}
+                                    {activeTab === "skipped" ? (
+                                      <div className="divide-y">
+                                        {skippedBreakdown.length === 0 ? (
+                                          <div className="py-6 text-center text-sm text-muted-foreground">No skipped files</div>
+                                        ) : skippedBreakdown.map((cat: any) => (
+                                          <div key={cat.category} className="flex items-center gap-3 px-4 py-3">
+                                            <EyeOff className="w-4 h-4 text-slate-300 flex-shrink-0" />
+                                            <span className="text-sm flex-1 font-medium text-muted-foreground">{cat.category}</span>
+                                            <span className="text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 rounded-full px-2 py-0.5">
+                                              {cat.count} files
+                                            </span>
+                                          </div>
+                                        ))}
+                                        {skippedCount > 0 && (
+                                          <div className="px-4 py-2 text-xs text-muted-foreground bg-slate-50/50">
+                                            Binaries, images, compiled artifacts and similar files are not analyzed.
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      /* Flat file list */
+                                      <div>
+                                        {visibleComps.length === 0 ? (
+                                          <div className="py-8 text-center text-sm text-muted-foreground">
+                                            {activeTab === "failed" ? "No failed files" :
+                                             activeTab === "analyzing" ? "No files currently analyzing" :
+                                             activeTab === "pending" ? "No files queued" :
+                                             activeTab === "completed" ? "No completed files yet" : "No files"}
+                                          </div>
+                                        ) : (
+                                          <>
+                                            <div className="grid text-[11px] font-medium text-muted-foreground bg-muted/40 px-4 py-1.5 border-b"
+                                              style={{ gridTemplateColumns: "1fr 90px 70px 70px 60px" }}>
+                                              <span>File</span>
+                                              <span>Status</span>
+                                              <span className="text-right">Time</span>
+                                              <span className="text-right">Cost</span>
+                                              <span className="text-right">Actions</span>
                                             </div>
-                                            {isCatExpanded && categoryFiles.map((sf: any) => {
-                                              const fileName = sf.path.split('/').pop();
+                                            {visibleComps.map((comp) => {
+                                              const fileName = comp.name || comp.location?.split("/").pop() || "unknown";
+                                              const dirPath = (() => {
+                                                const loc = comp.location ?? "";
+                                                const rawMatch = loc.match(/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\/(.+)/);
+                                                const ghMatch = loc.match(/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\/[^/]+\/(.+)/);
+                                                const pathPart = rawMatch?.[1] ?? ghMatch?.[1] ?? "";
+                                                const parts = pathPart.split("/");
+                                                return parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+                                              })();
+                                              const elapsed = comp.analysis_started_at
+                                                ? Math.round(((comp.analysis_completed_at
+                                                    ? new Date(comp.analysis_completed_at).getTime()
+                                                    : Date.now()) - new Date(comp.analysis_started_at).getTime()) / 1000)
+                                                : null;
+                                              const isProcessing = comp.analysis_status === "processing";
                                               return (
                                                 <div
-                                                  key={sf.path}
-                                                  className="flex items-center gap-2 py-1 text-xs text-muted-foreground border-t border-muted/20"
-                                                  style={{ paddingLeft: "56px" }}
-                                                  title={sf.path}
+                                                  key={comp.id}
+                                                  className={`grid items-center px-4 py-2.5 border-b border-muted/20 text-sm hover:bg-muted/20 cursor-pointer group ${isProcessing ? "bg-blue-50/60 dark:bg-blue-950/20" : ""}`}
+                                                  style={{ gridTemplateColumns: "1fr 90px 70px 70px 60px" }}
+                                                  onClick={() => router.push(`/dashboard/code/${comp.id}`)}
                                                 >
-                                                  <File className="w-3.5 h-3.5 flex-shrink-0 text-slate-300" />
-                                                  <span className="truncate flex-1 font-mono">{fileName}</span>
-                                                  <span className="text-slate-400 flex-shrink-0 font-mono mr-3">{sf.ext}</span>
+                                                  <div className="min-w-0 pr-4">
+                                                    <div className="flex items-center gap-1.5">
+                                                      {isProcessing && <Loader2 className="w-3 h-3 text-blue-500 animate-spin flex-shrink-0" />}
+                                                      <span className="font-mono font-medium text-xs truncate">{fileName}</span>
+                                                    </div>
+                                                    {dirPath && (
+                                                      <div className="text-[11px] text-muted-foreground font-mono truncate mt-0.5">/{dirPath}</div>
+                                                    )}
+                                                    {comp.analysis_status === "failed" && comp.summary && (
+                                                      <div className="text-[11px] text-red-500 mt-0.5 truncate" title={comp.summary}>
+                                                        {comp.summary.split("\n")[0]}
+                                                      </div>
+                                                    )}
+                                                  </div>
+                                                  <div>{getStatusBadge(comp.analysis_status)}</div>
+                                                  <div className="text-right text-xs text-muted-foreground font-mono">
+                                                    {elapsed !== null ? `${Math.max(0, elapsed)}s` : "—"}
+                                                  </div>
+                                                  <div className="text-right text-xs font-mono">
+                                                    {comp.ai_cost_inr != null && comp.ai_cost_inr > 0
+                                                      ? <span className="text-green-700">&#8377;{comp.ai_cost_inr.toFixed(2)}</span>
+                                                      : <span className="text-muted-foreground">—</span>}
+                                                  </div>
+                                                  <div className="flex justify-end gap-1" onClick={e => e.stopPropagation()}>
+                                                    {comp.analysis_status === "failed" && (
+                                                      <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                                                        disabled={retryingIds.has(comp.id)}
+                                                        onClick={(e) => handleRetryComponent(comp.id, e)} title="Retry">
+                                                        {retryingIds.has(comp.id) ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3 text-blue-500" />}
+                                                      </Button>
+                                                    )}
+                                                    <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100"
+                                                      onClick={() => setDeletingComponentId(comp.id)} title="Delete">
+                                                      <Trash2 className="w-3 h-3 text-destructive" />
+                                                    </Button>
+                                                  </div>
                                                 </div>
                                               );
                                             })}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
+                                          </>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </>
                           );
                         })()}

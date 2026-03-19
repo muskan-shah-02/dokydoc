@@ -22,6 +22,9 @@ import asyncio
 import hashlib
 import json
 import httpx
+import time as _time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -438,137 +441,172 @@ def repo_analysis_task(
         completed = 0
         failed = 0
 
-        for file_info in file_list:
+        # --- Parallel Batch Processing ---
+        # Process files in batches of 3 concurrently. With 3 concurrent requests and
+        # 12s between batches, throughput = 3x vs sequential while staying ≤15 RPM.
+        # Rate: 3 files/batch × 1 batch/12s = 15 files/min = 15 RPM (Gemini limit).
+        BATCH_SIZE = 3
+        BATCH_INTERVAL_SECS = 12  # seconds between batch starts
+
+        # Shared lock for updating progress counter from worker threads
+        progress_lock = threading.Lock()
+
+        def _prepare_component(file_info: dict):
+            """Fetch content + create/look up CodeComponent. Returns (component, content, file_info) or None."""
             file_path = file_info.get("path", "unknown")
             file_url = file_info.get("url", "")
-            file_language = file_info.get("language", "unknown")
 
+            code_content = _fetch_file_content(file_url)
+            if not code_content:
+                logger.warning(f"Empty content for {file_path}, skipping")
+                return None
+
+            thread_db = SessionLocal()
             try:
-                # Fetch file content
-                code_content = _fetch_file_content(file_url)
-                if not code_content:
-                    logger.warning(f"Empty content for {file_path}, skipping")
-                    failed += 1
-                    continue
-
-                # Check if component already exists for this file (re-analysis scenario)
                 from app.models.code_component import CodeComponent
-                existing_component = db.query(CodeComponent).filter(
+                existing = thread_db.query(CodeComponent).filter(
                     CodeComponent.repository_id == repo_id,
                     CodeComponent.name == file_path.split("/")[-1],
                     CodeComponent.location == file_url,
                     CodeComponent.tenant_id == tenant_id,
                 ).first()
 
-                if existing_component:
-                    # Re-analysis: check if content actually changed before re-analyzing
-                    component = existing_component
-                    content_hash = hashlib.sha256(code_content.encode()).hexdigest()
-                    prev_hash = component.previous_analysis_hash or ""
-
-                    # Also check cache: if content is identical to last analysis, skip AI call
+                if existing:
                     from app.services.cache_service import cache_service as _cache
                     cache_type = "enhanced_analysis" if repo.name else "code_analysis"
-                    cached_result = _cache.get_cached_analysis(content=code_content, analysis_type=cache_type)
-
-                    if cached_result and component.analysis_status == "completed" and component.structured_analysis:
-                        # Content unchanged and previous analysis exists — skip entirely
-                        logger.info(
-                            f"SKIP re-analysis for {file_path} (component {component.id}) "
-                            f"— content unchanged (cache hit), reusing existing analysis"
-                        )
-                        completed += 1
-                        # Still contribute to cross-file context
-                        if component.summary:
-                            sa = component.structured_analysis or {}
-                            repo_context.append({
-                                "path": file_path,
-                                "summary": (component.summary or "")[:200],
-                                "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
-                            })
-                        crud.repository.update_analysis_progress(
-                            db=db, repo_id=repo_id, tenant_id=tenant_id,
-                            analyzed_files=completed + failed
-                        )
-                        continue
-
-                    logger.info(f"Re-analyzing existing component {component.id} for {file_path} (content changed or no cache)")
+                    cached = _cache.get_cached_analysis(content=code_content, analysis_type=cache_type)
+                    if cached and existing.analysis_status == "completed" and existing.structured_analysis:
+                        logger.info(f"SKIP re-analysis for {file_path} (cache hit)")
+                        return ("cached", existing, code_content, file_info)
+                    return ("existing", existing, code_content, file_info)
                 else:
-                    # New file: create CodeComponent record
                     from app.schemas.code_component import CodeComponentCreate
                     component_in = CodeComponentCreate(
-                        name=file_path.split("/")[-1],  # filename
+                        name=file_path.split("/")[-1],
                         component_type="File",
                         location=file_url,
                         version=repo.last_analyzed_commit or "HEAD",
                     )
+                    _repo = thread_db.query(crud.repository.model).filter_by(id=repo_id).first()
+                    owner_id = _repo.owner_id if _repo else 1
                     component = crud.code_component.create_with_owner(
-                        db=db, obj_in=component_in,
-                        owner_id=repo.owner_id, tenant_id=tenant_id
+                        db=thread_db, obj_in=component_in,
+                        owner_id=owner_id, tenant_id=tenant_id
                     )
-
-                    # Link to repository
                     crud.code_component.update(
-                        db, db_obj=component,
+                        thread_db, db_obj=component,
                         obj_in={"repository_id": repo_id}
                     )
+                    return ("new", component, code_content, file_info)
+            finally:
+                thread_db.close()
 
-                # Build cross-file context from previously-analyzed files
-                # Provides lightweight awareness of sibling files (last 10)
-                context_prefix = ""
-                if repo_context:
-                    recent = repo_context[-10:]
-                    context_lines = [
-                        f"  - {rc['path']} ({rc['file_type']}): {rc['summary']}"
-                        for rc in recent
-                    ]
-                    context_prefix = (
-                        "REPOSITORY CONTEXT (previously analyzed files in this repo):\n"
-                        + "\n".join(context_lines)
-                        + "\n\nNOW ANALYZING:\n"
-                    )
+        def _analyze_one(prepare_result, context_snapshot: list):
+            """Run analysis for a single file. Returns ("completed"|"failed"|"cached", component)."""
+            if prepare_result is None:
+                return ("failed", None)
 
-                # Run enhanced analysis with repo context + language
-                import time
-                analysis_content = context_prefix + code_content if context_prefix else code_content
-                result = static_analysis_worker(
-                    component.id, tenant_id, analysis_content,
-                    repo_name=repo.name,
-                    file_path=file_path,
-                    language=file_language
+            tag, component, code_content, file_info = prepare_result
+            if tag == "cached":
+                sa = component.structured_analysis or {}
+                return ("cached", component, {
+                    "path": file_info.get("path"),
+                    "summary": (component.summary or "")[:200],
+                    "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
+                })
+
+            file_path = file_info.get("path", "unknown")
+            file_language = file_info.get("language", "unknown")
+
+            context_prefix = ""
+            if context_snapshot:
+                recent = context_snapshot[-10:]
+                context_lines = [
+                    f"  - {rc['path']} ({rc['file_type']}): {rc['summary']}"
+                    for rc in recent
+                ]
+                context_prefix = (
+                    "REPOSITORY CONTEXT (previously analyzed files in this repo):\n"
+                    + "\n".join(context_lines)
+                    + "\n\nNOW ANALYZING:\n"
                 )
 
-                if result.get("status") == "completed":
-                    completed += 1
-                    # Accumulate context for subsequent files
+            analysis_content = context_prefix + code_content if context_prefix else code_content
+            result = static_analysis_worker(
+                component.id, tenant_id, analysis_content,
+                repo_name=repo.name,
+                file_path=file_path,
+                language=file_language
+            )
+
+            if result.get("status") == "completed":
+                thread_db = SessionLocal()
+                try:
+                    comp_refreshed = crud.code_component.get(thread_db, id=component.id, tenant_id=tenant_id)
+                    if comp_refreshed and comp_refreshed.summary:
+                        sa = comp_refreshed.structured_analysis or {}
+                        ctx = {
+                            "path": file_path,
+                            "summary": (comp_refreshed.summary or "")[:200],
+                            "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
+                        }
+                        return ("completed", component, ctx)
+                finally:
+                    thread_db.close()
+                return ("completed", component, None)
+            return ("failed", component, None)
+
+        # Prepare all components first (DB setup only, no AI calls)
+        logger.info(f"Repo {repo_id}: preparing {len(file_list)} components...")
+        prepare_results = []
+        with ThreadPoolExecutor(max_workers=5) as prep_pool:
+            futures = {prep_pool.submit(_prepare_component, fi): fi for fi in file_list}
+            for future in as_completed(futures):
+                try:
+                    prepare_results.append(future.result())
+                except Exception as e:
+                    logger.error(f"Prepare failed: {e}")
+                    prepare_results.append(None)
+
+        # Process in batches of BATCH_SIZE, each batch runs concurrently
+        logger.info(f"Repo {repo_id}: analyzing {len(prepare_results)} files in batches of {BATCH_SIZE}")
+        for batch_idx in range(0, len(prepare_results), BATCH_SIZE):
+            batch = prepare_results[batch_idx: batch_idx + BATCH_SIZE]
+            batch_start = _time.monotonic()
+
+            # Snapshot current context for this batch (all threads share the same view)
+            context_snapshot = list(repo_context)
+
+            with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
+                futures = {pool.submit(_analyze_one, pr, context_snapshot): pr for pr in batch}
+                for future in as_completed(futures):
                     try:
-                        comp_refreshed = crud.code_component.get(
-                            db=db, id=component.id, tenant_id=tenant_id
-                        )
-                        if comp_refreshed and comp_refreshed.summary:
-                            sa = comp_refreshed.structured_analysis or {}
-                            repo_context.append({
-                                "path": file_path,
-                                "summary": (comp_refreshed.summary or "")[:200],
-                                "file_type": sa.get("language_info", {}).get("file_type", "Unknown"),
-                            })
-                    except Exception:
-                        pass
-                else:
-                    failed += 1
+                        result_tuple = future.result()
+                        status = result_tuple[0] if result_tuple else "failed"
+                        ctx_entry = result_tuple[2] if len(result_tuple) > 2 else None
+                        with progress_lock:
+                            if status in ("completed", "cached"):
+                                completed += 1
+                                if ctx_entry:
+                                    repo_context.append(ctx_entry)
+                            else:
+                                failed += 1
+                            crud.repository.update_analysis_progress(
+                                db=db, repo_id=repo_id, tenant_id=tenant_id,
+                                analyzed_files=completed + failed
+                            )
+                    except Exception as e:
+                        logger.error(f"Batch analysis error: {e}")
+                        with progress_lock:
+                            failed += 1
 
-                # Update progress atomically
-                crud.repository.update_analysis_progress(
-                    db=db, repo_id=repo_id, tenant_id=tenant_id,
-                    analyzed_files=completed + failed
-                )
-
-                # Rate limiting: 4s sleep between analyses (15 RPM Gemini limit)
-                time.sleep(4)
-
-            except Exception as file_err:
-                logger.error(f"Failed to process file {file_path}: {file_err}")
-                failed += 1
+            # Rate limiting: wait remainder of BATCH_INTERVAL after batch finishes
+            elapsed = _time.monotonic() - batch_start
+            wait = max(0.0, BATCH_INTERVAL_SECS - elapsed)
+            if wait > 0 and batch_idx + BATCH_SIZE < len(prepare_results):
+                logger.info(f"Repo {repo_id}: batch {batch_idx // BATCH_SIZE + 1} done, "
+                            f"waiting {wait:.1f}s before next batch")
+                _time.sleep(wait)
 
         # Mark repo as completed or failed
         final_status = "completed" if failed == 0 else ("completed" if completed > 0 else "failed")
