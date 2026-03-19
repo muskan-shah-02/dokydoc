@@ -218,18 +218,38 @@ class AutoDocsService(LoggerMixin):
         try:
             if source_type == "document":
                 from app.models.document import Document
-
                 doc = db.query(Document).filter(
                     Document.id == source_id, Document.tenant_id == tenant_id
                 ).first()
                 return doc.filename if doc else f"Document #{source_id}"
             elif source_type == "repository":
                 from app.models.repository import Repository
-
                 repo = db.query(Repository).filter(
                     Repository.id == source_id, Repository.tenant_id == tenant_id
                 ).first()
                 return repo.name if repo else f"Repository #{source_id}"
+            elif source_type in ("code_file", "standalone"):
+                from app.models.code_component import CodeComponent
+                comp = db.query(CodeComponent).filter(
+                    CodeComponent.id == source_id, CodeComponent.tenant_id == tenant_id
+                ).first()
+                return comp.name if comp else f"File #{source_id}"
+            elif source_type == "jira_item":
+                from app.models.jira_item import JiraItem
+                item = db.query(JiraItem).filter(
+                    JiraItem.id == source_id, JiraItem.tenant_id == tenant_id
+                ).first()
+                if item:
+                    return f"{item.external_key}: {item.title[:40]}"
+                return f"JIRA #{source_id}"
+            elif source_type == "analysis":
+                from app.models.generated_doc import GeneratedDoc
+                doc = db.query(GeneratedDoc).filter(
+                    GeneratedDoc.id == source_id, GeneratedDoc.tenant_id == tenant_id
+                ).first()
+                if doc:
+                    return doc.title[:50] if doc.title else f"Analysis #{source_id}"
+                return f"Analysis #{source_id}"
         except Exception:
             pass
         return f"{source_type} #{source_id}"
@@ -245,6 +265,12 @@ class AutoDocsService(LoggerMixin):
                 parts.extend(self._context_from_document(db, source_id, tenant_id))
             elif source_type == "repository":
                 parts.extend(self._context_from_repository(db, source_id, tenant_id))
+            elif source_type in ("code_file", "standalone"):
+                parts.extend(self._context_from_code_file(db, source_id, tenant_id))
+            elif source_type == "jira_item":
+                parts.extend(self._context_from_jira_item(db, source_id, tenant_id))
+            elif source_type == "analysis":
+                parts.extend(self._context_from_analysis(db, source_id, tenant_id))
         except Exception as e:
             self.logger.warning(f"Context assembly partial failure: {e}")
             parts.append(f"[Context assembly error: {e}]")
@@ -418,6 +444,12 @@ class AutoDocsService(LoggerMixin):
                     src_parts = self._context_from_document(db, src_id, tenant_id)
                 elif src_type == "repository":
                     src_parts = self._context_from_repository(db, src_id, tenant_id)
+                elif src_type in ("code_file", "standalone"):
+                    src_parts = self._context_from_code_file(db, src_id, tenant_id)
+                elif src_type == "jira_item":
+                    src_parts = self._context_from_jira_item(db, src_id, tenant_id)
+                elif src_type == "analysis":
+                    src_parts = self._context_from_analysis(db, src_id, tenant_id)
                 else:
                     continue
 
@@ -430,6 +462,93 @@ class AutoDocsService(LoggerMixin):
                 parts.append(f"[Context error for {src_type} #{src_id}: {e}]")
 
         return "\n\n".join(parts) if parts else "No analysis data available yet."
+
+    def _context_from_code_file(
+        self, db: Session, component_id: int, tenant_id: int
+    ) -> list[str]:
+        """Context from a single analyzed code component (file or standalone)."""
+        parts = []
+        from app.models.code_component import CodeComponent
+        import json
+
+        comp = db.query(CodeComponent).filter(
+            CodeComponent.id == component_id, CodeComponent.tenant_id == tenant_id
+        ).first()
+        if not comp:
+            return [f"[Code component #{component_id} not found]"]
+
+        parts.append(f"CODE FILE: {comp.name}")
+        if comp.location:
+            parts.append(f"LOCATION: {comp.location}")
+        if comp.summary:
+            parts.append(f"SUMMARY:\n{comp.summary[:2000]}")
+        if comp.structured_analysis:
+            sa = comp.structured_analysis
+            # Extract the richest fields: business rules, API contracts, data models, security
+            for field in ("business_rules", "api_contracts", "data_models", "security_patterns",
+                          "dependencies", "language_info", "key_concepts"):
+                val = sa.get(field)
+                if val:
+                    parts.append(f"{field.upper().replace('_', ' ')}:\n{json.dumps(val, indent=2)[:800]}")
+
+        return parts
+
+    def _context_from_jira_item(
+        self, db: Session, jira_item_id: int, tenant_id: int
+    ) -> list[str]:
+        """Context from a JIRA item (epic, story, task, bug)."""
+        parts = []
+        try:
+            from app.models.jira_item import JiraItem
+            item = db.query(JiraItem).filter(
+                JiraItem.id == jira_item_id, JiraItem.tenant_id == tenant_id
+            ).first()
+            if not item:
+                return [f"[JIRA item #{jira_item_id} not found]"]
+
+            parts.append(f"JIRA {item.item_type.upper()}: {item.external_key} — {item.title}")
+            meta = []
+            if item.status:
+                meta.append(f"Status: {item.status}")
+            if item.priority:
+                meta.append(f"Priority: {item.priority}")
+            if item.sprint_name:
+                meta.append(f"Sprint: {item.sprint_name}")
+            if item.assignee:
+                meta.append(f"Assignee: {item.assignee}")
+            if meta:
+                parts.append(" | ".join(meta))
+            if item.description:
+                parts.append(f"DESCRIPTION:\n{item.description[:2000]}")
+            if item.acceptance_criteria:
+                criteria = item.acceptance_criteria
+                if isinstance(criteria, list):
+                    parts.append("ACCEPTANCE CRITERIA:\n" + "\n".join(f"  - {c}" for c in criteria))
+                else:
+                    parts.append(f"ACCEPTANCE CRITERIA:\n{str(criteria)[:1000]}")
+        except Exception as e:
+            parts.append(f"[JIRA context error: {e}]")
+        return parts
+
+    def _context_from_analysis(
+        self, db: Session, doc_id: int, tenant_id: int
+    ) -> list[str]:
+        """Context from a previously generated Auto Docs result."""
+        parts = []
+        from app.models.generated_doc import GeneratedDoc
+
+        doc = db.query(GeneratedDoc).filter(
+            GeneratedDoc.id == doc_id, GeneratedDoc.tenant_id == tenant_id
+        ).first()
+        if not doc:
+            return [f"[Generated doc #{doc_id} not found]"]
+
+        parts.append(f"PREVIOUS ANALYSIS: {doc.title}")
+        parts.append(f"TYPE: {doc.doc_type} | SOURCE: {doc.source_name or 'unknown'}")
+        if doc.content:
+            parts.append(f"CONTENT:\n{doc.content[:4000]}")
+
+        return parts
 
 
 auto_docs_service = AutoDocsService()
