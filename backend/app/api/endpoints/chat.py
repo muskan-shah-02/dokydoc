@@ -514,10 +514,14 @@ def get_suggested_prompts(
         prompts = DEFAULT_SUGGESTED_PROMPTS
         matched_role = "default"
 
+    formatted = [
+        {"text": p, "category": (matched_role or "general").lower()}
+        for p in prompts
+    ]
     return {
-        "prompts": prompts,
+        "prompts": formatted,
         "role": matched_role,
-        "total": len(prompts),
+        "total": len(formatted),
     }
 
 

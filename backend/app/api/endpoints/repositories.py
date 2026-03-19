@@ -187,6 +187,23 @@ def delete_repository(
 
     # Cascade: delete all code components linked to this repository
     from app.models.code_component import CodeComponent
+    from app.models.ontology_concept import OntologyConcept
+
+    # Get the component IDs before deleting so we can clean up ontology
+    component_ids = [
+        row.id for row in db.query(CodeComponent.id).filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+        ).all()
+    ]
+
+    # Delete ontology concepts sourced from this repository's code components
+    if component_ids:
+        db.query(OntologyConcept).filter(
+            OntologyConcept.tenant_id == tenant_id,
+            OntologyConcept.source_component_id.in_(component_ids),
+        ).delete(synchronize_session=False)
+
     db.query(CodeComponent).filter(
         CodeComponent.repository_id == repo_id,
         CodeComponent.tenant_id == tenant_id,
