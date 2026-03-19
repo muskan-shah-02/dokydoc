@@ -1,9 +1,15 @@
 """
 AutoDocsService — AI-powered documentation generation.
 Sprint 8 Module 12: Auto Docs.
+Sprint 9: Multi-source generation.
 
 Sprint A doc types: component_spec, architecture_diagram, api_summary
 Sprint B doc types: brd, test_cases, data_models
+
+Source types:
+  "document"   — single document
+  "repository" — single repository
+  "multi"      — list of {type, id} dicts passed to generate_multi()
 """
 import asyncio
 from typing import Optional
@@ -314,6 +320,116 @@ class AutoDocsService(LoggerMixin):
             parts.append("CODE COMPONENTS:\n" + "\n".join(lines))
 
         return parts
+
+
+    async def generate_multi(
+        self,
+        db: Session,
+        *,
+        doc_type: str,
+        sources: list[dict],
+        tenant_id: int,
+        user_id: Optional[int] = None,
+    ) -> dict:
+        """
+        Generate documentation from multiple sources combined.
+
+        sources: [{"type": "document"|"repository", "id": <int>}, ...]
+
+        Returns a dict with: title, content, status, source_name, metadata, source_ids.
+        Does NOT save to DB — caller saves via crud_generated_doc.
+        """
+        if doc_type not in _PROMPTS:
+            raise ValueError(f"Unknown doc_type '{doc_type}'. Supported: {self.SUPPORTED_TYPES}")
+
+        if not sources:
+            raise ValueError("At least one source must be provided")
+
+        # Deduplicate sources by (type, id)
+        seen = set()
+        unique_sources = []
+        for s in sources:
+            key = (s.get("type"), s.get("id"))
+            if key not in seen:
+                seen.add(key)
+                unique_sources.append(s)
+
+        context_text = self._build_context_multi(db, unique_sources, tenant_id)
+        source_names = [
+            self._get_source_name(db, s["type"], s["id"], tenant_id)
+            for s in unique_sources
+        ]
+        source_label = " + ".join(source_names[:3])
+        if len(source_names) > 3:
+            source_label += f" [+{len(source_names) - 3} more]"
+
+        title = f"{_DOC_TYPE_TITLES.get(doc_type, doc_type)} — {source_label}"
+        prompt = _PROMPTS[doc_type].format(context=context_text[:12000])
+
+        try:
+            from app.services.ai.gemini import gemini_service
+
+            response = await gemini_service.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation=f"auto_docs_{doc_type}_multi",
+            )
+            content = response.text or ""
+            tokens = gemini_service.extract_token_usage(response)
+            status = "completed"
+        except Exception as e:
+            self.logger.error(f"AutoDocs multi-source generation failed for {doc_type}: {e}")
+            content = f"*Generation failed: {e}*"
+            tokens = {}
+            status = "failed"
+
+        return {
+            "title": title,
+            "content": content,
+            "status": status,
+            "source_name": source_label,
+            "source_ids": unique_sources,
+            "metadata": {
+                "doc_type": doc_type,
+                "source_type": "multi",
+                "source_count": len(unique_sources),
+                **tokens,
+            },
+        }
+
+    def _build_context_multi(
+        self, db: Session, sources: list[dict], tenant_id: int
+    ) -> str:
+        """
+        Assemble context from multiple sources.
+        Allocates a proportional token budget per source, then merges.
+        """
+        parts = []
+        per_source_cap = max(2000, 12000 // max(len(sources), 1))
+
+        for s in sources:
+            src_type = s.get("type", "")
+            src_id = s.get("id")
+            if src_id is None:
+                continue
+            try:
+                if src_type == "document":
+                    src_parts = self._context_from_document(db, src_id, tenant_id)
+                elif src_type == "repository":
+                    src_parts = self._context_from_repository(db, src_id, tenant_id)
+                else:
+                    continue
+
+                src_text = "\n\n".join(src_parts)
+                if len(src_text) > per_source_cap:
+                    src_text = src_text[:per_source_cap] + "\n[… truncated for length …]"
+                parts.append(f"--- SOURCE ({src_type.upper()} #{src_id}) ---\n{src_text}")
+            except Exception as e:
+                self.logger.warning(f"Context assembly error for {src_type} #{src_id}: {e}")
+                parts.append(f"[Context error for {src_type} #{src_id}: {e}]")
+
+        return "\n\n".join(parts) if parts else "No analysis data available yet."
 
 
 auto_docs_service = AutoDocsService()

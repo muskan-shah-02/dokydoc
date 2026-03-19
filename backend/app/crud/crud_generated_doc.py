@@ -24,6 +24,8 @@ class CRUDGeneratedDoc:
         content: str,
         metadata: Optional[dict] = None,
         status: str = "completed",
+        source_ids: Optional[list] = None,
+        source_config: Optional[dict] = None,
     ) -> GeneratedDoc:
         obj = GeneratedDoc(
             tenant_id=tenant_id,
@@ -36,6 +38,8 @@ class CRUDGeneratedDoc:
             content=content,
             doc_metadata=metadata,
             status=status,
+            source_ids=source_ids,
+            source_config=source_config,
         )
         db.add(obj)
         db.commit()

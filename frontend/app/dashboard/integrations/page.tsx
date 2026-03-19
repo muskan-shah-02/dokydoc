@@ -18,6 +18,11 @@ import {
   Download,
   Slack,
   LogIn,
+  Settings2,
+  Database,
+  Zap,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -173,6 +178,80 @@ function IntegrationsContent() {
 
   // Toast
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  // JIRA deep sync config state
+  const [showJiraConfig, setShowJiraConfig] = useState(false);
+  const [jiraProjectKeys, setJiraProjectKeys] = useState<string[]>([]);
+  const [jiraKeyInput, setJiraKeyInput] = useState("");
+  const [jiraSyncFreq, setJiraSyncFreq] = useState("manual");
+  const [jiraAcField, setJiraAcField] = useState("");
+  const [jiraSavingConfig, setJiraSavingConfig] = useState(false);
+  const [jiraSyncStatus, setJiraSyncStatus] = useState<any>(null);
+  const [jiraSyncing, setJiraSyncing] = useState(false);
+
+  const fetchJiraSyncStatus = async () => {
+    try {
+      const data = (await api.get("/integrations/jira/sync/status")) as any;
+      setJiraSyncStatus(data);
+      if (data.sync_config?.project_keys) setJiraProjectKeys(data.sync_config.project_keys);
+      if (data.sync_config?.sync_frequency) setJiraSyncFreq(data.sync_config.sync_frequency);
+      if (data.sync_config?.custom_field_mappings?.acceptance_criteria)
+        setJiraAcField(data.sync_config.custom_field_mappings.acceptance_criteria);
+    } catch { /* not connected yet */ }
+  };
+
+  useEffect(() => {
+    // Fetch JIRA sync status when JIRA is connected
+    const jiraConnected = integrations.some((i) => i.provider === "jira" && i.is_active);
+    if (jiraConnected) fetchJiraSyncStatus();
+  }, [integrations]);
+
+  const addJiraProjectKey = () => {
+    const key = jiraKeyInput.trim().toUpperCase();
+    if (key && !jiraProjectKeys.includes(key)) {
+      setJiraProjectKeys([...jiraProjectKeys, key]);
+    }
+    setJiraKeyInput("");
+  };
+
+  const removeJiraProjectKey = (k: string) => {
+    setJiraProjectKeys(jiraProjectKeys.filter((p) => p !== k));
+  };
+
+  const handleSaveJiraConfig = async () => {
+    setJiraSavingConfig(true);
+    try {
+      await api.put("/integrations/jira/config", {
+        project_keys: jiraProjectKeys,
+        sync_frequency: jiraSyncFreq,
+        acceptance_criteria_field: jiraAcField || undefined,
+        include_subtasks: false,
+      });
+      setToast({ message: "Jira sync configuration saved.", type: "success" });
+      await fetchJiraSyncStatus();
+    } catch (e: any) {
+      setToast({ message: `Failed to save config: ${e?.message || "Unknown error"}`, type: "error" });
+    } finally {
+      setJiraSavingConfig(false);
+    }
+  };
+
+  const handleJiraSync = async () => {
+    setJiraSyncing(true);
+    try {
+      const result = (await api.post("/integrations/jira/sync", {})) as any;
+      setToast({
+        message: `Jira sync complete: ${result.synced} items synced, ${result.ingested_to_brain} added to Brain.`,
+        type: "success",
+      });
+      await fetchJiraSyncStatus();
+      await fetchIntegrations();
+    } catch (e: any) {
+      setToast({ message: `Sync failed: ${e?.message || "Unknown error"}`, type: "error" });
+    } finally {
+      setJiraSyncing(false);
+    }
+  };
 
   // Page browser state
   const [browsingProvider, setBrowsingProvider] = useState<string | null>(null);
@@ -462,6 +541,139 @@ function IntegrationsContent() {
               );
             })}
           </div>
+
+          {/* ── JIRA Deep Sync Config Panel ── */}
+          {providerMap["jira"] && (
+            <div className="bg-white border rounded-xl shadow-sm overflow-hidden">
+              <button
+                onClick={() => setShowJiraConfig(!showJiraConfig)}
+                className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Settings2 className="w-4 h-4 text-blue-600" />
+                  <span className="text-sm font-semibold text-gray-800">Jira Sync Configuration</span>
+                  {jiraSyncStatus?.item_count > 0 && (
+                    <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">
+                      {jiraSyncStatus.item_count} items synced
+                    </span>
+                  )}
+                  {jiraSyncStatus?.last_synced_at && (
+                    <span className="text-xs text-gray-400">
+                      Last sync: {new Date(jiraSyncStatus.last_synced_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                {showJiraConfig ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+              </button>
+
+              {showJiraConfig && (
+                <div className="px-5 pb-5 space-y-4 border-t pt-4">
+                  <p className="text-xs text-gray-500">
+                    Configure which Jira projects to sync. Once synced, epics and stories train the Brain
+                    (knowledge graph) and become available for JIRA-aware validation.
+                  </p>
+
+                  {/* Project keys */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                      Project Keys to Sync
+                    </label>
+                    <div className="flex gap-2 mb-2">
+                      <input
+                        type="text"
+                        value={jiraKeyInput}
+                        onChange={(e) => setJiraKeyInput(e.target.value.toUpperCase())}
+                        onKeyDown={(e) => { if (e.key === "Enter") addJiraProjectKey(); }}
+                        placeholder="e.g. PROJ"
+                        className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono uppercase"
+                      />
+                      <Button size="sm" variant="outline" className="h-8 text-xs" onClick={addJiraProjectKey}>
+                        <Plus className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                    {jiraProjectKeys.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {jiraProjectKeys.map((k) => (
+                          <span key={k} className="inline-flex items-center gap-1 text-xs font-mono bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
+                            {k}
+                            <button onClick={() => removeJiraProjectKey(k)} className="hover:opacity-70">
+                              <XCircle className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Sync frequency */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1.5">Sync Frequency</label>
+                    <select
+                      value={jiraSyncFreq}
+                      onChange={(e) => setJiraSyncFreq(e.target.value)}
+                      className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    >
+                      <option value="manual">Manual only</option>
+                      <option value="hourly">Every hour</option>
+                      <option value="daily">Daily</option>
+                    </select>
+                  </div>
+
+                  {/* Advanced: custom AC field */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                      Acceptance Criteria Field
+                      <span className="ml-1 text-gray-400 font-normal">(advanced — leave blank for default)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={jiraAcField}
+                      onChange={(e) => setJiraAcField(e.target.value)}
+                      placeholder="customfield_10100"
+                      className="w-full text-sm border border-gray-200 rounded-lg px-3 py-1.5 font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">
+                      The Jira custom field name that stores acceptance criteria for your stories.
+                    </p>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex gap-3 pt-1">
+                    <Button
+                      className="bg-blue-600 hover:bg-blue-700 text-xs h-8 gap-1.5"
+                      disabled={jiraProjectKeys.length === 0 || jiraSavingConfig}
+                      onClick={handleSaveJiraConfig}
+                    >
+                      {jiraSavingConfig ? (
+                        <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving…</>
+                      ) : (
+                        <><Database className="w-3.5 h-3.5" /> Save Config</>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="text-xs h-8 gap-1.5 border-blue-300 text-blue-700 hover:bg-blue-50"
+                      disabled={jiraProjectKeys.length === 0 || jiraSyncing}
+                      onClick={handleJiraSync}
+                    >
+                      {jiraSyncing ? (
+                        <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing…</>
+                      ) : (
+                        <><Zap className="w-3.5 h-3.5" /> Sync Now</>
+                      )}
+                    </Button>
+                  </div>
+
+                  {jiraSyncStatus?.sync_error && (
+                    <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                      {jiraSyncStatus.sync_error}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Page / Channel Browser */}
           {browsingProvider && (

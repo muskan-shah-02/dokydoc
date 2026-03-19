@@ -1,9 +1,10 @@
-# This is the final, updated content for your file at:
 # backend/app/api/endpoints/validation.py
+# Sprint 9: Added JIRA validation scan endpoint.
 
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, BackgroundTasks, status, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
@@ -98,6 +99,62 @@ def run_validation_scan(
     return {
         "message": f"Validation scan has been successfully started for {len(document_ids)} document(s).",
         "document_ids": document_ids
+    }
+
+
+class JiraValidationRequest(BaseModel):
+    repository_id: int
+    project_key: Optional[str] = None
+    epic_key: Optional[str] = None
+    sprint_name: Optional[str] = None
+
+
+@router.post("/run-jira-scan", status_code=status.HTTP_202_ACCEPTED)
+async def run_jira_validation_scan(
+    payload: JiraValidationRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    current_user: models.User = Depends(deps.get_current_user),
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    """
+    Sprint 9: Validate a code repository against JIRA acceptance criteria.
+
+    Fetches JIRA stories/tasks with acceptance criteria in the given scope
+    (project, epic, or sprint) and checks whether the code satisfies each one.
+
+    Results are stored as Mismatch records with category='jira_acceptance_criteria'.
+    Returns immediately with a summary once validation completes.
+    """
+    logger = validation_endpoints.logger
+    logger.info(
+        f"JIRA validation scan requested by user {current_user.id} "
+        f"(tenant={tenant_id}) for repo={payload.repository_id}"
+    )
+
+    if not payload.project_key and not payload.epic_key and not payload.sprint_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one of project_key, epic_key, or sprint_name must be provided.",
+        )
+
+    stats = await validation_service.run_jira_validation_scan(
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        repository_id=payload.repository_id,
+        project_key=payload.project_key,
+        epic_key=payload.epic_key,
+        sprint_name=payload.sprint_name,
+    )
+
+    return {
+        "message": "JIRA validation scan completed.",
+        "repository_id": payload.repository_id,
+        "scope": {
+            "project_key": payload.project_key,
+            "epic_key": payload.epic_key,
+            "sprint_name": payload.sprint_name,
+        },
+        "results": stats,
     }
 
 

@@ -10,14 +10,14 @@ import {
   TestTube,
   Database,
   Plus,
-  ChevronDown,
-  ChevronRight,
+  X,
   Download,
   Copy,
   Check,
   Sparkles,
   Clock,
   AlertCircle,
+  Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +92,7 @@ interface GeneratedDocSummary {
   source_type: string;
   source_id: number;
   source_name: string | null;
+  source_ids?: Array<{ type: string; id: number }> | null;
   doc_type: string;
   title: string;
   status: string;
@@ -112,8 +113,9 @@ interface SourceItem {
 // ----- Main Page -----
 
 export default function AutoDocsPage() {
-  const [sources, setSources] = useState<SourceItem[]>([]);
-  const [selectedSource, setSelectedSource] = useState<SourceItem | null>(null);
+  const [allSources, setAllSources] = useState<SourceItem[]>([]);
+  // Multi-source selection
+  const [selectedSources, setSelectedSources] = useState<SourceItem[]>([]);
   const [selectedDocType, setSelectedDocType] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [history, setHistory] = useState<GeneratedDocSummary[]>([]);
@@ -121,8 +123,8 @@ export default function AutoDocsPage() {
   const [viewingDoc, setViewingDoc] = useState<GeneratedDocFull | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<number | null>(null);
-  // Diagram view toggle: "rendered" = MarkdownRenderer, "diagram" = MermaidDiagram
   const [diagramView, setDiagramView] = useState<"rendered" | "diagram">("rendered");
+  const [showSourcePicker, setShowSourcePicker] = useState(false);
 
   // Fetch available sources (documents + repositories)
   useEffect(() => {
@@ -138,12 +140,11 @@ export default function AutoDocsPage() {
         const repoItems: SourceItem[] = (Array.isArray(repos) ? repos : repos.items || repos.repositories || []).slice(0, 50).map(
           (r: any) => ({ id: r.id, name: r.name || `Repository #${r.id}`, type: "repository" as const })
         );
-        setSources([...docItems, ...repoItems]);
+        setAllSources([...docItems, ...repoItems]);
       })
       .catch(console.error);
   }, []);
 
-  // Fetch generation history
   const fetchHistory = () => {
     setHistoryLoading(true);
     (api.get("/auto-docs/") as Promise<any>)
@@ -154,20 +155,35 @@ export default function AutoDocsPage() {
 
   useEffect(() => { fetchHistory(); }, []);
 
+  const toggleSource = (src: SourceItem) => {
+    setSelectedSources((prev) => {
+      const exists = prev.find((s) => s.type === src.type && s.id === src.id);
+      if (exists) return prev.filter((s) => !(s.type === src.type && s.id === src.id));
+      return [...prev, src];
+    });
+  };
+
+  const removeSource = (src: SourceItem) => {
+    setSelectedSources((prev) => prev.filter((s) => !(s.type === src.type && s.id === src.id)));
+  };
+
+  const isSelected = (src: SourceItem) =>
+    selectedSources.some((s) => s.type === src.type && s.id === src.id);
+
   const handleGenerate = async () => {
-    if (!selectedSource || !selectedDocType) return;
+    if (selectedSources.length === 0 || !selectedDocType) return;
     setGenerating(true);
     try {
-      const data = await api.post("/auto-docs/generate", {
-        source_type: selectedSource.type,
-        source_id: selectedSource.id,
+      const payload = {
+        sources: selectedSources.map((s) => ({ type: s.type, id: s.id })),
         doc_type: selectedDocType,
-      }) as GeneratedDocFull;
+      };
+      const data = await api.post("/auto-docs/generate-multi", payload) as GeneratedDocFull;
       setViewingDoc(data);
       setDiagramView("rendered");
       fetchHistory();
     } catch {
-      alert("Generation failed. Please check that this source has been analyzed.");
+      alert("Generation failed. Please check that your selected sources have been analyzed.");
     } finally {
       setGenerating(false);
     }
@@ -192,7 +208,6 @@ export default function AutoDocsPage() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Extract first mermaid code block from content
   const extractMermaid = (content: string): string | null => {
     const match = content.match(/```mermaid\n([\s\S]*?)```/);
     return match ? match[1].trim() : null;
@@ -208,6 +223,9 @@ export default function AutoDocsPage() {
     URL.revokeObjectURL(url);
   };
 
+  const docSources = allSources.filter((s) => s.type === "document");
+  const repoSources = allSources.filter((s) => s.type === "repository");
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -217,7 +235,9 @@ export default function AutoDocsPage() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Auto Docs</h1>
-          <p className="text-sm text-gray-500">AI-generated documentation from your analyzed sources</p>
+          <p className="text-sm text-gray-500">
+            AI-generated documentation from one or more analyzed sources
+          </p>
         </div>
       </div>
 
@@ -227,44 +247,111 @@ export default function AutoDocsPage() {
           <div className="bg-white border rounded-xl p-5 shadow-sm space-y-4">
             <h2 className="text-sm font-semibold text-gray-800">Generate New Doc</h2>
 
-            {/* Source selector */}
+            {/* Multi-source selector */}
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">Source</label>
-              <select
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
-                value={selectedSource ? `${selectedSource.type}:${selectedSource.id}` : ""}
-                onChange={(e) => {
-                  const [type, idStr] = e.target.value.split(":");
-                  const item = sources.find(
-                    (s) => s.type === type && s.id === parseInt(idStr, 10)
-                  );
-                  setSelectedSource(item || null);
-                }}
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                Sources
+                <span className="ml-1 text-gray-400 font-normal">(select one or more)</span>
+              </label>
+
+              {/* Selected chips */}
+              {selectedSources.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {selectedSources.map((s) => (
+                    <span
+                      key={`${s.type}:${s.id}`}
+                      className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
+                        s.type === "document"
+                          ? "bg-blue-100 text-blue-700"
+                          : "bg-green-100 text-green-700"
+                      }`}
+                    >
+                      {s.type === "document" ? (
+                        <FileText className="w-3 h-3" />
+                      ) : (
+                        <Database className="w-3 h-3" />
+                      )}
+                      <span className="max-w-[120px] truncate">{s.name}</span>
+                      <button onClick={() => removeSource(s)} className="hover:opacity-70">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Add source button */}
+              <button
+                onClick={() => setShowSourcePicker(!showSourcePicker)}
+                className="w-full flex items-center justify-center gap-2 text-sm border border-dashed border-gray-300 rounded-lg px-3 py-2 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
               >
-                <option value="">Select a source…</option>
-                {sources.filter((s) => s.type === "document").length > 0 && (
-                  <optgroup label="Documents">
-                    {sources
-                      .filter((s) => s.type === "document")
-                      .map((s) => (
-                        <option key={`document:${s.id}`} value={`document:${s.id}`}>
-                          {s.name}
-                        </option>
+                <Plus className="w-4 h-4" />
+                {selectedSources.length === 0 ? "Add source" : "Add another source"}
+              </button>
+
+              {/* Source picker dropdown */}
+              {showSourcePicker && (
+                <div className="mt-2 border rounded-lg bg-white shadow-lg max-h-56 overflow-y-auto">
+                  {docSources.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 sticky top-0">
+                        Documents
+                      </p>
+                      {docSources.map((s) => (
+                        <button
+                          key={`doc:${s.id}`}
+                          onClick={() => {
+                            toggleSource(s);
+                            setShowSourcePicker(false);
+                          }}
+                          className={`w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${
+                            isSelected(s) ? "bg-blue-50 text-blue-700" : "text-gray-700"
+                          }`}
+                        >
+                          <FileText className="w-3.5 h-3.5 flex-shrink-0 text-blue-400" />
+                          <span className="truncate">{s.name}</span>
+                          {isSelected(s) && <Check className="w-3.5 h-3.5 ml-auto text-blue-600 flex-shrink-0" />}
+                        </button>
                       ))}
-                  </optgroup>
-                )}
-                {sources.filter((s) => s.type === "repository").length > 0 && (
-                  <optgroup label="Repositories">
-                    {sources
-                      .filter((s) => s.type === "repository")
-                      .map((s) => (
-                        <option key={`repository:${s.id}`} value={`repository:${s.id}`}>
-                          {s.name}
-                        </option>
+                    </div>
+                  )}
+                  {repoSources.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 sticky top-0">
+                        Repositories
+                      </p>
+                      {repoSources.map((s) => (
+                        <button
+                          key={`repo:${s.id}`}
+                          onClick={() => {
+                            toggleSource(s);
+                            setShowSourcePicker(false);
+                          }}
+                          className={`w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-green-50 transition-colors ${
+                            isSelected(s) ? "bg-green-50 text-green-700" : "text-gray-700"
+                          }`}
+                        >
+                          <Database className="w-3.5 h-3.5 flex-shrink-0 text-green-500" />
+                          <span className="truncate">{s.name}</span>
+                          {isSelected(s) && <Check className="w-3.5 h-3.5 ml-auto text-green-600 flex-shrink-0" />}
+                        </button>
                       ))}
-                  </optgroup>
-                )}
-              </select>
+                    </div>
+                  )}
+                  {docSources.length === 0 && repoSources.length === 0 && (
+                    <p className="text-xs text-gray-400 px-3 py-3">
+                      No analyzed sources found. Upload documents or connect a repository first.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {selectedSources.length > 1 && (
+                <p className="text-xs text-blue-600 mt-1.5 flex items-center gap-1">
+                  <Layers className="w-3 h-3" />
+                  {selectedSources.length} sources will be combined for richer context
+                </p>
+              )}
             </div>
 
             {/* Doc type selector */}
@@ -301,7 +388,7 @@ export default function AutoDocsPage() {
 
             <Button
               className="w-full bg-blue-600 hover:bg-blue-700"
-              disabled={!selectedSource || !selectedDocType || generating}
+              disabled={selectedSources.length === 0 || !selectedDocType || generating}
               onClick={handleGenerate}
             >
               {generating ? (
@@ -319,7 +406,7 @@ export default function AutoDocsPage() {
 
             {generating && (
               <p className="text-xs text-gray-500 text-center">
-                This may take 15–30 seconds for complex sources…
+                This may take 15–45 seconds for multiple sources…
               </p>
             )}
           </div>
@@ -342,11 +429,17 @@ export default function AutoDocsPage() {
                     className="w-full text-left flex items-start gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors"
                   >
                     <FileText className="w-3.5 h-3.5 text-gray-400 mt-0.5 flex-shrink-0" />
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="text-xs font-medium text-gray-700 truncate">{h.title}</p>
                       <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
                         <Clock className="w-3 h-3" />
                         {new Date(h.created_at).toLocaleDateString()}
+                        {h.source_type === "multi" && (
+                          <span className="ml-1 text-blue-400 flex items-center gap-0.5">
+                            <Layers className="w-3 h-3" />
+                            multi
+                          </span>
+                        )}
                       </p>
                     </div>
                     {h.status === "failed" && (
@@ -371,8 +464,8 @@ export default function AutoDocsPage() {
           {!viewLoading && !viewingDoc && (
             <div className="flex flex-col items-center justify-center h-64 bg-white border rounded-xl text-gray-400">
               <Sparkles className="w-12 h-12 mb-3" />
-              <p className="text-sm font-medium">Select a source and doc type, then click Generate</p>
-              <p className="text-xs mt-1">Or click a recent generation from the history panel</p>
+              <p className="text-sm font-medium">Add sources and select a doc type, then click Generate</p>
+              <p className="text-xs mt-1">Combine documents + repositories for richer output</p>
             </div>
           )}
 
@@ -380,85 +473,96 @@ export default function AutoDocsPage() {
             const mermaidSyntax = extractMermaid(viewingDoc.content ?? "");
             const hasMermaid = !!mermaidSyntax;
             return (
-            <div className="bg-white border rounded-xl shadow-sm overflow-hidden flex flex-col h-full">
-              {/* Viewer header */}
-              <div className="flex items-center justify-between px-5 py-3 border-b bg-gray-50">
-                <div>
-                  <h2 className="text-sm font-semibold text-gray-900 truncate max-w-lg">{viewingDoc.title}</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {viewingDoc.source_name && <span>{viewingDoc.source_name} · </span>}
-                    {viewingDoc.doc_type} · {new Date(viewingDoc.created_at).toLocaleString()}
-                    {viewingDoc.status === "failed" && (
-                      <span className="text-red-500 ml-2">⚠ Generation failed</span>
+              <div className="bg-white border rounded-xl shadow-sm overflow-hidden flex flex-col h-full">
+                {/* Viewer header */}
+                <div className="flex items-center justify-between px-5 py-3 border-b bg-gray-50">
+                  <div>
+                    <h2 className="text-sm font-semibold text-gray-900 truncate max-w-lg">{viewingDoc.title}</h2>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {viewingDoc.source_name && <span>{viewingDoc.source_name} · </span>}
+                      {viewingDoc.doc_type} · {new Date(viewingDoc.created_at).toLocaleString()}
+                      {viewingDoc.source_type === "multi" && (
+                        <span className="ml-2 text-blue-500 font-medium flex items-center gap-0.5 inline-flex">
+                          <Layers className="w-3 h-3" />
+                          {(viewingDoc.source_ids || []).length} sources
+                        </span>
+                      )}
+                      {viewingDoc.status === "failed" && (
+                        <span className="text-red-500 ml-2">⚠ Generation failed</span>
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {hasMermaid && (
+                      <div className="flex rounded-md border overflow-hidden text-xs">
+                        <button
+                          onClick={() => setDiagramView("rendered")}
+                          className={`px-3 py-1.5 font-medium transition-colors ${diagramView === "rendered" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                        >
+                          Code
+                        </button>
+                        <button
+                          onClick={() => setDiagramView("diagram")}
+                          className={`px-3 py-1.5 font-medium transition-colors border-l ${diagramView === "diagram" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+                        >
+                          View Diagram
+                        </button>
+                      </div>
                     )}
-                  </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => handleCopy(viewingDoc.content, viewingDoc.id)}
+                    >
+                      {copiedId === viewingDoc.id ? (
+                        <><Check className="w-3.5 h-3.5 text-green-600" /> Copied</>
+                      ) : (
+                        <><Copy className="w-3.5 h-3.5" /> Copy</>
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
+                      onClick={() => handleDownload(viewingDoc)}
+                    >
+                      <Download className="w-3.5 h-3.5" /> Download .md
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {/* Code / Diagram toggle — only shown when mermaid content exists */}
-                  {hasMermaid && (
-                    <div className="flex rounded-md border overflow-hidden text-xs">
-                      <button
-                        onClick={() => setDiagramView("rendered")}
-                        className={`px-3 py-1.5 font-medium transition-colors ${diagramView === "rendered" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-                      >
-                        Code
-                      </button>
-                      <button
-                        onClick={() => setDiagramView("diagram")}
-                        className={`px-3 py-1.5 font-medium transition-colors border-l ${diagramView === "diagram" ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
-                      >
-                        View Diagram
-                      </button>
-                    </div>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs gap-1.5"
-                    onClick={() => handleCopy(viewingDoc.content, viewingDoc.id)}
-                  >
-                    {copiedId === viewingDoc.id ? (
-                      <><Check className="w-3.5 h-3.5 text-green-600" /> Copied</>
-                    ) : (
-                      <><Copy className="w-3.5 h-3.5" /> Copy</>
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs gap-1.5"
-                    onClick={() => handleDownload(viewingDoc)}
-                  >
-                    <Download className="w-3.5 h-3.5" /> Download .md
-                  </Button>
-                </div>
-              </div>
 
-              {/* Content */}
-              <div className="flex-1 overflow-y-auto p-6 max-h-[calc(100vh-280px)]">
-                {viewingDoc.content ? (
-                  hasMermaid && diagramView === "diagram" ? (
-                    <MermaidDiagram
-                      syntax={mermaidSyntax!}
-                      title={viewingDoc.title}
-                      className="w-full"
-                    />
+                {/* Content */}
+                <div className="flex-1 overflow-y-auto p-6 max-h-[calc(100vh-280px)]">
+                  {viewingDoc.content ? (
+                    hasMermaid && diagramView === "diagram" ? (
+                      <MermaidDiagram
+                        syntax={mermaidSyntax!}
+                        title={viewingDoc.title}
+                        className="w-full"
+                      />
+                    ) : (
+                      <MarkdownRenderer content={viewingDoc.content} />
+                    )
                   ) : (
-                    <MarkdownRenderer content={viewingDoc.content} />
-                  )
-                ) : (
-                  <p className="text-sm text-gray-400 italic">No content generated.</p>
+                    <p className="text-sm text-gray-400 italic">No content generated.</p>
+                  )}
+                </div>
+
+                {/* Token usage footer */}
+                {viewingDoc.metadata && (viewingDoc.metadata.input_tokens != null || viewingDoc.metadata.output_tokens != null) && (
+                  <div className="px-5 py-2 border-t bg-gray-50 flex items-center gap-4 text-xs text-gray-500">
+                    <span>Input: {String(viewingDoc.metadata.input_tokens ?? 0)} tokens</span>
+                    <span>Output: {String(viewingDoc.metadata.output_tokens ?? 0)} tokens</span>
+                    {viewingDoc.metadata.source_count != null && (
+                      <span className="text-blue-500">
+                        <Layers className="w-3 h-3 inline mr-0.5" />
+                        {String(viewingDoc.metadata.source_count)} sources combined
+                      </span>
+                    )}
+                  </div>
                 )}
               </div>
-
-              {/* Token usage footer */}
-              {viewingDoc.metadata && (viewingDoc.metadata.input_tokens != null || viewingDoc.metadata.output_tokens != null) && (
-                <div className="px-5 py-2 border-t bg-gray-50 flex items-center gap-4 text-xs text-gray-500">
-                  <span>Input: {String(viewingDoc.metadata.input_tokens ?? 0)} tokens</span>
-                  <span>Output: {String(viewingDoc.metadata.output_tokens ?? 0)} tokens</span>
-                </div>
-              )}
-            </div>
             );
           })()}
         </div>

@@ -2,12 +2,13 @@
 IntegrationConfig model — stores OAuth credentials and settings for
 third-party documentation integrations.
 Sprint 8: Documentation Integrations (Module 11).
+Sprint 9: Deep JIRA sync support.
 
-provider values: notion, jira, confluence, sharepoint
+provider values: notion, jira, confluence, sharepoint, slack
 """
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base_class import Base
@@ -37,6 +38,18 @@ class IntegrationConfig(Base):
     # Jira-specific
     base_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # e.g. https://mycompany.atlassian.net
+
+    # Jira deep-sync config (Sprint 9) — stored as JSON, fully tenant-configurable
+    # Example: {
+    #   "project_keys": ["PROJ", "BE"],
+    #   "sync_frequency": "hourly",            # manual | hourly | daily
+    #   "custom_field_mappings": {             # maps AC field name per Jira instance
+    #     "acceptance_criteria": "customfield_10100"
+    #   },
+    #   "include_subtasks": true,
+    #   "webhook_secret": "abc123"             # HMAC secret for incoming Jira webhooks
+    # }
+    sync_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Connection state
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

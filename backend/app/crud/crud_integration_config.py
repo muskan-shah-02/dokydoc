@@ -84,6 +84,29 @@ class CRUDIntegrationConfig:
             db.refresh(obj)
         return obj
 
+    def mark_synced(
+        self, db: Session, *, config_id: int, tenant_id: int
+    ) -> Optional[IntegrationConfig]:
+        """Update last_synced_at and clear sync_error after a successful sync."""
+        obj = self.get_by_id(db, config_id=config_id, tenant_id=tenant_id)
+        if obj:
+            obj.last_synced_at = datetime.utcnow()
+            obj.sync_error = None
+            db.commit()
+            db.refresh(obj)
+        return obj
+
+    def save_sync_config(
+        self, db: Session, *, config_id: int, tenant_id: int, sync_config: dict
+    ) -> Optional[IntegrationConfig]:
+        """Persist the sync_config JSON for a given integration."""
+        obj = self.get_by_id(db, config_id=config_id, tenant_id=tenant_id)
+        if obj:
+            obj.sync_config = sync_config
+            db.commit()
+            db.refresh(obj)
+        return obj
+
     def disconnect(
         self, db: Session, *, config_id: int, tenant_id: int
     ) -> Optional[IntegrationConfig]:

@@ -2,7 +2,7 @@
 
 import asyncio
 import httpx
-from typing import List
+from typing import List, Optional
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -241,5 +241,192 @@ class ValidationService(LoggerMixin):
                 except Exception as e:
                     self.logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
                     raise
+
+    async def run_jira_validation_scan(
+        self,
+        *,
+        tenant_id: int,
+        user_id: int,
+        repository_id: int,
+        project_key: Optional[str] = None,
+        epic_key: Optional[str] = None,
+        sprint_name: Optional[str] = None,
+    ) -> dict:
+        """
+        Sprint 9: Validate code against JIRA acceptance criteria.
+
+        For each story/task with acceptance criteria in the given scope,
+        asks Gemini whether the linked code satisfies each criterion.
+        Stores results as Mismatch records with mismatch_type='jira_acceptance_criteria'.
+
+        Returns summary: {checked, satisfied, partial, missing, errors}
+        """
+        stats = {"checked": 0, "satisfied": 0, "partial": 0, "missing": 0, "errors": []}
+
+        async with ValidationService.get_db_session() as db:
+            try:
+                from app.crud.crud_jira_item import crud_jira_item
+                from app.models.code_component import CodeComponent
+
+                # Fetch JiraItems in scope
+                jira_items = crud_jira_item.get_with_acceptance_criteria(
+                    db,
+                    tenant_id=tenant_id,
+                    project_key=project_key,
+                    epic_key=epic_key,
+                    sprint_name=sprint_name,
+                )
+
+                if not jira_items:
+                    self.logger.info(
+                        f"No JIRA items with acceptance criteria found for "
+                        f"project={project_key} epic={epic_key} sprint={sprint_name}"
+                    )
+                    return stats
+
+                # Fetch code components for the repository
+                components = (
+                    db.query(CodeComponent)
+                    .filter(
+                        CodeComponent.repository_id == repository_id,
+                        CodeComponent.tenant_id == tenant_id,
+                    )
+                    .limit(50)
+                    .all()
+                )
+
+                # Build a compact code summary for context
+                code_summary_parts = []
+                for c in components[:20]:
+                    summary = (getattr(c, "summary", None) or "")[:300]
+                    code_summary_parts.append(f"- {c.location}: {summary}")
+                code_context = "\n".join(code_summary_parts) if code_summary_parts else "No code components available."
+
+                # Validate each item's acceptance criteria
+                for item in jira_items:
+                    for criterion in (item.acceptance_criteria or []):
+                        if not criterion or not criterion.strip():
+                            continue
+                        try:
+                            verdict, evidence = await self._check_jira_criterion(
+                                criterion=criterion,
+                                jira_key=item.external_key,
+                                jira_title=item.title,
+                                code_context=code_context,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                            )
+                            stats["checked"] += 1
+                            stats[verdict] = stats.get(verdict, 0) + 1
+
+                            # Store as a Mismatch record
+                            severity = "info" if verdict == "satisfied" else ("warning" if verdict == "partial" else "critical")
+                            mismatch = models.Mismatch(
+                                owner_id=user_id,
+                                tenant_id=tenant_id,
+                                description=f"[{item.external_key}] {criterion[:300]}",
+                                category="jira_acceptance_criteria",
+                                severity=severity,
+                                status="open" if verdict != "satisfied" else "resolved",
+                                details={
+                                    "jira_key": item.external_key,
+                                    "jira_title": item.title,
+                                    "criterion": criterion,
+                                    "verdict": verdict,
+                                    "evidence": evidence,
+                                    "repository_id": repository_id,
+                                },
+                            ) if hasattr(models, "Mismatch") else None
+
+                            if mismatch:
+                                db.add(mismatch)
+
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Criterion check failed [{item.external_key}]: {e}"
+                            )
+                            stats["errors"].append(f"{item.external_key}: {str(e)[:100]}")
+
+                db.commit()
+                self.logger.info(
+                    f"JIRA validation complete — tenant={tenant_id} "
+                    f"checked={stats['checked']} satisfied={stats['satisfied']} "
+                    f"partial={stats['partial']} missing={stats['missing']}"
+                )
+
+            except Exception as e:
+                self.logger.error(f"JIRA validation scan failed: {e}", exc_info=True)
+                stats["errors"].append(str(e)[:200])
+
+        return stats
+
+    async def _check_jira_criterion(
+        self,
+        *,
+        criterion: str,
+        jira_key: str,
+        jira_title: str,
+        code_context: str,
+        tenant_id: int,
+        user_id: int,
+    ) -> tuple[str, str]:
+        """
+        Ask Gemini whether the given code context satisfies a single acceptance criterion.
+        Returns (verdict, evidence) where verdict is 'satisfied'|'partial'|'missing'.
+        """
+        prompt = f"""You are a QA validation engine. Determine if the codebase satisfies a JIRA acceptance criterion.
+
+JIRA Ticket: {jira_key} — {jira_title}
+
+Acceptance Criterion:
+"{criterion}"
+
+Code Components Summary:
+{code_context[:4000]}
+
+Answer in JSON with exactly this structure:
+{{
+  "verdict": "satisfied" | "partial" | "missing",
+  "evidence": "<one sentence explaining your reasoning>"
+}}
+
+Rules:
+- "satisfied": The code clearly implements or handles this criterion.
+- "partial": Some evidence exists but implementation appears incomplete.
+- "missing": No evidence this criterion is addressed in the code.
+"""
+        from app.services.ai.gemini import gemini_service
+        async with GEMINI_API_SEMAPHORE:
+            response = await gemini_service.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation="jira_validation",
+            )
+
+        text = (response.text or "").strip()
+        # Parse JSON response
+        import json, re
+        try:
+            # Extract JSON from response
+            match = re.search(r'\{[^{}]*"verdict"[^{}]*\}', text, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                verdict = data.get("verdict", "missing")
+                if verdict not in ("satisfied", "partial", "missing"):
+                    verdict = "missing"
+                evidence = data.get("evidence", "")
+                return verdict, evidence
+        except Exception:
+            pass
+
+        # Fallback: keyword scan
+        lower = text.lower()
+        if "satisfied" in lower:
+            return "satisfied", text[:200]
+        if "partial" in lower:
+            return "partial", text[:200]
+        return "missing", text[:200]
+
 
 validation_service = ValidationService()

@@ -1,6 +1,7 @@
 """
 Documentation Integrations API
 Sprint 8: Module 11 — Notion, Jira, Confluence, SharePoint, Slack.
+Sprint 9: Deep Jira sync + JIRA-aware validation support.
 
 Manual token connect (Notion):
   POST   /integrations/connect                — Save access token for a provider
@@ -8,6 +9,16 @@ Manual token connect (Notion):
 Jira OAuth 2.0 (Atlassian):
   GET    /integrations/jira/oauth/authorize   — Get Atlassian OAuth URL
   GET    /integrations/jira/oauth/callback    — Exchange code, store tokens, redirect to frontend
+
+Jira Deep Sync (Sprint 9):
+  PUT    /integrations/jira/config            — Save sync config (project keys, field mappings)
+  GET    /integrations/jira/projects          — List accessible Jira projects
+  GET    /integrations/jira/epics             — List epics for a project
+  GET    /integrations/jira/sprints           — List sprints for a project
+  GET    /integrations/jira/items             — List synced JiraItems (with filters)
+  POST   /integrations/jira/sync             — Trigger full background sync
+  GET    /integrations/jira/sync/status       — Sync status + counts
+  POST   /integrations/jira/webhook           — Receive Jira webhook events
 
 Slack OAuth 2.0:
   GET    /integrations/slack/oauth/authorize  — Get Slack OAuth URL
@@ -293,6 +304,293 @@ async def jira_oauth_callback(
     return RedirectResponse(
         url=f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_success=jira&workspace={workspace_name}"
     )
+
+
+# ============================================================
+# Jira Deep Sync endpoints (Sprint 9)
+# ============================================================
+
+
+class JiraSyncConfigRequest(BaseModel):
+    project_keys: list[str] = Field(..., min_length=1, description="Jira project keys to sync, e.g. ['PROJ', 'BE']")
+    sync_frequency: str = Field("manual", pattern="^(manual|hourly|daily)$")
+    acceptance_criteria_field: Optional[str] = Field(
+        None,
+        description="Custom field name for acceptance criteria (default: customfield_10100)"
+    )
+    include_subtasks: bool = False
+
+
+@router.put("/jira/config")
+def save_jira_sync_config(
+    payload: JiraSyncConfigRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Save Jira sync configuration (project keys, field mappings, sync frequency).
+    No hardcoding — all settings stored per-tenant in IntegrationConfig.sync_config.
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active:
+        raise HTTPException(status_code=404, detail="No active Jira integration. Please connect first.")
+
+    sync_config = {
+        "project_keys": payload.project_keys,
+        "sync_frequency": payload.sync_frequency,
+        "include_subtasks": payload.include_subtasks,
+    }
+    if payload.acceptance_criteria_field:
+        sync_config["custom_field_mappings"] = {
+            "acceptance_criteria": payload.acceptance_criteria_field
+        }
+
+    updated = crud_integration_config.save_sync_config(
+        db, config_id=config.id, tenant_id=tenant_id, sync_config=sync_config
+    )
+    return {"status": "saved", "sync_config": updated.sync_config}
+
+
+@router.get("/jira/projects")
+async def list_jira_projects(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """List all Jira projects accessible with the connected OAuth token."""
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    from app.services.jira_sync_service import jira_sync_service
+    try:
+        projects = await jira_sync_service.fetch_projects(
+            token=config.access_token, base_url=config.base_url or ""
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Jira API error: {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch projects: {str(e)}")
+
+    return {"projects": projects, "count": len(projects)}
+
+
+@router.get("/jira/epics")
+async def list_jira_epics(
+    project_key: str = Query(..., description="Jira project key, e.g. PROJ"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """List epics for a Jira project."""
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    from app.services.jira_sync_service import jira_sync_service
+    try:
+        epics = await jira_sync_service.fetch_epics(
+            token=config.access_token, base_url=config.base_url or "", project_key=project_key
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch epics: {str(e)}")
+
+    return {"epics": epics, "project_key": project_key}
+
+
+@router.get("/jira/sprints")
+async def list_jira_sprints(
+    project_key: str = Query(..., description="Jira project key"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """List active/recent sprints for a Jira project."""
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    from app.services.jira_sync_service import jira_sync_service
+    try:
+        sprints = await jira_sync_service.fetch_sprints(
+            token=config.access_token, base_url=config.base_url or "", project_key=project_key
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch sprints: {str(e)}")
+
+    return {"sprints": sprints, "project_key": project_key}
+
+
+@router.get("/jira/items")
+def list_jira_items(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    project_key: Optional[str] = Query(None),
+    item_type: Optional[str] = Query(None, description="epic|story|task|bug"),
+    epic_key: Optional[str] = Query(None),
+    sprint_name: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+) -> Any:
+    """List synced JiraItems for this tenant with optional filters."""
+    from app.crud.crud_jira_item import crud_jira_item
+    items = crud_jira_item.get_multi(
+        db,
+        tenant_id=tenant_id,
+        item_type=item_type,
+        project_key=project_key,
+        epic_key=epic_key,
+        sprint_name=sprint_name,
+        skip=skip,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "id": i.id,
+                "external_key": i.external_key,
+                "project_key": i.project_key,
+                "item_type": i.item_type,
+                "title": i.title,
+                "status": i.status,
+                "priority": i.priority,
+                "assignee": i.assignee,
+                "sprint_name": i.sprint_name,
+                "epic_key": i.epic_key,
+                "has_acceptance_criteria": bool(i.acceptance_criteria),
+                "synced_at": i.synced_at.isoformat() if i.synced_at else None,
+            }
+            for i in items
+        ],
+        "count": len(items),
+    }
+
+
+@router.post("/jira/sync", status_code=202)
+async def trigger_jira_sync(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Trigger a full Jira sync for this tenant.
+    Fetches all configured projects and ingests them into the Brain.
+    Runs synchronously (returns when done) — move to Celery for large projects.
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    if not (config.sync_config or {}).get("project_keys"):
+        raise HTTPException(
+            status_code=400,
+            detail="No project_keys configured. Save sync config first via PUT /integrations/jira/config."
+        )
+
+    from app.services.jira_sync_service import jira_sync_service
+    try:
+        stats = await jira_sync_service.sync_tenant(
+            db,
+            tenant_id=tenant_id,
+            integration_config_id=config.id,
+        )
+    except Exception as e:
+        crud_integration_config.mark_error(db, config_id=config.id, tenant_id=tenant_id, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Sync failed: {str(e)}")
+
+    return {
+        "status": "completed",
+        "synced": stats.get("synced", 0),
+        "ingested_to_brain": stats.get("ingested", 0),
+        "errors": stats.get("errors", []),
+    }
+
+
+@router.get("/jira/sync/status")
+def get_jira_sync_status(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Return sync status: last synced time, item count, errors."""
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config:
+        raise HTTPException(status_code=404, detail="No Jira integration found.")
+
+    from app.crud.crud_jira_item import crud_jira_item
+    item_count = crud_jira_item.count_by_tenant(
+        db, tenant_id=tenant_id, integration_config_id=config.id
+    ) if config.is_active else 0
+
+    return {
+        "is_active": config.is_active,
+        "last_synced_at": config.last_synced_at.isoformat() if config.last_synced_at else None,
+        "sync_error": config.sync_error,
+        "item_count": item_count,
+        "sync_config": config.sync_config or {},
+    }
+
+
+@router.post("/jira/webhook", status_code=200)
+async def jira_webhook(
+    request: Any,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    Receive Jira webhook events for real-time sync.
+    Verifies HMAC signature using sync_config.webhook_secret.
+    """
+    from fastapi import Request
+    body_bytes = await request.body() if hasattr(request, "body") else b""
+    payload = await request.json() if hasattr(request, "json") else {}
+
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active:
+        return {"status": "ignored"}
+
+    webhook_secret = (config.sync_config or {}).get("webhook_secret")
+    if webhook_secret:
+        sig_header = ""
+        if hasattr(request, "headers"):
+            sig_header = request.headers.get("x-hub-signature-256", "")
+        expected_sig = "sha256=" + hmac.new(
+            webhook_secret.encode(), body_bytes, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig_header, expected_sig):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Re-sync the changed issue
+    issue_key = (payload.get("issue") or {}).get("key")
+    if issue_key:
+        from app.services.jira_sync_service import jira_sync_service
+        try:
+            items = await jira_sync_service._fetch_project_issues(
+                token=config.access_token or "",
+                base_url=config.base_url or "",
+                project_key=issue_key.rsplit("-", 1)[0],
+                ac_field=(config.sync_config or {}).get("custom_field_mappings", {}).get(
+                    "acceptance_criteria", "customfield_10100"
+                ),
+                include_subtasks=(config.sync_config or {}).get("include_subtasks", False),
+            )
+            for issue_data in items:
+                if issue_data["external_key"] == issue_key:
+                    from app.crud.crud_jira_item import crud_jira_item
+                    crud_jira_item.upsert_by_key(
+                        db,
+                        tenant_id=tenant_id,
+                        integration_config_id=config.id,
+                        external_key=issue_key,
+                        data=issue_data,
+                    )
+                    break
+        except Exception as e:
+            logger.warning(f"Webhook re-sync failed for {issue_key}: {e}")
+
+    return {"status": "processed", "issue_key": issue_key}
 
 
 # ============================================================

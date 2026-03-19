@@ -1,10 +1,12 @@
 """
 Auto Docs API Endpoints
 Sprint 8: AI-powered documentation generation (Module 12).
+Sprint 9: Multi-source generation.
 
-  POST /auto-docs/generate     — Generate a documentation artifact
-  GET  /auto-docs/             — List generated docs for current tenant
-  GET  /auto-docs/{id}         — Get a single generated doc
+  POST /auto-docs/generate        — Generate from a single source (document or repository)
+  POST /auto-docs/generate-multi  — Generate from multiple combined sources
+  GET  /auto-docs/                — List generated docs for current tenant
+  GET  /auto-docs/{id}            — Get a single generated doc
 """
 import asyncio
 from typing import Any, Optional
@@ -29,6 +31,18 @@ router = APIRouter()
 class GenerateDocRequest(BaseModel):
     source_type: str = Field(..., pattern="^(document|repository)$")
     source_id: int
+    doc_type: str = Field(..., description=(
+        "component_spec | architecture_diagram | api_summary | brd | test_cases | data_models"
+    ))
+
+
+class SourceEntry(BaseModel):
+    type: str = Field(..., pattern="^(document|repository)$")
+    id: int
+
+
+class GenerateMultiRequest(BaseModel):
+    sources: list[SourceEntry] = Field(..., min_length=1, description="One or more sources to combine")
     doc_type: str = Field(..., description=(
         "component_spec | architecture_diagram | api_summary | brd | test_cases | data_models"
     ))
@@ -104,6 +118,76 @@ async def generate_doc(
         "source_type": obj.source_type,
         "source_id": obj.source_id,
         "source_name": obj.source_name,
+        "doc_type": obj.doc_type,
+        "title": obj.title,
+        "content": obj.content,
+        "metadata": obj.doc_metadata,
+        "status": obj.status,
+        "created_at": obj.created_at.isoformat(),
+    }
+
+
+@router.post("/generate-multi", status_code=201)
+async def generate_doc_multi(
+    payload: GenerateMultiRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Generate a documentation artifact from multiple combined sources.
+    Accepts 1–N documents and/or repositories as inputs; the AI merges all context.
+    """
+    if payload.doc_type not in auto_docs_service.SUPPORTED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown doc_type. Supported: {auto_docs_service.SUPPORTED_TYPES}",
+        )
+
+    sources = [{"type": s.type, "id": s.id} for s in payload.sources]
+
+    try:
+        result = await auto_docs_service.generate_multi(
+            db,
+            doc_type=payload.doc_type,
+            sources=sources,
+            tenant_id=tenant_id,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # If only one source, use its type/id for backward compat; otherwise "multi"/0
+    if len(sources) == 1:
+        src_type = sources[0]["type"]
+        src_id = sources[0]["id"]
+    else:
+        src_type = "multi"
+        src_id = 0
+
+    obj = crud_generated_doc.create(
+        db,
+        tenant_id=tenant_id,
+        user_id=current_user.id,
+        source_type=src_type,
+        source_id=src_id,
+        source_name=result.get("source_name"),
+        doc_type=payload.doc_type,
+        title=result["title"],
+        content=result["content"],
+        metadata=result.get("metadata"),
+        status=result["status"],
+        source_ids=result.get("source_ids"),
+    )
+
+    return {
+        "id": obj.id,
+        "tenant_id": obj.tenant_id,
+        "user_id": obj.user_id,
+        "source_type": obj.source_type,
+        "source_id": obj.source_id,
+        "source_name": obj.source_name,
+        "source_ids": obj.source_ids,
         "doc_type": obj.doc_type,
         "title": obj.title,
         "content": obj.content,
