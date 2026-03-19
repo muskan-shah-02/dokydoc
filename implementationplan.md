@@ -113,15 +113,18 @@ L5 — Organization (Current: All projects as clusters)
 - Gap analysis panel for unmapped requirement concepts — DONE
 - Run Mapping button + back-to-L3 navigation — DONE
 
-#### B5 — Cross-Project L4 Mappings (Priority: MEDIUM)
-- L4 shows concept bridges between Project A and Project B
-- Confidence score indicators on cross-project edges
-- "Run Cross-Project Mapping" button at L4
+#### B5 — Cross-Project L4 Mappings ✅ COMPLETE
+- L4 shows concept bridges between Project A and Project B — DONE
+- Confidence score indicators on cross-project edges — DONE
+- "Run Cross-Project Mapping" button at org view — DONE
+- **Component:** `frontend/components/ontology/CrossProjectMappingPanel.tsx`
+- **Backend:** `backend/app/api/endpoints/ontology.py` (`/cross-project/run`, `/cross-project/mappings`, `/cross-project/stats`)
 
-#### B6 — L3 Diagram Export (Priority: LOW)
-- Export Mermaid diagrams as SVG/PNG
-- "Copy Mermaid source" button for embedding in docs
-- Integration with Auto-Docs (Architecture Diagram doc type already defined)
+#### B6 — L3 Diagram Export ✅ COMPLETE
+- Export Mermaid diagrams as SVG — DONE
+- "Copy Mermaid source" button for embedding in docs — DONE
+- Integration with Auto-Docs (Architecture Diagram doc type already defined) — DONE
+- **Component:** `frontend/components/ontology/MermaidDiagram.tsx` (Copy + SVG Download buttons)
 
 ---
 
@@ -131,11 +134,11 @@ L5 — Organization (Current: All projects as clusters)
 ✅ Sprint 8 Analytics (P8-1, P8-2, P8-3) — COMPLETE
 ✅ Brain Bug Fixes (B1 — navigation) — COMPLETE
 ✅ Brain Enhancements (B2 — auto-diagrams, B3 — drill-down, B4 — L4 alignment) — COMPLETE
-      ↓
-NEXT → B5 Cross-project mappings (L4 shows concept bridges between projects)
-NEXT → B6 Diagram Export improvements
-FUTURE → Jira OAuth full implementation (config model exists, UI exists)
-         → Slack OAuth full implementation
+✅ B5 Cross-project mappings — COMPLETE
+✅ B6 Diagram Export improvements — COMPLETE
+✅ Jira OAuth 2.0 full flow — COMPLETE (commit: 5617257)
+✅ Slack OAuth 2.0 full flow — COMPLETE (commit: 5617257)
+✅ Frontend build fixes (Suspense boundaries, TypeScript fixes) — COMPLETE
 ```
 
 ---

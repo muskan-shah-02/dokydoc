@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { SlashCommandPalette, SLASH_COMMANDS, type SlashCommand } from "@/components/chat/SlashCommandPalette";
@@ -129,7 +129,7 @@ const QUERY_STEPS = [
 
 // --- Main Component ---
 
-export default function ChatPage() {
+function ChatContent() {
   const searchParams = useSearchParams();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
@@ -1110,4 +1110,8 @@ export default function ChatPage() {
       </div>
     </div>
   );
+}
+
+export default function ChatPage() {
+  return <Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-8 w-8 border-2 border-purple-600 rounded-full border-t-transparent" /></div>}><ChatContent /></Suspense>;
 }

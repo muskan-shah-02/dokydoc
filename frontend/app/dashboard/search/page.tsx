@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+export const dynamic = "force-dynamic";
+
+import { useState, useCallback, useRef, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Search,
@@ -75,7 +77,7 @@ const CATEGORIES = [
   { key: "graphs", label: "Graphs", icon: Network },
 ];
 
-export default function SearchPage() {
+function SearchPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get("q") || "";
@@ -539,4 +541,8 @@ function ResultCard({
       </div>
     </button>
   );
+}
+
+export default function SearchPage() {
+  return <Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-8 w-8 border-2 border-indigo-600 rounded-full border-t-transparent" /></div>}><SearchPageContent /></Suspense>;
 }

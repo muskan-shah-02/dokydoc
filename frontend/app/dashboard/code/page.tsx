@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -241,15 +241,15 @@ interface FileTreeRowsProps {
   retryingIds: Set<number>;
   onRetry: (id: number, e: any) => void;
   onDelete: (id: number, e: React.MouseEvent) => void;
-  getStatusBadge: (status: string) => JSX.Element;
-  getStatusIcon: (status: string) => JSX.Element;
+  getStatusBadge: (status: string) => React.ReactElement;
+  getStatusIcon: (status: string) => React.ReactElement;
 }
 
 function FileTreeRows({
   nodes, depth, expandedFolders, onToggleFolder,
   fileIndexRef, onFileClick, retryingIds, onRetry, onDelete,
   getStatusBadge, getStatusIcon,
-}: FileTreeRowsProps): JSX.Element {
+}: FileTreeRowsProps): React.ReactElement {
   return (
     <>
       {nodes.map((node) => {

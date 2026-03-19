@@ -225,6 +225,7 @@ export class ApiClient {
   async login(username: string, password: string): Promise<{
     access_token: string;
     token_type: string;
+    refresh_token?: string;
     user: User;
     tenant: Tenant;
   }> {

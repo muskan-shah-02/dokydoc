@@ -193,8 +193,8 @@ export default function BillingAnalyticsPage() {
         api.get("/billing/analytics/weekly?weeks=4"),
       ]);
 
-      setAnalyticsData(analytics);
-      setWeeklyData(weekly);
+      setAnalyticsData(analytics as AnalyticsData);
+      setWeeklyData(weekly as WeeklyUsage[]);
       setLastUpdated(new Date());
     } catch (error) {
       console.error("Failed to load analytics:", error);

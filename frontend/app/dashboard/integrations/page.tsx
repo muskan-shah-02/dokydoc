@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+export const dynamic = "force-dynamic";
+
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Link2,
@@ -153,7 +155,7 @@ function Toast({
 
 // ----- Main Page -----
 
-export default function IntegrationsPage() {
+function IntegrationsContent() {
   const searchParams = useSearchParams();
 
   const [integrations, setIntegrations] = useState<IntegrationStatus[]>([]);
@@ -685,4 +687,8 @@ export default function IntegrationsPage() {
       )}
     </div>
   );
+}
+
+export default function IntegrationsPage() {
+  return <Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-8 w-8 border-2 border-indigo-600 rounded-full border-t-transparent" /></div>}><IntegrationsContent /></Suspense>;
 }

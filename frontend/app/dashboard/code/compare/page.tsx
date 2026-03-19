@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { useCallback, useEffect, useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   GitBranch,
@@ -42,7 +44,7 @@ interface DiffResult {
 
 // --- Component ---
 
-export default function BranchComparisonPage() {
+function BranchComparisonContent() {
   const searchParams = useSearchParams();
   const componentId = searchParams.get("component_id");
 
@@ -494,4 +496,8 @@ export default function BranchComparisonPage() {
       )}
     </div>
   );
+}
+
+export default function BranchComparisonPage() {
+  return <Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-8 w-8 border-2 border-indigo-600 rounded-full border-t-transparent" /></div>}><BranchComparisonContent /></Suspense>;
 }
