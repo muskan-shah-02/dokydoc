@@ -312,8 +312,18 @@ function IntegrationsContent() {
         window.location.href = data.url;
       }
     } catch (e: any) {
-      const msg = e?.detail || e?.message || "OAuth not configured on the server.";
-      setToast({ message: `Cannot start ${provider} OAuth: ${msg}`, type: "error" });
+      const status = (e as any)?.status;
+      if (status === 501) {
+        // OAuth not configured on server — silently fall back to API token modal
+        setToast({
+          message: `${PROVIDER_META[provider]?.label || provider} OAuth is not configured on this server. Please connect using your API token instead.`,
+          type: "error",
+        });
+        openManualModal(provider);
+      } else {
+        const msg = e?.detail || e?.message || "OAuth not configured on the server.";
+        setToast({ message: `Cannot start ${provider} OAuth: ${msg}`, type: "error" });
+      }
       setOauthLoading(null);
     }
   };
