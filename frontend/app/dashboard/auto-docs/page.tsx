@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   FileText,
   Cpu,
@@ -18,6 +18,12 @@ import {
   Clock,
   AlertCircle,
   Layers,
+  Code,
+  Tag,
+  FileCode,
+  ChevronRight,
+  ChevronDown,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -104,17 +110,56 @@ interface GeneratedDocFull extends GeneratedDocSummary {
   metadata: Record<string, unknown> | null;
 }
 
+type SourceType =
+  | "document"
+  | "repository"
+  | "code_file"
+  | "standalone"
+  | "jira_item"
+  | "analysis";
+
 interface SourceItem {
   id: number;
   name: string;
-  type: "document" | "repository";
+  type: SourceType;
+  repoId?: number;
+  repoName?: string;
 }
+
+interface RepoItem {
+  id: number;
+  name: string;
+}
+
+// ----- Style helpers -----
+
+const SOURCE_STYLES: Record<
+  SourceType,
+  { chip: string; hover: string; check: string; icon: React.ComponentType<{ className?: string }> }
+> = {
+  document:   { chip: "bg-blue-100 text-blue-700",   hover: "hover:bg-blue-50",   check: "text-blue-600",   icon: FileText },
+  repository: { chip: "bg-green-100 text-green-700", hover: "hover:bg-green-50",  check: "text-green-600",  icon: Database },
+  code_file:  { chip: "bg-amber-100 text-amber-700", hover: "hover:bg-amber-50",  check: "text-amber-600",  icon: FileCode },
+  standalone: { chip: "bg-teal-100 text-teal-700",   hover: "hover:bg-teal-50",   check: "text-teal-600",   icon: Code },
+  jira_item:  { chip: "bg-purple-100 text-purple-700", hover: "hover:bg-purple-50", check: "text-purple-600", icon: Tag },
+  analysis:   { chip: "bg-indigo-100 text-indigo-700", hover: "hover:bg-indigo-50", check: "text-indigo-600", icon: Sparkles },
+};
 
 // ----- Main Page -----
 
 export default function AutoDocsPage() {
-  const [allSources, setAllSources] = useState<SourceItem[]>([]);
-  // Multi-source selection
+  // Sources
+  const [documents, setDocuments] = useState<SourceItem[]>([]);
+  const [repositories, setRepositories] = useState<RepoItem[]>([]);
+  const [standaloneFiles, setStandaloneFiles] = useState<SourceItem[]>([]);
+  const [jiraItems, setJiraItems] = useState<SourceItem[]>([]);
+  const [analysisResults, setAnalysisResults] = useState<SourceItem[]>([]);
+  // Lazy-loaded repo files: repoId → SourceItem[]
+  const [repoFiles, setRepoFiles] = useState<Record<number, SourceItem[]>>({});
+  const [repoFilesLoading, setRepoFilesLoading] = useState<Set<number>>(new Set());
+  const [expandedRepos, setExpandedRepos] = useState<Set<number>>(new Set());
+
+  // Selection & UI
   const [selectedSources, setSelectedSources] = useState<SourceItem[]>([]);
   const [selectedDocType, setSelectedDocType] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -125,35 +170,134 @@ export default function AutoDocsPage() {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [diagramView, setDiagramView] = useState<"rendered" | "diagram">("rendered");
   const [showSourcePicker, setShowSourcePicker] = useState(false);
+  const [sourceSearch, setSourceSearch] = useState("");
 
-  // Fetch available sources (documents + repositories)
+  const pickerRef = useRef<HTMLDivElement>(null);
+
+  // Close picker on outside click
   useEffect(() => {
-    Promise.all([
-      api.get("/documents/") as Promise<any>,
-      api.get("/repositories/") as Promise<any>,
-    ])
-      .then(([docs, repos]) => {
-        const docArray = docs.items || docs.documents || (Array.isArray(docs) ? docs : []);
-        const docItems: SourceItem[] = docArray.slice(0, 50).map(
-          (d: any) => ({ id: d.id, name: d.filename || `Document #${d.id}`, type: "document" as const })
+    const handler = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setShowSourcePicker(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // Fetch all source lists
+  useEffect(() => {
+    // Documents
+    (api.get("/documents/") as Promise<any>)
+      .then((docs) => {
+        const arr = docs.items || docs.documents || (Array.isArray(docs) ? docs : []);
+        setDocuments(
+          arr.slice(0, 100).map((d: any) => ({
+            id: d.id,
+            name: d.filename || `Document #${d.id}`,
+            type: "document" as const,
+          }))
         );
-        const repoItems: SourceItem[] = (Array.isArray(repos) ? repos : repos.items || repos.repositories || []).slice(0, 50).map(
-          (r: any) => ({ id: r.id, name: r.name || `Repository #${r.id}`, type: "repository" as const })
-        );
-        setAllSources([...docItems, ...repoItems]);
       })
       .catch(console.error);
+
+    // Repositories
+    (api.get("/repositories/") as Promise<any>)
+      .then((repos) => {
+        const arr = Array.isArray(repos) ? repos : repos.items || repos.repositories || [];
+        setRepositories(arr.slice(0, 50).map((r: any) => ({ id: r.id, name: r.name || `Repository #${r.id}` })));
+      })
+      .catch(console.error);
+
+    // Standalone files
+    (api.get("/code-components/?standalone=true&limit=100") as Promise<any>)
+      .then((data) => {
+        const arr = Array.isArray(data) ? data : [];
+        setStandaloneFiles(
+          arr.map((c: any) => ({
+            id: c.id,
+            name: c.name || c.location || `File #${c.id}`,
+            type: "standalone" as const,
+          }))
+        );
+      })
+      .catch(console.error);
+
+    // Jira items
+    (api.get("/integrations/jira/items?limit=100") as Promise<any>)
+      .then((data) => {
+        const arr = data.items || (Array.isArray(data) ? data : []);
+        setJiraItems(
+          arr.map((j: any) => ({
+            id: j.id,
+            name: j.external_key ? `${j.external_key}: ${(j.title || "").slice(0, 50)}` : j.title || `JIRA #${j.id}`,
+            type: "jira_item" as const,
+          }))
+        );
+      })
+      .catch(() => {/* Jira may not be connected — silently ignore */});
   }, []);
 
   const fetchHistory = () => {
     setHistoryLoading(true);
     (api.get("/auto-docs/") as Promise<any>)
-      .then((data) => setHistory(data.docs || []))
+      .then((data) => {
+        setHistory(data.docs || []);
+        // Convert to SourceItem for the analysis results section
+        setAnalysisResults(
+          (data.docs || []).slice(0, 50).map((d: any) => ({
+            id: d.id,
+            name: d.title || `Analysis #${d.id}`,
+            type: "analysis" as const,
+          }))
+        );
+      })
       .catch(console.error)
       .finally(() => setHistoryLoading(false));
   };
 
   useEffect(() => { fetchHistory(); }, []);
+
+  // Lazy-load files for a specific repo
+  const loadRepoFiles = (repoId: number, repoName: string) => {
+    if (repoFiles[repoId] !== undefined || repoFilesLoading.has(repoId)) return;
+    setRepoFilesLoading((prev) => new Set(prev).add(repoId));
+    (api.get(`/code-components/?repository_id=${repoId}&limit=500`) as Promise<any>)
+      .then((data) => {
+        const arr = Array.isArray(data) ? data : [];
+        setRepoFiles((prev) => ({
+          ...prev,
+          [repoId]: arr.map((c: any) => ({
+            id: c.id,
+            name: c.name || c.location || `File #${c.id}`,
+            type: "code_file" as const,
+            repoId,
+            repoName,
+          })),
+        }));
+      })
+      .catch(console.error)
+      .finally(() => {
+        setRepoFilesLoading((prev) => {
+          const next = new Set(prev);
+          next.delete(repoId);
+          return next;
+        });
+      });
+  };
+
+  const toggleRepoExpand = (repo: RepoItem) => {
+    setExpandedRepos((prev) => {
+      const next = new Set(prev);
+      if (next.has(repo.id)) {
+        next.delete(repo.id);
+      } else {
+        next.add(repo.id);
+        loadRepoFiles(repo.id, repo.name);
+      }
+      return next;
+    });
+  };
 
   const toggleSource = (src: SourceItem) => {
     setSelectedSources((prev) => {
@@ -223,8 +367,35 @@ export default function AutoDocsPage() {
     URL.revokeObjectURL(url);
   };
 
-  const docSources = allSources.filter((s) => s.type === "document");
-  const repoSources = allSources.filter((s) => s.type === "repository");
+  // Filter helpers
+  const q = sourceSearch.toLowerCase();
+  const filtered = <T extends { name: string }>(arr: T[]) =>
+    q ? arr.filter((i) => i.name.toLowerCase().includes(q)) : arr;
+
+  const filteredRepoFiles = (repoId: number) => {
+    const files = repoFiles[repoId] || [];
+    return q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files;
+  };
+
+  // Section row renderer
+  const SourceRow = ({ src }: { src: SourceItem }) => {
+    const style = SOURCE_STYLES[src.type];
+    const Icon = style.icon;
+    const selected = isSelected(src);
+    return (
+      <button
+        key={`${src.type}:${src.id}`}
+        onClick={() => toggleSource(src)}
+        className={`w-full text-left flex items-center gap-2 px-3 py-2 text-sm transition-colors ${
+          selected ? `${style.hover} font-medium` : `text-gray-700 ${style.hover}`
+        }`}
+      >
+        <Icon className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+        <span className="truncate flex-1">{src.name}</span>
+        {selected && <Check className={`w-3.5 h-3.5 flex-shrink-0 ${style.check}`} />}
+      </button>
+    );
+  };
 
   return (
     <div className="p-6 space-y-6">
@@ -257,94 +428,186 @@ export default function AutoDocsPage() {
               {/* Selected chips */}
               {selectedSources.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
-                  {selectedSources.map((s) => (
-                    <span
-                      key={`${s.type}:${s.id}`}
-                      className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${
-                        s.type === "document"
-                          ? "bg-blue-100 text-blue-700"
-                          : "bg-green-100 text-green-700"
-                      }`}
-                    >
-                      {s.type === "document" ? (
-                        <FileText className="w-3 h-3" />
-                      ) : (
-                        <Database className="w-3 h-3" />
+                  {selectedSources.map((s) => {
+                    const style = SOURCE_STYLES[s.type];
+                    const Icon = style.icon;
+                    return (
+                      <span
+                        key={`${s.type}:${s.id}`}
+                        className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full font-medium ${style.chip}`}
+                      >
+                        <Icon className="w-3 h-3" />
+                        <span className="max-w-[120px] truncate">{s.name}</span>
+                        <button onClick={() => removeSource(s)} className="hover:opacity-70">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Add source button + dropdown */}
+              <div ref={pickerRef} className="relative">
+                <button
+                  onClick={() => { setShowSourcePicker(!showSourcePicker); setSourceSearch(""); }}
+                  className="w-full flex items-center justify-center gap-2 text-sm border border-dashed border-gray-300 rounded-lg px-3 py-2 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  {selectedSources.length === 0 ? "Add source" : "Add another source"}
+                </button>
+
+                {/* Source picker dropdown */}
+                {showSourcePicker && (
+                  <div className="absolute z-50 left-0 right-0 mt-1 border rounded-lg bg-white shadow-xl max-h-80 overflow-y-auto">
+                    {/* Search */}
+                    <div className="sticky top-0 z-10 bg-white border-b px-3 py-2">
+                      <div className="flex items-center gap-2 bg-gray-50 rounded-md px-2 py-1.5">
+                        <Search className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                        <input
+                          autoFocus
+                          type="text"
+                          placeholder="Search sources…"
+                          value={sourceSearch}
+                          onChange={(e) => setSourceSearch(e.target.value)}
+                          className="flex-1 bg-transparent text-xs outline-none text-gray-700 placeholder-gray-400"
+                        />
+                        {sourceSearch && (
+                          <button onClick={() => setSourceSearch("")}>
+                            <X className="w-3 h-3 text-gray-400 hover:text-gray-600" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Documents section */}
+                    {filtered(documents).length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 sticky top-[48px] z-[5]">
+                          Documents
+                        </p>
+                        {filtered(documents).map((s) => <SourceRow key={`doc:${s.id}`} src={s} />)}
+                      </div>
+                    )}
+
+                    {/* Repositories + expandable files section */}
+                    {repositories.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50">
+                          Repositories
+                        </p>
+                        {repositories
+                          .filter((r) => !q || r.name.toLowerCase().includes(q))
+                          .map((repo) => {
+                            const repoSrc: SourceItem = { id: repo.id, name: repo.name, type: "repository" };
+                            const isExpanded = expandedRepos.has(repo.id);
+                            const isLoading = repoFilesLoading.has(repo.id);
+                            const files = filteredRepoFiles(repo.id);
+                            const repoSelected = isSelected(repoSrc);
+
+                            return (
+                              <div key={`repo:${repo.id}`}>
+                                {/* Repo row */}
+                                <div className={`flex items-center group text-sm transition-colors ${repoSelected ? "bg-green-50" : "hover:bg-green-50"}`}>
+                                  {/* Expand toggle */}
+                                  <button
+                                    onClick={() => toggleRepoExpand(repo)}
+                                    className="flex-shrink-0 flex items-center justify-center w-8 h-8 text-gray-400 hover:text-gray-600"
+                                    title="Browse files in this repo"
+                                  >
+                                    {isLoading ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : isExpanded ? (
+                                      <ChevronDown className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <ChevronRight className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                  {/* Select whole repo */}
+                                  <button
+                                    onClick={() => toggleSource(repoSrc)}
+                                    className="flex-1 flex items-center gap-2 pr-3 py-2 text-left"
+                                  >
+                                    <Database className="w-3.5 h-3.5 flex-shrink-0 text-green-500" />
+                                    <span className={`truncate flex-1 ${repoSelected ? "text-green-700 font-medium" : "text-gray-700"}`}>{repo.name}</span>
+                                    {repoSelected && <Check className="w-3.5 h-3.5 flex-shrink-0 text-green-600" />}
+                                  </button>
+                                </div>
+
+                                {/* Expanded file list */}
+                                {isExpanded && (
+                                  <div className="ml-6 border-l border-gray-200">
+                                    {isLoading && (
+                                      <div className="px-3 py-2 text-xs text-gray-400 flex items-center gap-2">
+                                        <Loader2 className="w-3 h-3 animate-spin" /> Loading files…
+                                      </div>
+                                    )}
+                                    {!isLoading && files.length === 0 && (
+                                      <p className="px-3 py-2 text-xs text-gray-400">
+                                        {q ? "No files match your search." : "No analyzed files found."}
+                                      </p>
+                                    )}
+                                    {!isLoading && files.length > 0 && (
+                                      <>
+                                        {files.map((f) => <SourceRow key={`cf:${f.id}`} src={f} />)}
+                                        {!q && (repoFiles[repo.id] || []).length >= 500 && (
+                                          <p className="px-3 py-1.5 text-xs text-gray-400 italic">
+                                            Showing first 500 files. Use search to find more.
+                                          </p>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+
+                    {/* Standalone files section */}
+                    {filtered(standaloneFiles).length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50">
+                          Standalone Files
+                        </p>
+                        {filtered(standaloneFiles).map((s) => <SourceRow key={`sf:${s.id}`} src={s} />)}
+                      </div>
+                    )}
+
+                    {/* Jira items section */}
+                    {filtered(jiraItems).length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50">
+                          Jira Tickets
+                        </p>
+                        {filtered(jiraItems).map((s) => <SourceRow key={`jira:${s.id}`} src={s} />)}
+                      </div>
+                    )}
+
+                    {/* Previous analyses section */}
+                    {filtered(analysisResults).length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50">
+                          Previous Analyses
+                        </p>
+                        {filtered(analysisResults).map((s) => <SourceRow key={`analysis:${s.id}`} src={s} />)}
+                      </div>
+                    )}
+
+                    {/* Empty state */}
+                    {documents.length === 0 &&
+                      repositories.length === 0 &&
+                      standaloneFiles.length === 0 &&
+                      jiraItems.length === 0 &&
+                      analysisResults.length === 0 && (
+                        <p className="text-xs text-gray-400 px-3 py-3">
+                          No analyzed sources found. Upload documents or connect a repository first.
+                        </p>
                       )}
-                      <span className="max-w-[120px] truncate">{s.name}</span>
-                      <button onClick={() => removeSource(s)} className="hover:opacity-70">
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* Add source button */}
-              <button
-                onClick={() => setShowSourcePicker(!showSourcePicker)}
-                className="w-full flex items-center justify-center gap-2 text-sm border border-dashed border-gray-300 rounded-lg px-3 py-2 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                {selectedSources.length === 0 ? "Add source" : "Add another source"}
-              </button>
-
-              {/* Source picker dropdown */}
-              {showSourcePicker && (
-                <div className="mt-2 border rounded-lg bg-white shadow-lg max-h-56 overflow-y-auto">
-                  {docSources.length > 0 && (
-                    <div>
-                      <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 sticky top-0">
-                        Documents
-                      </p>
-                      {docSources.map((s) => (
-                        <button
-                          key={`doc:${s.id}`}
-                          onClick={() => {
-                            toggleSource(s);
-                            setShowSourcePicker(false);
-                          }}
-                          className={`w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-blue-50 transition-colors ${
-                            isSelected(s) ? "bg-blue-50 text-blue-700" : "text-gray-700"
-                          }`}
-                        >
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0 text-blue-400" />
-                          <span className="truncate">{s.name}</span>
-                          {isSelected(s) && <Check className="w-3.5 h-3.5 ml-auto text-blue-600 flex-shrink-0" />}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {repoSources.length > 0 && (
-                    <div>
-                      <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 sticky top-0">
-                        Repositories
-                      </p>
-                      {repoSources.map((s) => (
-                        <button
-                          key={`repo:${s.id}`}
-                          onClick={() => {
-                            toggleSource(s);
-                            setShowSourcePicker(false);
-                          }}
-                          className={`w-full text-left flex items-center gap-2 px-3 py-2 text-sm hover:bg-green-50 transition-colors ${
-                            isSelected(s) ? "bg-green-50 text-green-700" : "text-gray-700"
-                          }`}
-                        >
-                          <Database className="w-3.5 h-3.5 flex-shrink-0 text-green-500" />
-                          <span className="truncate">{s.name}</span>
-                          {isSelected(s) && <Check className="w-3.5 h-3.5 ml-auto text-green-600 flex-shrink-0" />}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {docSources.length === 0 && repoSources.length === 0 && (
-                    <p className="text-xs text-gray-400 px-3 py-3">
-                      No analyzed sources found. Upload documents or connect a repository first.
-                    </p>
-                  )}
-                </div>
-              )}
+                  </div>
+                )}
+              </div>
 
               {selectedSources.length > 1 && (
                 <p className="text-xs text-blue-600 mt-1.5 flex items-center gap-1">

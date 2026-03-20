@@ -37,7 +37,7 @@ class GenerateDocRequest(BaseModel):
 
 
 class SourceEntry(BaseModel):
-    type: str = Field(..., pattern="^(document|repository)$")
+    type: str = Field(..., pattern="^(document|repository|code_file|standalone|jira_item|analysis)$")
     id: int
 
 

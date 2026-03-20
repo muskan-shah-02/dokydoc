@@ -78,6 +78,7 @@ def read_code_components(
     limit: int = 100,
     standalone: bool = Query(False, description="When true, return only components with no repository (standalone)"),
     initiative_id: int = Query(None, description="Filter by initiative (project) ID"),
+    repository_id: int = Query(None, description="Filter by repository ID"),
     current_user: models.User = Depends(deps.get_current_user),
 ) -> Any:
     """
@@ -91,7 +92,13 @@ def read_code_components(
     logger = code_component_endpoints.logger
     logger.info(f"Fetching code components for user {current_user.id} (tenant_id={tenant_id}), skip={skip}, limit={limit}, standalone={standalone}")
 
-    if initiative_id:
+    if repository_id:
+        from app.models.code_component import CodeComponent
+        code_components = db.query(CodeComponent).filter(
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.repository_id == repository_id,
+        ).offset(skip).limit(limit).all()
+    elif initiative_id:
         # Filter code components via their repository's initiative asset link
         from app.models.initiative_asset import InitiativeAsset
         from app.models.code_component import CodeComponent
