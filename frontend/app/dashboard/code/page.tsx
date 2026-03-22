@@ -1754,23 +1754,59 @@ export default function CodePage() {
                                       ))}
                                     </div>
 
-                                    {/* Skipped tab: category summary */}
+                                    {/* Skipped tab: expandable categories with file paths */}
                                     {activeTab === "skipped" ? (
                                       <div className="divide-y">
                                         {skippedBreakdown.length === 0 ? (
                                           <div className="py-6 text-center text-sm text-muted-foreground">No skipped files</div>
-                                        ) : skippedBreakdown.map((cat: any) => (
-                                          <div key={cat.category} className="flex items-center gap-3 px-4 py-3">
-                                            <EyeOff className="w-4 h-4 text-slate-300 flex-shrink-0" />
-                                            <span className="text-sm flex-1 font-medium text-muted-foreground">{cat.category}</span>
-                                            <span className="text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 rounded-full px-2 py-0.5">
-                                              {cat.count} files
-                                            </span>
-                                          </div>
-                                        ))}
+                                        ) : skippedBreakdown.map((cat: any) => {
+                                          const isOpen = (expandedSkippedCategories[repo.id] ?? new Set()).has(cat.category);
+                                          const filesInCategory: any[] = (repoStats[repo.id]?.skipped_files ?? [])
+                                            .filter((f: any) => f.category === cat.category);
+                                          return (
+                                            <div key={cat.category}>
+                                              {/* Category header — clickable */}
+                                              <button
+                                                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors text-left"
+                                                onClick={() => toggleSkippedCategory(repo.id, cat.category)}
+                                              >
+                                                <EyeOff className="w-4 h-4 text-slate-300 flex-shrink-0" />
+                                                <span className="text-sm flex-1 font-medium text-muted-foreground">{cat.category}</span>
+                                                <span className="text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 rounded-full px-2 py-0.5 mr-2">
+                                                  {cat.count} files
+                                                </span>
+                                                {isOpen
+                                                  ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                                                  : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                                                }
+                                              </button>
+                                              {/* Expanded file list */}
+                                              {isOpen && (
+                                                <div className="bg-muted/20 border-t border-b pb-1">
+                                                  {filesInCategory.length > 0 ? (
+                                                    filesInCategory.map((f: any, i: number) => (
+                                                      <div key={i} className="flex items-center gap-2 px-8 py-1.5">
+                                                        <span className="text-[10px] font-mono text-slate-400 bg-slate-100 dark:bg-slate-800 rounded px-1.5 py-0.5 flex-shrink-0">
+                                                          {f.ext || "(no ext)"}
+                                                        </span>
+                                                        <span className="text-xs font-mono text-muted-foreground truncate" title={f.path}>
+                                                          {f.path}
+                                                        </span>
+                                                      </div>
+                                                    ))
+                                                  ) : (
+                                                    <p className="px-8 py-2 text-xs text-muted-foreground italic">
+                                                      File paths not available (re-analyze to populate)
+                                                    </p>
+                                                  )}
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
                                         {skippedCount > 0 && (
                                           <div className="px-4 py-2 text-xs text-muted-foreground bg-slate-50/50">
-                                            Binaries, images, compiled artifacts and similar files are not analyzed.
+                                            Binaries, images, compiled artifacts and similar files are not analyzed. Click a category to see file paths.
                                           </div>
                                         )}
                                       </div>

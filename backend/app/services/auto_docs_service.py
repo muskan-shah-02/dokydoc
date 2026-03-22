@@ -39,23 +39,68 @@ Source context:
 """,
 
     "architecture_diagram": """
-You are a senior software architect. Analyze the system described below and produce an **Architecture Diagram** in **Mermaid** format.
+You are a senior software architect generating a precise technical architecture diagram from REAL analyzed code.
 
-Requirements:
-- Use `graph TD` (top-down) or `graph LR` (left-right) layout as appropriate
-- Show major services, databases, message queues, external APIs, and their connections
-- Add brief edge labels describing the communication type (REST, WebSocket, SQL, etc.)
-- After the diagram, add a ## Component Descriptions section with a short paragraph for each major node
+━━━ CRITICAL RULES ━━━
+1. Use ONLY the actual service names, class names, API paths, database tables, and external APIs that appear in SOURCE CONTEXT below.
+2. Do NOT use generic labels like "API Service", "Web App", "Backend", "Database" — use the real names from the code.
+3. Every arrow MUST have a label showing: protocol + what data flows (e.g. `REST: JWT token`, `SQL: user rows`, `Redis: task queue`, `HTTP: analysis JSON`).
+4. Group nodes into subgraphs by architectural layer.
+5. Show background workers, message queues, and async flows.
 
-Output format:
+━━━ OUTPUT FORMAT ━━━
+Produce a **Mermaid flowchart** (flowchart LR) followed by Markdown descriptions.
+
 ```mermaid
-<diagram here>
+flowchart LR
+
+  subgraph Frontend["🖥 Frontend (Browser)"]
+    direction TB
+    WebUI["Next.js UI\n(React)"]
+  end
+
+  subgraph APILayer["⚙ API Layer"]
+    direction TB
+    FastAPI["FastAPI\n(uvicorn)"]
+    AuthAPI["Auth / JWT\n/api/login"]
+    ... (add real endpoint groups from context)
+  end
+
+  subgraph ServiceLayer["🔧 Service Layer"]
+    direction TB
+    ... (real service class names from context, e.g. GeminiService, CodeAnalysisService)
+  end
+
+  subgraph Workers["⚡ Background Workers"]
+    direction TB
+    CeleryWorker["Celery Worker"]
+    ... (real task names from context)
+  end
+
+  subgraph DataLayer["🗄 Data Layer"]
+    direction TB
+    DB[(PostgreSQL\nORM: SQLAlchemy)]
+    Cache[(Redis\nBroker + Cache)]
+  end
+
+  subgraph ExternalAPIs["🌐 External APIs"]
+    direction TB
+    ... (real external APIs found in code: Gemini, GitHub, Jira, etc.)
+  end
+
+  %% Draw connections with labeled edges — every arrow must have a label
+  WebUI -->|"HTTPS: user request"| FastAPI
+  FastAPI -->|"SQL: tenant query"| DB
+  ... (all real flows from context)
 ```
 
 ## Component Descriptions
-<descriptions here>
+One paragraph per node explaining its real role and responsibilities from the code.
 
-Source context:
+## Key Data Flows
+Numbered list of the most important data flows found in the codebase (e.g., "1. User uploads BRD → FastAPI → GeminiService → response stored in PostgreSQL").
+
+━━━ SOURCE CONTEXT (use ONLY real names from here) ━━━
 {context}
 """,
 
@@ -175,11 +220,12 @@ class AutoDocsService(LoggerMixin):
         if doc_type not in _PROMPTS:
             raise ValueError(f"Unknown doc_type '{doc_type}'. Supported: {self.SUPPORTED_TYPES}")
 
-        context_text = self._build_context(db, source_type, source_id, tenant_id)
+        context_text = self._build_context(db, source_type, source_id, tenant_id, doc_type=doc_type)
         source_name = self._get_source_name(db, source_type, source_id, tenant_id)
         title = f"{_DOC_TYPE_TITLES.get(doc_type, doc_type)} — {source_name}"
 
-        prompt = _PROMPTS[doc_type].format(context=context_text[:12000])  # safety cap
+        cap = 18000 if doc_type == "architecture_diagram" else 12000
+        prompt = _PROMPTS[doc_type].format(context=context_text[:cap])
 
         try:
             from app.services.ai.gemini import gemini_service
@@ -255,7 +301,8 @@ class AutoDocsService(LoggerMixin):
         return f"{source_type} #{source_id}"
 
     def _build_context(
-        self, db: Session, source_type: str, source_id: int, tenant_id: int
+        self, db: Session, source_type: str, source_id: int, tenant_id: int,
+        doc_type: str = "",
     ) -> str:
         """Assemble a rich text context block from the source's analysis data."""
         parts = []
@@ -264,7 +311,10 @@ class AutoDocsService(LoggerMixin):
             if source_type == "document":
                 parts.extend(self._context_from_document(db, source_id, tenant_id))
             elif source_type == "repository":
-                parts.extend(self._context_from_repository(db, source_id, tenant_id))
+                if doc_type == "architecture_diagram":
+                    parts.extend(self._context_from_repository_architecture(db, source_id, tenant_id))
+                else:
+                    parts.extend(self._context_from_repository(db, source_id, tenant_id))
             elif source_type in ("code_file", "standalone"):
                 parts.extend(self._context_from_code_file(db, source_id, tenant_id))
             elif source_type == "jira_item":
@@ -347,6 +397,203 @@ class AutoDocsService(LoggerMixin):
 
         return parts
 
+    def _context_from_repository_architecture(
+        self, db: Session, repo_id: int, tenant_id: int
+    ) -> list[str]:
+        """
+        Build a rich architecture-specific context from repository analysis data.
+        Extracts real service names, API contracts, DB models, external integrations,
+        and inter-service data flows to power an accurate architecture diagram.
+        """
+        import json
+        from app.models.repository import Repository
+        from app.models.code_component import CodeComponent
+
+        parts = []
+
+        repo = db.query(Repository).filter(
+            Repository.id == repo_id, Repository.tenant_id == tenant_id
+        ).first()
+        if not repo:
+            return ["[Repository not found]"]
+
+        parts.append(f"REPOSITORY: {repo.name}\nURL: {getattr(repo, 'url', '')}")
+
+        # ── 1. Synthesis data (high-level architecture detected by AI) ──
+        synthesis = getattr(repo, "synthesis_data", None)
+        if synthesis and isinstance(synthesis, dict):
+            arch = synthesis.get("architecture", {})
+            tech = synthesis.get("technology_stack", {})
+            overview = synthesis.get("system_overview", "")
+            services = synthesis.get("services", [])
+            data_flows = synthesis.get("data_flows", [])
+
+            if overview:
+                parts.append(f"SYSTEM OVERVIEW:\n{overview[:1000]}")
+            if arch:
+                parts.append(f"DETECTED ARCHITECTURE:\n{json.dumps(arch, indent=2)[:1500]}")
+            if tech:
+                parts.append(f"TECHNOLOGY STACK:\n{json.dumps(tech, indent=2)[:800]}")
+            if services:
+                parts.append(f"SERVICES (from synthesis):\n{json.dumps(services, indent=2)[:1000]}")
+            if data_flows:
+                parts.append(f"DATA FLOWS (from synthesis):\n{json.dumps(data_flows, indent=2)[:1000]}")
+
+        # ── 2. All API contracts across the codebase ──
+        components = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "completed",
+            CodeComponent.structured_analysis.isnot(None),
+        ).all()
+
+        all_api_contracts = []
+        all_external_deps = []
+        all_db_models = []
+        all_services = []
+        all_data_flows = []
+        all_security = []
+        file_type_map: dict[str, list[str]] = {}
+
+        for comp in components:
+            sa = comp.structured_analysis or {}
+            lang_info = sa.get("language_info", {})
+            file_type = lang_info.get("file_type", "Other")
+            comp_name = comp.name or ""
+
+            # Group by file type for architecture layer mapping
+            if file_type not in file_type_map:
+                file_type_map[file_type] = []
+            file_type_map[file_type].append(comp_name)
+
+            # Collect API contracts (real endpoints)
+            for contract in sa.get("api_contracts", []):
+                if isinstance(contract, dict):
+                    contract["_source_file"] = comp_name
+                    all_api_contracts.append(contract)
+
+            # Collect external dependencies (external APIs, SDKs)
+            for dep in sa.get("dependencies", []):
+                if isinstance(dep, dict):
+                    dep_name = dep.get("name", "") or dep.get("to", "")
+                    dep_type = dep.get("type", "")
+                    # Flag external dependencies (not internal imports)
+                    if dep_type in ("external", "pip", "npm", "third_party") or any(
+                        k in dep_name.lower() for k in [
+                            "google", "gemini", "openai", "anthropic", "github", "gitlab",
+                            "jira", "atlassian", "redis", "celery", "stripe", "twilio",
+                            "sendgrid", "aws", "azure", "gcp", "slack", "oauth",
+                        ]
+                    ):
+                        all_external_deps.append({
+                            "name": dep_name,
+                            "type": dep_type,
+                            "source_file": comp_name,
+                        })
+
+            # Collect data model relationships (DB tables)
+            for model in sa.get("data_model_relationships", []):
+                if isinstance(model, dict):
+                    model["_source_file"] = comp_name
+                    all_db_models.append(model)
+
+            # Collect service class names
+            for component_entry in sa.get("components", []):
+                if isinstance(component_entry, dict):
+                    ctype = component_entry.get("type", "")
+                    if ctype in ("Service", "Class", "Module", "Handler", "Manager", "Router"):
+                        all_services.append({
+                            "name": component_entry.get("name", ""),
+                            "type": ctype,
+                            "purpose": component_entry.get("purpose", "")[:150],
+                            "file": comp_name,
+                        })
+
+            # Collect data flows
+            for flow in sa.get("data_flows", []):
+                if isinstance(flow, dict):
+                    all_data_flows.append(flow)
+
+            # Collect component interactions
+            for interaction in sa.get("component_interactions", []):
+                if isinstance(interaction, dict):
+                    all_data_flows.append(interaction)
+
+            # Security patterns (auth, JWT, etc.)
+            for sec in sa.get("security_patterns", []):
+                if isinstance(sec, dict) and sec not in all_security:
+                    all_security.append(sec)
+
+        # ── 3. Emit structured context sections ──
+        if file_type_map:
+            layer_text = "\n".join(
+                f"  {layer} layer: {', '.join(files[:8])}"
+                for layer, files in sorted(file_type_map.items())
+                if files
+            )
+            parts.append(f"FILES BY ARCHITECTURAL LAYER:\n{layer_text}")
+
+        if all_services:
+            # Deduplicate by name
+            seen_names = set()
+            unique_services = []
+            for s in all_services:
+                if s["name"] and s["name"] not in seen_names:
+                    seen_names.add(s["name"])
+                    unique_services.append(s)
+            parts.append(
+                f"REAL SERVICE/CLASS NAMES (use these in diagram nodes):\n"
+                + json.dumps(unique_services[:30], indent=2)[:2000]
+            )
+
+        if all_api_contracts:
+            # Deduplicate by endpoint
+            seen_endpoints: set[str] = set()
+            unique_contracts = []
+            for c in all_api_contracts:
+                ep = c.get("endpoint", "") or c.get("path", "")
+                if ep and ep not in seen_endpoints:
+                    seen_endpoints.add(ep)
+                    unique_contracts.append(c)
+            parts.append(
+                f"REAL API ENDPOINTS (use paths in diagram edge labels):\n"
+                + json.dumps(unique_contracts[:25], indent=2)[:2500]
+            )
+
+        if all_db_models:
+            parts.append(
+                f"DATABASE MODELS / TABLES (show in Data Layer subgraph):\n"
+                + json.dumps(all_db_models[:15], indent=2)[:1500]
+            )
+
+        if all_external_deps:
+            # Deduplicate
+            seen_ext: set[str] = set()
+            unique_ext = []
+            for d in all_external_deps:
+                key = d.get("name", "")
+                if key and key not in seen_ext:
+                    seen_ext.add(key)
+                    unique_ext.append(d)
+            parts.append(
+                f"EXTERNAL API / SERVICE INTEGRATIONS (show in External APIs subgraph):\n"
+                + json.dumps(unique_ext[:20], indent=2)[:1000]
+            )
+
+        if all_data_flows:
+            parts.append(
+                f"DATA FLOWS BETWEEN COMPONENTS (use for arrow labels):\n"
+                + json.dumps(all_data_flows[:20], indent=2)[:1500]
+            )
+
+        if all_security:
+            parts.append(
+                f"SECURITY / AUTH PATTERNS (show in diagram):\n"
+                + json.dumps(all_security[:5], indent=2)[:500]
+            )
+
+        return parts
+
 
     async def generate_multi(
         self,
@@ -380,7 +627,7 @@ class AutoDocsService(LoggerMixin):
                 seen.add(key)
                 unique_sources.append(s)
 
-        context_text = self._build_context_multi(db, unique_sources, tenant_id)
+        context_text = self._build_context_multi(db, unique_sources, tenant_id, doc_type=doc_type)
         source_names = [
             self._get_source_name(db, s["type"], s["id"], tenant_id)
             for s in unique_sources
@@ -390,7 +637,8 @@ class AutoDocsService(LoggerMixin):
             source_label += f" [+{len(source_names) - 3} more]"
 
         title = f"{_DOC_TYPE_TITLES.get(doc_type, doc_type)} — {source_label}"
-        prompt = _PROMPTS[doc_type].format(context=context_text[:12000])
+        cap = 18000 if doc_type == "architecture_diagram" else 12000
+        prompt = _PROMPTS[doc_type].format(context=context_text[:cap])
 
         try:
             from app.services.ai.gemini import gemini_service
@@ -425,7 +673,7 @@ class AutoDocsService(LoggerMixin):
         }
 
     def _build_context_multi(
-        self, db: Session, sources: list[dict], tenant_id: int
+        self, db: Session, sources: list[dict], tenant_id: int, doc_type: str = "",
     ) -> str:
         """
         Assemble context from multiple sources.
@@ -443,7 +691,10 @@ class AutoDocsService(LoggerMixin):
                 if src_type == "document":
                     src_parts = self._context_from_document(db, src_id, tenant_id)
                 elif src_type == "repository":
-                    src_parts = self._context_from_repository(db, src_id, tenant_id)
+                    if doc_type == "architecture_diagram":
+                        src_parts = self._context_from_repository_architecture(db, src_id, tenant_id)
+                    else:
+                        src_parts = self._context_from_repository(db, src_id, tenant_id)
                 elif src_type in ("code_file", "standalone"):
                     src_parts = self._context_from_code_file(db, src_id, tenant_id)
                 elif src_type == "jira_item":
