@@ -60,7 +60,7 @@ interface ConnectFormState {
 
 // OAuth-capable providers use the full OAuth flow.
 // Notion uses manual token (internal integration token model).
-const OAUTH_PROVIDERS = new Set(["jira", "slack", "github"]);
+const OAUTH_PROVIDERS = new Set(["jira", "confluence", "slack", "github"]);
 
 const PROVIDER_META: Record<
   string,
@@ -104,11 +104,11 @@ const PROVIDER_META: Record<
   confluence: {
     label: "Confluence",
     color: "bg-blue-500 text-white",
-    description: "Import Confluence pages (coming soon)",
-    tokenLabel: "API Token",
-    tokenPlaceholder: "",
-    useOAuth: false,
-    oauthLabel: "",
+    description: "Browse and import pages from your Confluence Cloud workspace",
+    tokenLabel: "Atlassian API Token",
+    tokenPlaceholder: "Your Atlassian API token",
+    useOAuth: true,
+    oauthLabel: "Connect with Atlassian",
   },
   sharepoint: {
     label: "SharePoint",
@@ -452,7 +452,7 @@ function IntegrationsContent() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Object.entries(PROVIDER_META).map(([provider, meta]) => {
               const connected = providerMap[provider];
-              const comingSoon = provider === "confluence" || provider === "sharepoint";
+              const comingSoon = provider === "sharepoint";
               // GitHub shows a special "Code Repos" badge when connected
               const isOAuthLoading = oauthLoading === provider;
 

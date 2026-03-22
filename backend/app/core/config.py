@@ -79,6 +79,12 @@ class Settings(BaseSettings):
     # GitHub OAuth App (private repo integration)
     GITHUB_CLIENT_ID: Optional[str] = Field(default=None, env="GITHUB_CLIENT_ID")
     GITHUB_CLIENT_SECRET: Optional[str] = Field(default=None, env="GITHUB_CLIENT_SECRET")
+
+    # Confluence / Atlassian OAuth 2.0
+    # Tip: if you use the same Atlassian OAuth App for Jira + Confluence, set these
+    # to the same values as JIRA_CLIENT_ID / JIRA_CLIENT_SECRET.
+    CONFLUENCE_CLIENT_ID: Optional[str] = Field(default=None, env="CONFLUENCE_CLIENT_ID")
+    CONFLUENCE_CLIENT_SECRET: Optional[str] = Field(default=None, env="CONFLUENCE_CLIENT_SECRET")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB

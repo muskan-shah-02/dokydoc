@@ -1152,7 +1152,7 @@ export default function CodePage() {
                       : "bg-background text-muted-foreground hover:bg-muted"
                   }`}
                 >
-                  <Globe className="w-3.5 h-3.5" /> Paste URL
+                  <Globe className="w-3.5 h-3.5" /> Any Public URL
                 </button>
                 <button
                   type="button"
@@ -1163,12 +1163,19 @@ export default function CodePage() {
                       : "bg-background text-muted-foreground hover:bg-muted"
                   }`}
                 >
-                  <FolderGit2 className="w-3.5 h-3.5" /> From GitHub
+                  <FolderGit2 className="w-3.5 h-3.5" /> My GitHub Repos
                   {githubConnected && (
                     <span className="ml-1 text-[10px] bg-green-500 text-white px-1.5 py-0.5 rounded-full">Connected</span>
                   )}
                 </button>
               </div>
+
+              {/* Context hint below the toggle */}
+              <p className="text-[11px] text-muted-foreground -mt-1">
+                {addMode === "url"
+                  ? "Paste any public GitHub or raw file URL — no login needed."
+                  : "Browse repos your GitHub account has access to, including private and org repos."}
+              </p>
 
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
@@ -1325,7 +1332,7 @@ export default function CodePage() {
                       <div className="relative flex-1">
                         <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
                         <Input id="location" name="location" value={newComponent.location}
-                          onChange={handleInputChange} placeholder="https://github.com/owner/repo  or file URL" className="pl-10" required />
+                          onChange={handleInputChange} placeholder="https://github.com/owner/repo (public) or any raw file URL" className="pl-10" required />
                       </div>
                       {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
                         <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"

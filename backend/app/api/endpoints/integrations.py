@@ -720,6 +720,10 @@ async def list_provider_pages(
             )
         elif provider == "slack":
             items = await _slack_list_channels(config.access_token, query=query, limit=limit)
+        elif provider == "confluence":
+            items = await _confluence_list_pages(
+                config.access_token, base_url=config.base_url or "", query=query, limit=limit
+            )
         else:
             raise HTTPException(status_code=400, detail=f"List pages not yet supported for {provider}")
     except httpx.HTTPStatusError as e:
@@ -763,6 +767,10 @@ async def import_page(
         elif provider == "slack":
             content, title = await _slack_fetch_channel_history(
                 config.access_token, payload.external_id, channel_name=payload.title
+            )
+        elif provider == "confluence":
+            content, title = await _confluence_fetch_page(
+                config.access_token, base_url=config.base_url or "", page_id=payload.external_id
             )
         else:
             raise HTTPException(status_code=400, detail=f"Import not yet supported for {provider}")
@@ -1046,6 +1054,218 @@ async def _slack_list_channels(token: str, query: Optional[str], limit: int) -> 
 
 
 # ============================================================
+# ============================================================
+# Confluence OAuth 2.0 (Atlassian)
+# ============================================================
+
+@router.get("/confluence/oauth/authorize")
+def confluence_oauth_authorize(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Return the Atlassian OAuth 2.0 authorization URL for Confluence."""
+    client_id = settings.CONFLUENCE_CLIENT_ID or settings.JIRA_CLIENT_ID
+    if not client_id:
+        raise HTTPException(
+            status_code=501,
+            detail="Confluence OAuth is not configured. Set CONFLUENCE_CLIENT_ID and CONFLUENCE_CLIENT_SECRET.",
+        )
+    state = _make_oauth_state(tenant_id, current_user.id)
+    redirect_uri = f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/confluence/oauth/callback"
+    params = {
+        "audience": "api.atlassian.com",
+        "client_id": client_id,
+        "scope": "read:confluence-content.all read:confluence-space.summary read:confluence-user offline_access",
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "response_type": "code",
+        "prompt": "consent",
+    }
+    url = "https://auth.atlassian.com/authorize?" + urlencode(params)
+    return {"url": url, "provider": "confluence"}
+
+
+@router.get("/confluence/oauth/callback")
+async def confluence_oauth_callback(
+    code: str,
+    state: str,
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    Atlassian redirects here after user grants Confluence access.
+    Exchange the authorization code for tokens, discover the cloud site, and save.
+    """
+    tenant_id, user_id = _verify_oauth_state(state)
+    client_id = settings.CONFLUENCE_CLIENT_ID or settings.JIRA_CLIENT_ID
+    client_secret = settings.CONFLUENCE_CLIENT_SECRET or settings.JIRA_CLIENT_SECRET
+    redirect_uri = f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/confluence/oauth/callback"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # 1. Exchange code for tokens
+            token_resp = await client.post(
+                "https://auth.atlassian.com/oauth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            token_resp.raise_for_status()
+            token_data = token_resp.json()
+
+        access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token")
+        expires_in = token_data.get("expires_in", 3600)
+        token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+        # 2. Discover Atlassian cloud site
+        async with httpx.AsyncClient(timeout=10) as client:
+            sites_resp = await client.get(
+                "https://api.atlassian.com/oauth/token/accessible-resources",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+            sites_resp.raise_for_status()
+            sites = sites_resp.json()
+
+        if not sites:
+            return RedirectResponse(
+                f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error=no_sites&provider=confluence"
+            )
+
+        cloud = sites[0]
+        cloud_id = cloud["id"]
+        workspace_name = cloud.get("name", "Confluence Cloud")
+        # Confluence API base differs from Jira — uses /ex/confluence/
+        base_url = f"https://api.atlassian.com/ex/confluence/{cloud_id}"
+
+        # 3. Save integration config
+        crud_integration_config.upsert(
+            db,
+            tenant_id=tenant_id,
+            provider="confluence",
+            created_by_id=user_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_expires_at=token_expires_at,
+            workspace_name=workspace_name,
+            workspace_id=cloud_id,
+            base_url=base_url,
+        )
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Confluence OAuth callback HTTP error: {e}")
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error=token_exchange&provider=confluence"
+        )
+    except Exception as e:
+        logger.exception("Confluence OAuth callback error")
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error=unknown&provider=confluence"
+        )
+
+    return RedirectResponse(
+        f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_success=confluence&workspace={workspace_name}"
+    )
+
+
+# ── Confluence helper functions ──────────────────────────────
+
+async def _confluence_list_pages(
+    token: str, base_url: str, query: Optional[str] = None, limit: int = 20
+) -> list[dict]:
+    """List Confluence pages, optionally filtered by search query."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        if query:
+            resp = await client.get(
+                f"{base_url}/wiki/rest/api/content/search",
+                headers=headers,
+                params={
+                    "cql": f'type=page AND text ~ "{query}" ORDER BY lastmodified DESC',
+                    "limit": limit,
+                    "expand": "space,version",
+                },
+            )
+        else:
+            resp = await client.get(
+                f"{base_url}/wiki/rest/api/content",
+                headers=headers,
+                params={
+                    "type": "page",
+                    "limit": limit,
+                    "expand": "space,version",
+                    "orderby": "modified desc",
+                },
+            )
+        resp.raise_for_status()
+        data = resp.json()
+
+    items = []
+    for page in data.get("results", []):
+        space = page.get("space", {})
+        version = page.get("version", {})
+        webui_link = page.get("_links", {}).get("webui", "")
+        items.append({
+            "id": page["id"],
+            "title": page["title"],
+            "url": f"{base_url}/wiki{webui_link}" if webui_link else "",
+            "updated_at": version.get("when", ""),
+            "space_key": space.get("key", ""),
+            "space_name": space.get("name", ""),
+        })
+    return items
+
+
+async def _confluence_fetch_page(token: str, base_url: str, page_id: str) -> tuple[str, str]:
+    """Fetch a Confluence page and return (markdown_content, title)."""
+    import re as _re
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{base_url}/wiki/rest/api/content/{page_id}",
+            headers=headers,
+            params={"expand": "body.storage,space,version,ancestors"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    title = data.get("title", f"confluence_{page_id}")
+    space = data.get("space", {}).get("name", "")
+    ancestors = data.get("ancestors", [])
+    breadcrumb = " > ".join(a["title"] for a in ancestors) if ancestors else ""
+
+    # Confluence storage format is XML-like — strip tags and decode entities
+    storage_body = data.get("body", {}).get("storage", {}).get("value", "")
+    # Convert common Confluence macros / structural tags to markdown-ish text
+    text = _re.sub(r'<h([1-6])[^>]*>(.*?)</h\1>', lambda m: "#" * int(m.group(1)) + " " + m.group(2) + "\n", storage_body, flags=_re.DOTALL)
+    text = _re.sub(r'<li[^>]*>(.*?)</li>', r'- \1\n', text, flags=_re.DOTALL)
+    text = _re.sub(r'<p[^>]*>(.*?)</p>', r'\1\n\n', text, flags=_re.DOTALL)
+    text = _re.sub(r'<br\s*/?>', '\n', text)
+    text = _re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', text, flags=_re.DOTALL)
+    text = _re.sub(r'<em[^>]*>(.*?)</em>', r'*\1*', text, flags=_re.DOTALL)
+    text = _re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', text, flags=_re.DOTALL)
+    text = _re.sub(r'<[^>]+>', ' ', text)  # strip remaining tags
+    # Decode HTML entities
+    text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
+    text = _re.sub(r' {2,}', ' ', text)
+    text = _re.sub(r'\n{3,}', '\n\n', text.strip())
+
+    header_lines = [f"# {title}"]
+    if space:
+        header_lines.append(f"**Space:** {space}")
+    if breadcrumb:
+        header_lines.append(f"**Path:** {breadcrumb} > {title}")
+    header_lines.append("")
+
+    content = "\n".join(header_lines) + "\n" + text
+    return content, title
+
+
 # GitHub OAuth App (private repo integration)
 # ============================================================
 
