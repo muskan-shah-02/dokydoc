@@ -24,6 +24,11 @@ import {
   ChevronRight,
   ChevronDown,
   Search,
+  Wand2,
+  Send,
+  RotateCcw,
+  CheckCircle2,
+  PanelBottomOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -174,8 +179,21 @@ export default function AutoDocsPage() {
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
 
+  // AI Refinement panel
+  const [showRefinePanel, setShowRefinePanel] = useState(false);
+  const [refinePrompt, setRefinePrompt] = useState("");
+  const [refining, setRefining] = useState(false);
+  const [refineSaveAsNew, setRefineSaveAsNew] = useState(false);
+  const [refineResult, setRefineResult] = useState<{
+    content: string;
+    saved: boolean;
+    id: number | null;
+    title?: string;
+  } | null>(null);
+
   const pickerRef = useRef<HTMLDivElement>(null);
   const downloadMenuRef = useRef<HTMLDivElement>(null);
+  const refineTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Close picker / download menu on outside click
   useEffect(() => {
@@ -396,6 +414,43 @@ export default function AutoDocsPage() {
     } finally {
       setExportingFormat(null);
     }
+  };
+
+  const handleRefine = async () => {
+    if (!viewingDoc || !refinePrompt.trim() || refining) return;
+    setRefining(true);
+    setRefineResult(null);
+    try {
+      const result = await api.post(`/auto-docs/${viewingDoc.id}/refine`, {
+        prompt: refinePrompt.trim(),
+        save_as_new: refineSaveAsNew,
+      }) as any;
+      setRefineResult(result);
+      if (refineSaveAsNew && result.id) {
+        // Refresh history so new version appears in sidebar
+        (api.get("/auto-docs/") as Promise<any>).then((data) => {
+          const arr = data.items || data.docs || (Array.isArray(data) ? data : []);
+          setHistory(arr.slice(0, 10));
+        }).catch(() => {});
+      }
+    } catch (err) {
+      alert(`Refinement failed. Please try again.\n${err}`);
+    } finally {
+      setRefining(false);
+    }
+  };
+
+  const acceptRefinement = () => {
+    if (!refineResult || !viewingDoc) return;
+    setViewingDoc({ ...viewingDoc, content: refineResult.content });
+    setRefineResult(null);
+    setRefinePrompt("");
+    setShowRefinePanel(false);
+  };
+
+  const discardRefinement = () => {
+    setRefineResult(null);
+    setRefinePrompt("");
   };
 
   // Filter helpers
@@ -815,6 +870,19 @@ export default function AutoDocsPage() {
                         <><Copy className="w-3.5 h-3.5" /> Copy</>
                       )}
                     </Button>
+                    {/* Refine with AI */}
+                    <Button
+                      size="sm"
+                      variant={showRefinePanel ? "default" : "outline"}
+                      className={`h-7 text-xs gap-1.5 ${showRefinePanel ? "bg-indigo-600 text-white hover:bg-indigo-700" : ""}`}
+                      onClick={() => {
+                        setShowRefinePanel((v) => !v);
+                        setRefineResult(null);
+                        setTimeout(() => refineTextareaRef.current?.focus(), 50);
+                      }}
+                    >
+                      <Wand2 className="w-3.5 h-3.5" /> Refine with AI
+                    </Button>
                     {/* Download dropdown */}
                     <div className="relative" ref={downloadMenuRef}>
                       <Button
@@ -862,7 +930,7 @@ export default function AutoDocsPage() {
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto p-6 max-h-[calc(100vh-280px)]">
+                <div className={`flex-1 overflow-y-auto p-6 ${showRefinePanel ? "max-h-[calc(100vh-480px)]" : "max-h-[calc(100vh-280px)]"}`}>
                   {viewingDoc.content ? (
                     hasMermaid && diagramView === "diagram" ? (
                       <MermaidDiagram
@@ -877,6 +945,116 @@ export default function AutoDocsPage() {
                     <p className="text-sm text-gray-400 italic">No content generated.</p>
                   )}
                 </div>
+
+                {/* ── AI Refinement Panel ── */}
+                {showRefinePanel && (
+                  <div className="border-t bg-gradient-to-b from-indigo-50 to-white">
+                    {/* Panel header */}
+                    <div className="flex items-center gap-2 px-5 pt-3 pb-2">
+                      <Wand2 className="w-4 h-4 text-indigo-600" />
+                      <span className="text-sm font-semibold text-indigo-800">Refine with AI</span>
+                      <span className="text-xs text-gray-400 ml-1">Ask AI to tweak, expand, or restructure this document</span>
+                    </div>
+
+                    {/* Result preview — shown after AI responds */}
+                    {refineResult && (
+                      <div className="mx-5 mb-3 rounded-lg border border-green-200 bg-green-50 p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <CheckCircle2 className="w-4 h-4 text-green-600" />
+                          <span className="text-xs font-semibold text-green-800">
+                            {refineResult.saved ? `Saved as new doc: "${refineResult.title}"` : "Refinement ready — preview below"}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-600 line-clamp-3 font-mono bg-white rounded border border-green-100 p-2 mb-3">
+                          {refineResult.content.slice(0, 300)}{refineResult.content.length > 300 ? "…" : ""}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            className="h-7 text-xs bg-green-600 hover:bg-green-700 text-white gap-1.5"
+                            onClick={acceptRefinement}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" /> Accept Changes
+                          </Button>
+                          {!refineResult.saved && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs gap-1.5"
+                              onClick={async () => {
+                                if (!viewingDoc) return;
+                                setRefining(true);
+                                try {
+                                  const r = await api.post(`/auto-docs/${viewingDoc.id}/refine`, {
+                                    prompt: refinePrompt.trim() || "Save this refinement",
+                                    save_as_new: true,
+                                  }) as any;
+                                  setRefineResult(r);
+                                  (api.get("/auto-docs/") as Promise<any>).then((d) => {
+                                    const arr = d.items || d.docs || (Array.isArray(d) ? d : []);
+                                    setHistory(arr.slice(0, 10));
+                                  }).catch(() => {});
+                                } catch { /* ignore */ } finally { setRefining(false); }
+                              }}
+                            >
+                              <PanelBottomOpen className="w-3.5 h-3.5" /> Save as New Doc
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs text-gray-500 gap-1.5"
+                            onClick={discardRefinement}
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" /> Discard
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Prompt input */}
+                    <div className="px-5 pb-4">
+                      <div className="flex gap-2 items-end">
+                        <div className="flex-1 relative">
+                          <textarea
+                            ref={refineTextareaRef}
+                            rows={2}
+                            value={refinePrompt}
+                            onChange={(e) => setRefinePrompt(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleRefine();
+                            }}
+                            placeholder='e.g. "Make the executive summary shorter" · "Add a security requirements section" · "Rewrite in formal tone" · Ctrl+Enter to send'
+                            className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1.5 items-end">
+                          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none whitespace-nowrap">
+                            <input
+                              type="checkbox"
+                              checked={refineSaveAsNew}
+                              onChange={(e) => setRefineSaveAsNew(e.target.checked)}
+                              className="rounded"
+                            />
+                            Save as new doc
+                          </label>
+                          <Button
+                            size="sm"
+                            className="h-8 text-xs px-4 bg-indigo-600 hover:bg-indigo-700 text-white gap-1.5"
+                            onClick={handleRefine}
+                            disabled={refining || !refinePrompt.trim()}
+                          >
+                            {refining ? (
+                              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Refining…</>
+                            ) : (
+                              <><Send className="w-3.5 h-3.5" /> Send to AI</>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Token usage footer */}
                 {viewingDoc.metadata && (viewingDoc.metadata.input_tokens != null || viewingDoc.metadata.output_tokens != null) && (
