@@ -42,15 +42,33 @@ class GenerateDocRequest(BaseModel):
 
 
 class SourceEntry(BaseModel):
-    type: str = Field(..., pattern="^(document|repository|code_file|standalone|jira_item|analysis)$")
+    type: str = Field(
+        ...,
+        pattern="^(document|repository|code_file|standalone|jira_item|analysis|folder|api_endpoint)$",
+    )
     id: int
+    folder_path: Optional[str] = Field(None, description="For type='folder': path prefix within the repo")
+    endpoint_path: Optional[str] = Field(None, description="For type='api_endpoint': e.g. 'POST /api/v1/generate'")
 
 
 class GenerateMultiRequest(BaseModel):
     sources: list[SourceEntry] = Field(..., min_length=1, description="One or more sources to combine")
     doc_type: str = Field(..., description=(
-        "component_spec | architecture_diagram | api_summary | brd | test_cases | data_models"
+        "component_spec | architecture_diagram | api_summary | brd | test_cases | data_models | "
+        "class_diagram | sequence_diagram | code_flow_diagram | component_interaction_diagram | "
+        "folder_architecture | api_data_flow"
     ))
+
+
+class RecommendRequest(BaseModel):
+    sources: list[SourceEntry] = Field(..., min_length=1)
+
+
+class RecommendResponse(BaseModel):
+    recommended: str
+    reason: str
+    alternatives: list[str]
+    confidence: float
 
 
 class RefineRequest(BaseModel):
@@ -442,7 +460,15 @@ async def generate_doc_multi(
             detail=f"Unknown doc_type. Supported: {auto_docs_service.SUPPORTED_TYPES}",
         )
 
-    sources = [{"type": s.type, "id": s.id} for s in payload.sources]
+    sources = [
+        {
+            "type": s.type,
+            "id": s.id,
+            "folder_path": s.folder_path or "",
+            "endpoint_path": s.endpoint_path or "",
+        }
+        for s in payload.sources
+    ]
 
     try:
         result = await auto_docs_service.generate_multi(
@@ -678,3 +704,55 @@ def get_generated_doc(
         "status": obj.status,
         "created_at": obj.created_at.isoformat(),
     }
+
+@router.post("/recommend", status_code=200)
+def recommend_diagram_type(
+    payload: RecommendRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Recommend the best diagram/doc type for the given sources.
+    Analyzes structured_analysis from each source to determine the most
+    appropriate visualization (class_diagram, sequence_diagram, etc.).
+    """
+    sources = [
+        {
+            "type": s.type,
+            "id": s.id,
+            "folder_path": s.folder_path or "",
+            "endpoint_path": s.endpoint_path or "",
+        }
+        for s in payload.sources
+    ]
+    try:
+        result = auto_docs_service.recommend_diagram_type(db, sources, tenant_id)
+    except Exception as e:
+        logger.warning(f"Recommendation failed: {e}")
+        result = {
+            "recommended": "component_spec",
+            "reason": "Could not analyze sources — defaulting to Component Specification.",
+            "alternatives": ["architecture_diagram", "api_summary"],
+            "confidence": 0.5,
+        }
+    return result
+
+
+@router.get("/discovered-endpoints")
+def get_discovered_endpoints(
+    repo_id: Optional[int] = Query(None, description="Filter to a specific repository"),
+    q: str = Query("", description="Search query — filters by path or method"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Return all API endpoints discovered during code analysis.
+    Searches all analyzed components' api_contracts.
+    Supports optional filtering by repo and search query.
+    """
+    endpoints = auto_docs_service.get_discovered_endpoints(
+        db, tenant_id=tenant_id, repo_id=repo_id, query=q
+    )
+    return {"endpoints": endpoints, "total": len(endpoints)}

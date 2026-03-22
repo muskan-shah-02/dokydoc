@@ -29,6 +29,13 @@ import {
   RotateCcw,
   CheckCircle2,
   PanelBottomOpen,
+  FolderOpen,
+  Zap,
+  GitBranch,
+  ArrowRightLeft,
+  GitMerge,
+  Link2,
+  Route,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +55,7 @@ interface DocTypeInfo {
 }
 
 const DOC_TYPES: DocTypeInfo[] = [
+  // ── Sprint A ─────────────────────────────────────────────────────────────
   {
     id: "component_spec",
     label: "Component Specification",
@@ -59,7 +67,7 @@ const DOC_TYPES: DocTypeInfo[] = [
   {
     id: "architecture_diagram",
     label: "Architecture Diagram",
-    description: "Mermaid diagram showing services, databases, and connections",
+    description: "Full system: services, databases, external APIs, and real data flows",
     icon: Network,
     badge: "Sprint A",
     badgeColor: "bg-blue-100 text-blue-700",
@@ -72,6 +80,7 @@ const DOC_TYPES: DocTypeInfo[] = [
     badge: "Sprint A",
     badgeColor: "bg-blue-100 text-blue-700",
   },
+  // ── Sprint B ─────────────────────────────────────────────────────────────
   {
     id: "brd",
     label: "Business Requirements Document",
@@ -95,6 +104,55 @@ const DOC_TYPES: DocTypeInfo[] = [
     icon: Database,
     badge: "Sprint B",
     badgeColor: "bg-purple-100 text-purple-700",
+  },
+  // ── Sprint C Smart Diagrams ───────────────────────────────────────────────
+  {
+    id: "class_diagram",
+    label: "Class Diagram",
+    description: "UML class diagram with attributes, methods, inheritance, and composition",
+    icon: GitBranch,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
+  },
+  {
+    id: "sequence_diagram",
+    label: "Sequence Diagram",
+    description: "Request/response flow: client → auth → handler → service → DB",
+    icon: ArrowRightLeft,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
+  },
+  {
+    id: "code_flow_diagram",
+    label: "Code Flow Diagram",
+    description: "How data transforms through functions, branches, and external calls",
+    icon: GitMerge,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
+  },
+  {
+    id: "component_interaction_diagram",
+    label: "Component Interaction",
+    description: "How two components communicate: call chains, shared data, dependencies",
+    icon: Link2,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
+  },
+  {
+    id: "folder_architecture",
+    label: "Folder Architecture",
+    description: "Module diagram for a folder: all files, roles, and inter-file dependencies",
+    icon: FolderOpen,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
+  },
+  {
+    id: "api_data_flow",
+    label: "API Data Flow",
+    description: "Full lifecycle for one endpoint: auth → handler → service → DB → response",
+    icon: Zap,
+    badge: "Smart",
+    badgeColor: "bg-emerald-100 text-emerald-700",
   },
 ];
 
@@ -121,7 +179,9 @@ type SourceType =
   | "code_file"
   | "standalone"
   | "jira_item"
-  | "analysis";
+  | "analysis"
+  | "folder"
+  | "api_endpoint";
 
 interface SourceItem {
   id: number;
@@ -129,6 +189,9 @@ interface SourceItem {
   type: SourceType;
   repoId?: number;
   repoName?: string;
+  location?: string;      // raw GitHub URL — used for folder path extraction
+  folderPath?: string;    // for type="folder" sources
+  endpointPath?: string;  // for type="api_endpoint" sources
 }
 
 interface RepoItem {
@@ -142,12 +205,14 @@ const SOURCE_STYLES: Record<
   SourceType,
   { chip: string; hover: string; check: string; icon: React.ComponentType<{ className?: string }> }
 > = {
-  document:   { chip: "bg-blue-100 text-blue-700",   hover: "hover:bg-blue-50",   check: "text-blue-600",   icon: FileText },
-  repository: { chip: "bg-green-100 text-green-700", hover: "hover:bg-green-50",  check: "text-green-600",  icon: Database },
-  code_file:  { chip: "bg-amber-100 text-amber-700", hover: "hover:bg-amber-50",  check: "text-amber-600",  icon: FileCode },
-  standalone: { chip: "bg-teal-100 text-teal-700",   hover: "hover:bg-teal-50",   check: "text-teal-600",   icon: Code },
-  jira_item:  { chip: "bg-purple-100 text-purple-700", hover: "hover:bg-purple-50", check: "text-purple-600", icon: Tag },
-  analysis:   { chip: "bg-indigo-100 text-indigo-700", hover: "hover:bg-indigo-50", check: "text-indigo-600", icon: Sparkles },
+  document:     { chip: "bg-blue-100 text-blue-700",     hover: "hover:bg-blue-50",     check: "text-blue-600",     icon: FileText },
+  repository:   { chip: "bg-green-100 text-green-700",   hover: "hover:bg-green-50",    check: "text-green-600",    icon: Database },
+  code_file:    { chip: "bg-amber-100 text-amber-700",   hover: "hover:bg-amber-50",    check: "text-amber-600",    icon: FileCode },
+  standalone:   { chip: "bg-teal-100 text-teal-700",     hover: "hover:bg-teal-50",     check: "text-teal-600",     icon: Code },
+  jira_item:    { chip: "bg-purple-100 text-purple-700", hover: "hover:bg-purple-50",   check: "text-purple-600",   icon: Tag },
+  analysis:     { chip: "bg-indigo-100 text-indigo-700", hover: "hover:bg-indigo-50",   check: "text-indigo-600",   icon: Sparkles },
+  folder:       { chip: "bg-orange-100 text-orange-700", hover: "hover:bg-orange-50",   check: "text-orange-600",   icon: FolderOpen },
+  api_endpoint: { chip: "bg-cyan-100 text-cyan-700",     hover: "hover:bg-cyan-50",     check: "text-cyan-600",     icon: Zap },
 };
 
 // ----- Main Page -----
@@ -178,6 +243,27 @@ export default function AutoDocsPage() {
   const [sourceSearch, setSourceSearch] = useState("");
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
+
+  // Smart recommendation
+  const [recommendation, setRecommendation] = useState<{
+    recommended: string; reason: string; alternatives: string[]; confidence: number;
+  } | null>(null);
+  const [recommendLoading, setRecommendLoading] = useState(false);
+
+  // Folder browsing within repos (expanded folder groups)
+  const [expandedFolderGroups, setExpandedFolderGroups] = useState<Record<number, Set<string>>>({});
+  const [showFolderInput, setShowFolderInput] = useState<Record<number, boolean>>({});
+  const [folderInputValue, setFolderInputValue] = useState<Record<number, string>>({});
+
+  // API endpoint picker
+  const [showEndpointPicker, setShowEndpointPicker] = useState(false);
+  const [endpointSearch, setEndpointSearch] = useState("");
+  const [discoveredEndpoints, setDiscoveredEndpoints] = useState<Array<{
+    method: string; path: string; label: string; description: string;
+    source_file: string; component_id: number; repo_id: number | null;
+  }>>([]);
+  const [endpointsLoading, setEndpointsLoading] = useState(false);
+  const [manualEndpointInput, setManualEndpointInput] = useState("");
 
   // AI Refinement panel
   const [showRefinePanel, setShowRefinePanel] = useState(false);
@@ -282,7 +368,7 @@ export default function AutoDocsPage() {
 
   useEffect(() => { fetchHistory(); }, []);
 
-  // Lazy-load files for a specific repo
+  // Lazy-load files for a specific repo (stores location for folder extraction)
   const loadRepoFiles = (repoId: number, repoName: string) => {
     if (repoFiles[repoId] !== undefined || repoFilesLoading.has(repoId)) return;
     setRepoFilesLoading((prev) => new Set(prev).add(repoId));
@@ -293,10 +379,11 @@ export default function AutoDocsPage() {
           ...prev,
           [repoId]: arr.map((c: any) => ({
             id: c.id,
-            name: c.name || c.location || `File #${c.id}`,
+            name: c.name || c.location?.split("/").pop() || `File #${c.id}`,
             type: "code_file" as const,
             repoId,
             repoName,
+            location: c.location || "",
           })),
         }));
       })
@@ -308,6 +395,46 @@ export default function AutoDocsPage() {
           return next;
         });
       });
+  };
+
+  // Extract unique folder paths from repo file locations
+  const getFolderPaths = (repoId: number): string[] => {
+    const files = repoFiles[repoId] || [];
+    const folders = new Set<string>();
+    for (const file of files) {
+      const loc = file.location || "";
+      // Extract path portion from GitHub URL
+      const match = loc.match(/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\/(.+)/) ||
+                    loc.match(/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\/[^/]+\/(.+)/);
+      const pathPart = match ? match[1] : loc;
+      const parts = pathPart.split("/");
+      // Add all parent folder paths (not the file itself)
+      for (let i = 1; i < parts.length; i++) {
+        folders.add(parts.slice(0, i).join("/"));
+      }
+    }
+    return Array.from(folders).sort();
+  };
+
+  // Count files in a given folder path
+  const countFilesInFolder = (repoId: number, folderPath: string): number => {
+    const files = repoFiles[repoId] || [];
+    const fp = folderPath.toLowerCase();
+    return files.filter((f) => {
+      const loc = (f.location || "").toLowerCase();
+      return loc.includes("/" + fp + "/") || loc.includes("/" + fp);
+    }).length;
+  };
+
+  // Fetch discovered API endpoints
+  const fetchDiscoveredEndpoints = (q: string = "") => {
+    setEndpointsLoading(true);
+    (api.get(`/auto-docs/discovered-endpoints?q=${encodeURIComponent(q)}`) as Promise<any>)
+      .then((data) => {
+        setDiscoveredEndpoints(data.endpoints || []);
+      })
+      .catch(console.error)
+      .finally(() => setEndpointsLoading(false));
   };
 
   const toggleRepoExpand = (repo: RepoItem) => {
@@ -338,12 +465,46 @@ export default function AutoDocsPage() {
   const isSelected = (src: SourceItem) =>
     selectedSources.some((s) => s.type === src.type && s.id === src.id);
 
+  // Debounced recommendation: call /auto-docs/recommend when sources change
+  useEffect(() => {
+    if (selectedSources.length === 0) { setRecommendation(null); return; }
+    const timer = setTimeout(() => {
+      setRecommendLoading(true);
+      const payload = {
+        sources: selectedSources.map((s) => ({
+          type: s.type,
+          id: s.id,
+          folder_path: s.folderPath || null,
+          endpoint_path: s.endpointPath || null,
+        })),
+      };
+      (api.post("/auto-docs/recommend", payload) as Promise<any>)
+        .then((res) => setRecommendation(res))
+        .catch(() => setRecommendation(null))
+        .finally(() => setRecommendLoading(false));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [selectedSources]);
+
+  // When endpoint picker opens, fetch endpoints
+  useEffect(() => {
+    if (showEndpointPicker) {
+      fetchDiscoveredEndpoints(endpointSearch);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showEndpointPicker]);
+
   const handleGenerate = async () => {
     if (selectedSources.length === 0 || !selectedDocType) return;
     setGenerating(true);
     try {
       const payload = {
-        sources: selectedSources.map((s) => ({ type: s.type, id: s.id })),
+        sources: selectedSources.map((s) => ({
+          type: s.type,
+          id: s.id,
+          folder_path: s.folderPath || undefined,
+          endpoint_path: s.endpointPath || undefined,
+        })),
         doc_type: selectedDocType,
       };
       const data = await api.post("/auto-docs/generate-multi", payload) as GeneratedDocFull;
@@ -620,7 +781,7 @@ export default function AutoDocsPage() {
                                   </button>
                                 </div>
 
-                                {/* Expanded file list */}
+                                {/* Expanded: Folders + Files */}
                                 {isExpanded && (
                                   <div className="ml-6 border-l border-gray-200">
                                     {isLoading && (
@@ -628,20 +789,116 @@ export default function AutoDocsPage() {
                                         <Loader2 className="w-3 h-3 animate-spin" /> Loading files…
                                       </div>
                                     )}
-                                    {!isLoading && files.length === 0 && (
-                                      <p className="px-3 py-2 text-xs text-gray-400">
-                                        {q ? "No files match your search." : "No analyzed files found."}
-                                      </p>
-                                    )}
-                                    {!isLoading && files.length > 0 && (
+
+                                    {!isLoading && (repoFiles[repo.id] || []).length > 0 && (
                                       <>
-                                        {files.map((f) => <SourceRow key={`cf:${f.id}`} src={f} />)}
-                                        {!q && (repoFiles[repo.id] || []).length >= 500 && (
-                                          <p className="px-3 py-1.5 text-xs text-gray-400 italic">
-                                            Showing first 500 files. Use search to find more.
+                                        {/* Folder groups */}
+                                        {!q && (
+                                          <div className="border-b border-gray-100 pb-1 mb-1">
+                                            <p className="px-3 pt-1.5 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
+                                              Folders
+                                            </p>
+                                            {getFolderPaths(repo.id).slice(0, 20).map((fp) => {
+                                              const folderSrc: SourceItem = {
+                                                id: repo.id,
+                                                name: `📁 ${fp}`,
+                                                type: "folder",
+                                                repoId: repo.id,
+                                                repoName: repo.name,
+                                                folderPath: fp,
+                                              };
+                                              const folderSelected = isSelected(folderSrc);
+                                              const fileCount = countFilesInFolder(repo.id, fp);
+                                              const depth = fp.split("/").length - 1;
+                                              return (
+                                                <button
+                                                  key={fp}
+                                                  onClick={() => toggleSource(folderSrc)}
+                                                  className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${
+                                                    folderSelected ? "bg-orange-50 font-medium" : "hover:bg-orange-50"
+                                                  }`}
+                                                  style={{ paddingLeft: `${12 + depth * 10}px` }}
+                                                >
+                                                  <FolderOpen className="w-3 h-3 text-orange-400 flex-shrink-0" />
+                                                  <span className="flex-1 truncate text-orange-700">{fp.split("/").pop()}</span>
+                                                  <span className="text-gray-400 text-[10px]">{fileCount} files</span>
+                                                  {folderSelected && <Check className="w-3 h-3 text-orange-500 flex-shrink-0" />}
+                                                </button>
+                                              );
+                                            })}
+                                            {/* Manual folder path input */}
+                                            <div className="px-3 pt-1">
+                                              {showFolderInput[repo.id] ? (
+                                                <div className="flex items-center gap-1.5">
+                                                  <input
+                                                    type="text"
+                                                    placeholder="e.g. backend/app/api"
+                                                    value={folderInputValue[repo.id] || ""}
+                                                    onChange={(e) => setFolderInputValue((prev) => ({ ...prev, [repo.id]: e.target.value }))}
+                                                    className="flex-1 text-xs border rounded px-2 py-1 outline-none focus:border-orange-400"
+                                                    onKeyDown={(e) => {
+                                                      if (e.key === "Enter") {
+                                                        const fp = folderInputValue[repo.id]?.trim();
+                                                        if (fp) {
+                                                          toggleSource({
+                                                            id: repo.id, name: `📁 ${fp}`, type: "folder",
+                                                            repoId: repo.id, repoName: repo.name, folderPath: fp,
+                                                          });
+                                                          setFolderInputValue((prev) => ({ ...prev, [repo.id]: "" }));
+                                                          setShowFolderInput((prev) => ({ ...prev, [repo.id]: false }));
+                                                        }
+                                                      }
+                                                      if (e.key === "Escape") setShowFolderInput((prev) => ({ ...prev, [repo.id]: false }));
+                                                    }}
+                                                    autoFocus
+                                                  />
+                                                  <button
+                                                    className="text-[10px] text-orange-600 hover:text-orange-700 font-medium"
+                                                    onClick={() => {
+                                                      const fp = folderInputValue[repo.id]?.trim();
+                                                      if (fp) {
+                                                        toggleSource({ id: repo.id, name: `📁 ${fp}`, type: "folder", repoId: repo.id, repoName: repo.name, folderPath: fp });
+                                                        setFolderInputValue((prev) => ({ ...prev, [repo.id]: "" }));
+                                                      }
+                                                      setShowFolderInput((prev) => ({ ...prev, [repo.id]: false }));
+                                                    }}
+                                                  >Add</button>
+                                                </div>
+                                              ) : (
+                                                <button
+                                                  className="text-[10px] text-gray-400 hover:text-orange-500 flex items-center gap-1 pb-1"
+                                                  onClick={() => setShowFolderInput((prev) => ({ ...prev, [repo.id]: true }))}
+                                                >
+                                                  <Plus className="w-3 h-3" /> Enter folder path manually
+                                                </button>
+                                              )}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* File list */}
+                                        <p className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wide">
+                                          Files
+                                        </p>
+                                        {files.length === 0 ? (
+                                          <p className="px-3 py-2 text-xs text-gray-400">
+                                            {q ? "No files match your search." : "No analyzed files."}
                                           </p>
+                                        ) : (
+                                          <>
+                                            {files.map((f) => <SourceRow key={`cf:${f.id}`} src={f} />)}
+                                            {!q && (repoFiles[repo.id] || []).length >= 500 && (
+                                              <p className="px-3 py-1.5 text-xs text-gray-400 italic">
+                                                Showing first 500 files. Use search to find more.
+                                              </p>
+                                            )}
+                                          </>
                                         )}
                                       </>
+                                    )}
+
+                                    {!isLoading && (repoFiles[repo.id] || []).length === 0 && (
+                                      <p className="px-3 py-2 text-xs text-gray-400">No analyzed files found.</p>
                                     )}
                                   </div>
                                 )}
@@ -650,6 +907,113 @@ export default function AutoDocsPage() {
                           })}
                       </div>
                     )}
+
+                    {/* API Endpoint section */}
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50 flex items-center gap-1.5">
+                        <Zap className="w-3 h-3 text-cyan-500" />
+                        API Endpoints
+                        <span className="text-[10px] font-normal text-gray-400 ml-1">— trace full data flow</span>
+                      </p>
+                      {!showEndpointPicker ? (
+                        <button
+                          className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs text-cyan-600 hover:bg-cyan-50 transition-colors"
+                          onClick={() => setShowEndpointPicker(true)}
+                        >
+                          <Plus className="w-3 h-3" /> Browse or search endpoints…
+                        </button>
+                      ) : (
+                        <div className="px-3 pb-2">
+                          <div className="flex items-center gap-1.5 mb-1.5">
+                            <input
+                              type="text"
+                              placeholder="Search endpoints (e.g. /auto-docs, POST)…"
+                              value={endpointSearch}
+                              onChange={(e) => {
+                                setEndpointSearch(e.target.value);
+                                fetchDiscoveredEndpoints(e.target.value);
+                              }}
+                              className="flex-1 text-xs border rounded px-2 py-1.5 outline-none focus:border-cyan-400"
+                              autoFocus
+                            />
+                            <button onClick={() => setShowEndpointPicker(false)} className="text-gray-400 hover:text-gray-600">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {endpointsLoading && (
+                            <div className="flex items-center gap-1.5 text-xs text-gray-400 py-1">
+                              <Loader2 className="w-3 h-3 animate-spin" /> Searching…
+                            </div>
+                          )}
+
+                          {!endpointsLoading && discoveredEndpoints.length > 0 && (
+                            <div className="max-h-32 overflow-y-auto border rounded divide-y">
+                              {discoveredEndpoints.map((ep, i) => {
+                                const epSrc: SourceItem = {
+                                  id: 0,
+                                  name: ep.label,
+                                  type: "api_endpoint",
+                                  endpointPath: ep.label,
+                                };
+                                const sel = isSelected(epSrc);
+                                return (
+                                  <button
+                                    key={i}
+                                    onClick={() => { toggleSource(epSrc); }}
+                                    className={`w-full text-left px-2 py-1.5 flex items-center gap-2 transition-colors text-xs ${sel ? "bg-cyan-50" : "hover:bg-cyan-50"}`}
+                                  >
+                                    <span className={`font-mono text-[10px] font-bold px-1 rounded flex-shrink-0 ${
+                                      ep.method === "GET" ? "bg-green-100 text-green-700" :
+                                      ep.method === "POST" ? "bg-blue-100 text-blue-700" :
+                                      ep.method === "PUT" || ep.method === "PATCH" ? "bg-amber-100 text-amber-700" :
+                                      ep.method === "DELETE" ? "bg-red-100 text-red-700" :
+                                      "bg-gray-100 text-gray-700"
+                                    }`}>{ep.method || "ANY"}</span>
+                                    <span className="flex-1 font-mono truncate text-gray-700">{ep.path}</span>
+                                    <span className="text-[10px] text-gray-400 truncate max-w-[80px]" title={ep.source_file}>{ep.source_file}</span>
+                                    {sel && <Check className="w-3 h-3 text-cyan-500 flex-shrink-0" />}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {!endpointsLoading && discoveredEndpoints.length === 0 && (
+                            <p className="text-xs text-gray-400 py-1">No endpoints found. Enter manually below.</p>
+                          )}
+
+                          {/* Manual endpoint input */}
+                          <div className="mt-2 flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              placeholder="e.g. POST /api/v1/auto-docs/generate-multi"
+                              value={manualEndpointInput}
+                              onChange={(e) => setManualEndpointInput(e.target.value)}
+                              className="flex-1 text-xs border rounded px-2 py-1 outline-none focus:border-cyan-400"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && manualEndpointInput.trim()) {
+                                  toggleSource({ id: 0, name: manualEndpointInput.trim(), type: "api_endpoint", endpointPath: manualEndpointInput.trim() });
+                                  setManualEndpointInput("");
+                                  setShowEndpointPicker(false);
+                                }
+                              }}
+                            />
+                            <button
+                              className="text-xs bg-cyan-600 text-white rounded px-2 py-1 hover:bg-cyan-700 disabled:opacity-50"
+                              disabled={!manualEndpointInput.trim()}
+                              onClick={() => {
+                                if (manualEndpointInput.trim()) {
+                                  toggleSource({ id: 0, name: manualEndpointInput.trim(), type: "api_endpoint", endpointPath: manualEndpointInput.trim() });
+                                  setManualEndpointInput("");
+                                  setShowEndpointPicker(false);
+                                }
+                              }}
+                            >Add</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
 
                     {/* Standalone files section */}
                     {filtered(standaloneFiles).length > 0 && (
@@ -705,10 +1069,51 @@ export default function AutoDocsPage() {
 
             {/* Doc type selector */}
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">Document Type</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-medium text-gray-600">Document Type</label>
+                {recommendLoading && (
+                  <span className="text-[10px] text-gray-400 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Analyzing…
+                  </span>
+                )}
+                {!recommendLoading && recommendation && (
+                  <span className="text-[10px] text-emerald-600 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" />
+                    AI recommended
+                  </span>
+                )}
+              </div>
+
+              {/* Recommendation banner */}
+              {recommendation && !recommendLoading && (
+                <div className="mb-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs">
+                  <div className="flex items-start gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-500 mt-0.5 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="font-medium text-emerald-800">
+                        Recommended: {DOC_TYPES.find(d => d.id === recommendation.recommended)?.label ?? recommendation.recommended}
+                        <span className="ml-1.5 text-[10px] text-emerald-600 font-normal">
+                          ({Math.round(recommendation.confidence * 100)}% confident)
+                        </span>
+                      </p>
+                      <p className="text-emerald-700 mt-0.5 leading-tight">{recommendation.reason}</p>
+                      {!selectedDocType && (
+                        <button
+                          className="mt-1.5 text-emerald-700 font-medium underline hover:text-emerald-800"
+                          onClick={() => setSelectedDocType(recommendation.recommended)}
+                        >
+                          Use this →
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-1.5">
                 {DOC_TYPES.map((dt) => {
                   const Icon = dt.icon;
+                  const isRecommended = recommendation?.recommended === dt.id;
                   return (
                     <button
                       key={dt.id}
@@ -716,18 +1121,28 @@ export default function AutoDocsPage() {
                       className={`w-full text-left flex items-start gap-3 p-3 rounded-lg border transition-colors ${
                         selectedDocType === dt.id
                           ? "border-blue-400 bg-blue-50"
+                          : isRecommended
+                          ? "border-emerald-300 bg-emerald-50/50 hover:border-emerald-400"
                           : "border-gray-200 hover:border-gray-300 bg-white"
                       }`}
                     >
-                      <Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${selectedDocType === dt.id ? "text-blue-600" : "text-gray-400"}`} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                      <Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
+                        selectedDocType === dt.id ? "text-blue-600" :
+                        isRecommended ? "text-emerald-500" : "text-gray-400"
+                      }`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs font-medium text-gray-800">{dt.label}</span>
                           <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${dt.badgeColor}`}>
                             {dt.badge}
                           </span>
+                          {isRecommended && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
+                              <Sparkles className="w-2.5 h-2.5" /> Recommended
+                            </span>
+                          )}
                         </div>
-                        <p className="text-xs text-gray-500 mt-0.5 truncate">{dt.description}</p>
+                        <p className="text-xs text-gray-500 mt-0.5 leading-tight">{dt.description}</p>
                       </div>
                     </button>
                   );
