@@ -171,14 +171,20 @@ export default function AutoDocsPage() {
   const [diagramView, setDiagramView] = useState<"rendered" | "diagram">("rendered");
   const [showSourcePicker, setShowSourcePicker] = useState(false);
   const [sourceSearch, setSourceSearch] = useState("");
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState<string | null>(null);
 
   const pickerRef = useRef<HTMLDivElement>(null);
+  const downloadMenuRef = useRef<HTMLDivElement>(null);
 
-  // Close picker on outside click
+  // Close picker / download menu on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setShowSourcePicker(false);
+      }
+      if (downloadMenuRef.current && !downloadMenuRef.current.contains(e.target as Node)) {
+        setShowDownloadMenu(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -365,6 +371,31 @@ export default function AutoDocsPage() {
     a.download = `${doc.doc_type}-${doc.id}.md`;
     a.click();
     URL.revokeObjectURL(url);
+    setShowDownloadMenu(false);
+  };
+
+  const handleExport = async (doc: GeneratedDocFull, format: "docx" | "pdf") => {
+    setExportingFormat(format);
+    setShowDownloadMenu(false);
+    try {
+      const token = localStorage.getItem("accessToken");
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+      const resp = await fetch(`${apiBase}/auto-docs/${doc.id}/export?format=${format}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${doc.doc_type}-${doc.id}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(`Export failed. Please try again.\n${err}`);
+    } finally {
+      setExportingFormat(null);
+    }
   };
 
   // Filter helpers
@@ -784,14 +815,49 @@ export default function AutoDocsPage() {
                         <><Copy className="w-3.5 h-3.5" /> Copy</>
                       )}
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs gap-1.5"
-                      onClick={() => handleDownload(viewingDoc)}
-                    >
-                      <Download className="w-3.5 h-3.5" /> Download .md
-                    </Button>
+                    {/* Download dropdown */}
+                    <div className="relative" ref={downloadMenuRef}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => setShowDownloadMenu((v) => !v)}
+                        disabled={!!exportingFormat}
+                      >
+                        {exportingFormat ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        {exportingFormat ? `Exporting ${exportingFormat.toUpperCase()}…` : "Download"}
+                        <ChevronDown className="w-3 h-3 ml-0.5" />
+                      </Button>
+                      {showDownloadMenu && (
+                        <div className="absolute right-0 top-8 z-50 w-44 bg-white border border-gray-200 rounded-md shadow-lg py-1 text-xs">
+                          <button
+                            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                            onClick={() => handleDownload(viewingDoc)}
+                          >
+                            <FileText className="w-3.5 h-3.5 text-gray-400" />
+                            Markdown (.md)
+                          </button>
+                          <button
+                            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                            onClick={() => handleExport(viewingDoc, "docx")}
+                          >
+                            <FileText className="w-3.5 h-3.5 text-blue-500" />
+                            Word Document (.docx)
+                          </button>
+                          <button
+                            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                            onClick={() => handleExport(viewingDoc, "pdf")}
+                          >
+                            <FileText className="w-3.5 h-3.5 text-red-500" />
+                            PDF (.pdf)
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
