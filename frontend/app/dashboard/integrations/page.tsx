@@ -60,7 +60,7 @@ interface ConnectFormState {
 
 // OAuth-capable providers use the full OAuth flow.
 // Notion uses manual token (internal integration token model).
-const OAUTH_PROVIDERS = new Set(["jira", "slack"]);
+const OAUTH_PROVIDERS = new Set(["jira", "slack", "github"]);
 
 const PROVIDER_META: Record<
   string,
@@ -118,6 +118,15 @@ const PROVIDER_META: Record<
     tokenPlaceholder: "",
     useOAuth: false,
     oauthLabel: "",
+  },
+  github: {
+    label: "GitHub",
+    color: "bg-gray-900 text-white",
+    description: "Connect your GitHub account to access private repositories in Code Analysis",
+    tokenLabel: "GitHub Personal Access Token",
+    tokenPlaceholder: "ghp_...",
+    useOAuth: true,
+    oauthLabel: "Connect with GitHub",
   },
 };
 
@@ -444,6 +453,7 @@ function IntegrationsContent() {
             {Object.entries(PROVIDER_META).map(([provider, meta]) => {
               const connected = providerMap[provider];
               const comingSoon = provider === "confluence" || provider === "sharepoint";
+              // GitHub shows a special "Code Repos" badge when connected
               const isOAuthLoading = oauthLoading === provider;
 
               return (

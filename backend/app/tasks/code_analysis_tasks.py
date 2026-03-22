@@ -397,7 +397,7 @@ def _file_analysis_priority(file_info: dict) -> tuple:
 
 @celery_app.task(name="repo_analysis_task", bind=True, max_retries=1)
 def repo_analysis_task(
-    self, repo_id: int, tenant_id: int, file_list: list
+    self, repo_id: int, tenant_id: int, file_list: list, github_token: Optional[str] = None
 ):
     """
     Orchestrator: Iterates through the file list for a repository,
@@ -456,7 +456,7 @@ def repo_analysis_task(
             file_path = file_info.get("path", "unknown")
             file_url = file_info.get("url", "")
 
-            code_content = _fetch_file_content(file_url)
+            code_content = _fetch_file_content(file_url, github_token=github_token)
             if not code_content:
                 logger.warning(f"Empty content for {file_path}, skipping")
                 return None
@@ -1178,14 +1178,21 @@ def webhook_triggered_analysis(
         db.close()
 
 
-def _fetch_file_content(url: str) -> Optional[str]:
-    """Fetch raw file content from a URL (e.g., GitHub raw URL)."""
+def _fetch_file_content(url: str, github_token: Optional[str] = None) -> Optional[str]:
+    """Fetch raw file content from a URL (e.g., GitHub raw URL).
+    Passes Authorization header when github_token is provided (required for private repos).
+    """
     if not url:
         return None
     try:
         import httpx
+        from app.core.config import settings
+        headers = {}
+        token = github_token or settings.GITHUB_TOKEN
+        if token and "raw.githubusercontent.com" in url:
+            headers["Authorization"] = f"Bearer {token}"
         with httpx.Client(timeout=30.0) as client:
-            response = client.get(url)
+            response = client.get(url, headers=headers)
             response.raise_for_status()
             return response.text
     except Exception as e:

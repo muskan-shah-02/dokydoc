@@ -434,6 +434,18 @@ export default function CodePage() {
   } | null>(null);
   const [isScanning, setIsScanning] = useState(false);
 
+  // GitHub integration state for repo picker in Add Component dialog
+  const [githubRepos, setGithubRepos] = useState<Array<{
+    id: number; full_name: string; name: string; private: boolean;
+    description: string; default_branch: string; html_url: string;
+    language: string; owner_login: string; owner_type: string;
+  }>>([]);
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubLogin, setGithubLogin] = useState<string | null>(null);
+  const [loadingGithubRepos, setLoadingGithubRepos] = useState(false);
+  const [githubRepoSearch, setGithubRepoSearch] = useState("");
+  const [addMode, setAddMode] = useState<"url" | "github">("url");
+
   // --- State: UI ---
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -509,6 +521,29 @@ export default function CodePage() {
     } finally {
       setIsLoading(false);
       if (showRefreshing) setIsRefreshing(false);
+    }
+  }, []);
+
+  const fetchGithubRepos = useCallback(async () => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setLoadingGithubRepos(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/v1/integrations/github/repos", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGithubRepos(data.repos || []);
+        setGithubLogin(data.github_login || null);
+        setGithubConnected(true);
+      } else if (res.status === 404) {
+        setGithubConnected(false);
+      }
+    } catch {
+      setGithubConnected(false);
+    } finally {
+      setLoadingGithubRepos(false);
     }
   }, []);
 
@@ -794,6 +829,15 @@ export default function CodePage() {
       setIsSubmitting(false);
       return;
     }
+    if (!newComponent.location) {
+      setSubmissionError(
+        addMode === "github"
+          ? "Please select a repository from the list."
+          : "Location URL is required."
+      );
+      setIsSubmitting(false);
+      return;
+    }
     try {
       await registerComponent();
     } catch (error: any) {
@@ -1076,6 +1120,12 @@ export default function CodePage() {
             onOpenChange={(open) => {
               setIsDialogOpen(open);
               setSubmissionError(null);
+              if (open) {
+                setAddMode("url");
+                setScanPreview(null);
+                setGithubRepoSearch("");
+                fetchGithubRepos();
+              }
             }}
           >
             <DialogTrigger asChild>
@@ -1083,13 +1133,43 @@ export default function CodePage() {
                 <Plus className="w-4 h-4 mr-2" /> Add Component
               </Button>
             </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
+            <DialogContent className="sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle className="flex items-center space-x-2">
                   <FileCode className="w-5 h-5" />
                   <span>Register New Component</span>
                 </DialogTitle>
               </DialogHeader>
+
+              {/* Mode toggle: URL vs GitHub picker */}
+              <div className="flex rounded-lg border border-input overflow-hidden text-sm">
+                <button
+                  type="button"
+                  onClick={() => { setAddMode("url"); setScanPreview(null); }}
+                  className={`flex-1 px-3 py-2 flex items-center justify-center gap-1.5 transition-colors ${
+                    addMode === "url"
+                      ? "bg-blue-600 text-white font-medium"
+                      : "bg-background text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" /> Paste URL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAddMode("github")}
+                  className={`flex-1 px-3 py-2 flex items-center justify-center gap-1.5 transition-colors ${
+                    addMode === "github"
+                      ? "bg-gray-900 text-white font-medium"
+                      : "bg-background text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  <FolderGit2 className="w-3.5 h-3.5" /> From GitHub
+                  {githubConnected && (
+                    <span className="ml-1 text-[10px] bg-green-500 text-white px-1.5 py-0.5 rounded-full">Connected</span>
+                  )}
+                </button>
+              </div>
+
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <Label htmlFor="name" className="text-sm font-medium">Component Name</Label>
@@ -1107,48 +1187,182 @@ export default function CodePage() {
                     <option value="Function">Function</option>
                   </select>
                 </div>
-                <div>
-                  <Label htmlFor="location" className="text-sm font-medium">Location URL</Label>
-                  <div className="relative mt-1 flex gap-2">
-                    <div className="relative flex-1">
-                      <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-                      <Input id="location" name="location" value={newComponent.location}
-                        onChange={handleInputChange} placeholder="https://github.com/owner/repo  or file URL" className="pl-10" required />
-                    </div>
-                    {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
-                      <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"
-                        onClick={handleScanPreview} disabled={isScanning}>
-                        {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
-                        <span className="ml-1.5 text-xs">Scan</span>
-                      </Button>
+
+                {/* ── GitHub Repo Picker ── */}
+                {addMode === "github" ? (
+                  <div className="space-y-3">
+                    {!githubConnected ? (
+                      <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-center space-y-2">
+                        <FolderGit2 className="w-8 h-8 text-gray-400 mx-auto" />
+                        <p className="text-sm text-gray-600 font-medium">GitHub not connected</p>
+                        <p className="text-xs text-gray-400">
+                          Go to{" "}
+                          <a href="/dashboard/integrations" className="text-blue-600 underline">
+                            Integrations
+                          </a>{" "}
+                          and connect your GitHub account to browse private repos.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <div className="relative flex-1">
+                            <Search className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
+                            <input
+                              type="text"
+                              value={githubRepoSearch}
+                              onChange={(e) => setGithubRepoSearch(e.target.value)}
+                              placeholder={`Search ${githubLogin ? `@${githubLogin}` : ""} repos…`}
+                              className="w-full pl-8 pr-3 py-2 text-sm border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400"
+                            />
+                          </div>
+                          {loadingGithubRepos && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />}
+                        </div>
+
+                        <div className="max-h-52 overflow-y-auto rounded-md border border-input divide-y">
+                          {githubRepos
+                            .filter((r) =>
+                              !githubRepoSearch ||
+                              r.full_name.toLowerCase().includes(githubRepoSearch.toLowerCase()) ||
+                              r.description.toLowerCase().includes(githubRepoSearch.toLowerCase())
+                            )
+                            .map((repo) => {
+                              const isSelected = newComponent.location === repo.html_url;
+                              return (
+                                <button
+                                  key={repo.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setNewComponent((prev) => ({
+                                      ...prev,
+                                      location: repo.html_url,
+                                      name: prev.name || repo.name,
+                                      component_type: "Repository",
+                                      version: repo.default_branch,
+                                    }));
+                                    setScanPreview(null);
+                                  }}
+                                  className={`w-full text-left px-3 py-2.5 hover:bg-muted transition-colors ${
+                                    isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <FolderGit2 className={`w-3.5 h-3.5 shrink-0 ${isSelected ? "text-blue-600" : "text-gray-400"}`} />
+                                    <span className="text-sm font-medium truncate">{repo.full_name}</span>
+                                    {repo.private && (
+                                      <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded border shrink-0">
+                                        Private
+                                      </span>
+                                    )}
+                                    {repo.language && (
+                                      <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded shrink-0">
+                                        {repo.language}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {repo.description && (
+                                    <p className="text-[11px] text-muted-foreground mt-0.5 pl-5 truncate">
+                                      {repo.description}
+                                    </p>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          {githubRepos.filter((r) =>
+                            !githubRepoSearch ||
+                            r.full_name.toLowerCase().includes(githubRepoSearch.toLowerCase())
+                          ).length === 0 && !loadingGithubRepos && (
+                            <p className="text-sm text-muted-foreground text-center py-4">
+                              No repos found matching &quot;{githubRepoSearch}&quot;
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Selected repo + scan preview */}
+                        {newComponent.location && newComponent.location.includes("github.com") && (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted rounded px-3 py-1.5">
+                              <GitBranch className="w-3 h-3" />
+                              <span className="font-mono truncate">{newComponent.location}</span>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="w-full h-8 text-xs gap-1.5"
+                              onClick={handleScanPreview}
+                              disabled={isScanning}
+                            >
+                              {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                              Scan repo to preview files
+                            </Button>
+                            {scanPreview && (
+                              <div className="rounded-lg border bg-slate-50 p-3 space-y-2">
+                                <div className="flex items-center gap-3 text-sm">
+                                  <span className="font-medium">{scanPreview.total} total files</span>
+                                  <span className="text-green-700 font-medium">✓ {scanPreview.analyze_count} to analyze</span>
+                                  <span className="text-slate-400">⊘ {scanPreview.skipped_count} skipped</span>
+                                </div>
+                                {Object.keys(scanPreview.by_language).length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {Object.entries(scanPreview.by_language).sort((a,b) => b[1]-a[1]).slice(0, 8).map(([lang, cnt]) => (
+                                      <span key={lang} className="text-[11px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-mono">{lang}: {cnt}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
-                  {/* Scan preview result */}
-                  {scanPreview && (
-                    <div className="mt-2 rounded-lg border bg-slate-50 dark:bg-slate-900 p-3 space-y-2">
-                      <div className="flex items-center gap-3 text-sm">
-                        <span className="font-medium text-foreground">{scanPreview.total} total files</span>
-                        <span className="text-green-700 font-medium">✓ {scanPreview.analyze_count} will be analyzed</span>
-                        <span className="text-slate-400">⊘ {scanPreview.skipped_count} skipped</span>
+                ) : (
+                  /* ── URL mode (original flow) ── */
+                  <div>
+                    <Label htmlFor="location" className="text-sm font-medium">Location URL</Label>
+                    <div className="relative mt-1 flex gap-2">
+                      <div className="relative flex-1">
+                        <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+                        <Input id="location" name="location" value={newComponent.location}
+                          onChange={handleInputChange} placeholder="https://github.com/owner/repo  or file URL" className="pl-10" required />
                       </div>
-                      {Object.keys(scanPreview.by_language).length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {Object.entries(scanPreview.by_language).sort((a,b) => b[1]-a[1]).slice(0, 8).map(([lang, cnt]) => (
-                            <span key={lang} className="text-[11px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-mono">{lang}: {cnt}</span>
-                          ))}
-                        </div>
-                      )}
-                      {Object.keys(scanPreview.skipped_by_category).length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          <span className="text-[11px] text-slate-400 self-center">Skipped:</span>
-                          {Object.entries(scanPreview.skipped_by_category).sort((a,b) => b[1]-a[1]).map(([cat, cnt]) => (
-                            <span key={cat} className="text-[11px] bg-slate-100 text-slate-500 rounded px-1.5 py-0.5">{cat}: {cnt}</span>
-                          ))}
-                        </div>
+                      {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
+                        <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"
+                          onClick={handleScanPreview} disabled={isScanning}>
+                          {isScanning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                          <span className="ml-1.5 text-xs">Scan</span>
+                        </Button>
                       )}
                     </div>
-                  )}
-                </div>
+                    {/* Scan preview result */}
+                    {scanPreview && (
+                      <div className="mt-2 rounded-lg border bg-slate-50 dark:bg-slate-900 p-3 space-y-2">
+                        <div className="flex items-center gap-3 text-sm">
+                          <span className="font-medium text-foreground">{scanPreview.total} total files</span>
+                          <span className="text-green-700 font-medium">✓ {scanPreview.analyze_count} will be analyzed</span>
+                          <span className="text-slate-400">⊘ {scanPreview.skipped_count} skipped</span>
+                        </div>
+                        {Object.keys(scanPreview.by_language).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(scanPreview.by_language).sort((a,b) => b[1]-a[1]).slice(0, 8).map(([lang, cnt]) => (
+                              <span key={lang} className="text-[11px] bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 font-mono">{lang}: {cnt}</span>
+                            ))}
+                          </div>
+                        )}
+                        {Object.keys(scanPreview.skipped_by_category).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            <span className="text-[11px] text-slate-400 self-center">Skipped:</span>
+                            {Object.entries(scanPreview.skipped_by_category).sort((a,b) => b[1]-a[1]).map(([cat, cnt]) => (
+                              <span key={cat} className="text-[11px] bg-slate-100 text-slate-500 rounded px-1.5 py-0.5">{cat}: {cnt}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div>
                   <Label htmlFor="version" className="text-sm font-medium">Version / Git Hash</Label>
                   <div className="relative mt-1">

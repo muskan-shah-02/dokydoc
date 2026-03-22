@@ -2,6 +2,7 @@
 
 import re
 import httpx
+from typing import Optional
 from sqlalchemy.orm import Session
 import asyncio
 
@@ -117,12 +118,31 @@ class CodeAnalysisService(LoggerMixin):
 
         return ("other", None, None, None)
 
-    async def _fetch_single_github_file(self, owner: str, repo: str, blob_path: str) -> str:
+    def _github_headers(self, github_token: Optional[str] = None) -> dict:
+        """Build GitHub API auth headers using tenant token or global fallback."""
+        from app.core.config import settings
+        token = github_token or settings.GITHUB_TOKEN
+        if token:
+            return {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        return {"Accept": "application/vnd.github+json"}
+
+    async def _fetch_single_github_file(
+        self, owner: str, repo: str, blob_path: str, github_token: Optional[str] = None
+    ) -> str:
         """Fetch a single file from GitHub raw content."""
         raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{blob_path}"
         self.logger.info(f"Fetching single file from GitHub: {raw_url}")
+        headers = {}
+        from app.core.config import settings
+        token = github_token or settings.GITHUB_TOKEN
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(raw_url)
+            resp = await client.get(raw_url, headers=headers)
             resp.raise_for_status()
             return resp.text
 
@@ -166,25 +186,28 @@ class CodeAnalysisService(LoggerMixin):
         '.cache': 'Cache',
     }
 
-    async def _get_repo_file_list(self, owner: str, repo: str, branch: str) -> dict:
+    async def _get_repo_file_list(
+        self, owner: str, repo: str, branch: str, github_token: Optional[str] = None
+    ) -> dict:
         """
         Get the file list for a GitHub repository.
         Returns dict:
           - 'to_analyze': list of {path, url, language} for code files
           - 'skipped': list of {path, ext, category} for non-analyzed files
         """
+        gh_headers = self._github_headers(github_token)
         async with httpx.AsyncClient(timeout=60.0) as client:
             # Resolve branch → tree SHA
             commits_url = f"https://api.github.com/repos/{owner}/{repo}/commits"
             commits_resp = await client.get(
-                commits_url, params={"sha": branch, "per_page": 1}
+                commits_url, headers=gh_headers, params={"sha": branch, "per_page": 1}
             )
 
             if commits_resp.status_code != 200:
                 for fb in ["main", "master"]:
                     if fb != branch:
                         commits_resp = await client.get(
-                            commits_url, params={"sha": fb, "per_page": 1}
+                            commits_url, headers=gh_headers, params={"sha": fb, "per_page": 1}
                         )
                         if commits_resp.status_code == 200:
                             branch = fb
@@ -202,7 +225,7 @@ class CodeAnalysisService(LoggerMixin):
 
             # Get recursive tree
             tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1"
-            tree_resp = await client.get(tree_url)
+            tree_resp = await client.get(tree_url, headers=gh_headers)
             if tree_resp.status_code != 200:
                 return {"to_analyze": [], "skipped": []}
 

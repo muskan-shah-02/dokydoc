@@ -55,13 +55,13 @@ logger = get_logger("api.integrations")
 
 router = APIRouter()
 
-SUPPORTED_PROVIDERS = ["notion", "jira", "confluence", "sharepoint", "slack"]
+SUPPORTED_PROVIDERS = ["notion", "jira", "confluence", "sharepoint", "slack", "github"]
 
 
 # ---- Schemas ----
 
 class ConnectRequest(BaseModel):
-    provider: str = Field(..., pattern="^(notion|jira|confluence|sharepoint|slack)$")
+    provider: str = Field(..., pattern="^(notion|jira|confluence|sharepoint|slack|github)$")
     access_token: str = Field(..., min_length=1)
     workspace_name: Optional[str] = None
     workspace_id: Optional[str] = None
@@ -1043,6 +1043,172 @@ async def _slack_list_channels(token: str, query: Optional[str], limit: int) -> 
             "topic": ch.get("topic", {}).get("value", ""),
         })
     return items
+
+
+# ============================================================
+# GitHub OAuth App (private repo integration)
+# ============================================================
+
+@router.get("/github/oauth/authorize")
+def github_oauth_authorize(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Return the GitHub OAuth authorization URL."""
+    if not settings.GITHUB_CLIENT_ID:
+        raise HTTPException(
+            status_code=501,
+            detail="GitHub OAuth is not configured. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.",
+        )
+    state = _make_oauth_state(tenant_id, current_user.id)
+    redirect_uri = f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/github/oauth/callback"
+    params = {
+        "client_id": settings.GITHUB_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": "repo read:org read:user",
+        "state": state,
+    }
+    url = "https://github.com/login/oauth/authorize?" + urlencode(params)
+    return {"url": url, "provider": "github"}
+
+
+@router.get("/github/oauth/callback")
+async def github_oauth_callback(
+    code: str,
+    state: str,
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    GitHub redirects here after user grants access.
+    Exchange the authorization code for an access token, fetch user info, and save.
+    Redirect browser back to the frontend integrations page.
+    """
+    tenant_id, user_id = _verify_oauth_state(state)
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # 1. Exchange code for access token
+            token_resp = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                json={
+                    "client_id": settings.GITHUB_CLIENT_ID,
+                    "client_secret": settings.GITHUB_CLIENT_SECRET,
+                    "code": code,
+                    "redirect_uri": f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/github/oauth/callback",
+                },
+            )
+            token_data = token_resp.json()
+
+            access_token = token_data.get("access_token")
+            if not access_token:
+                error = token_data.get("error_description", "Failed to obtain access token")
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={error}&provider=github"
+                )
+
+            # 2. Fetch GitHub user info
+            user_resp = await client.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
+            )
+            user_data = user_resp.json()
+            github_login = user_data.get("login", "")
+            github_id = str(user_data.get("id", ""))
+
+        # 3. Save to integration_configs
+        crud_integration_config.upsert(
+            db,
+            tenant_id=tenant_id,
+            provider="github",
+            created_by_id=user_id,
+            access_token=access_token,
+            workspace_name=github_login,
+            workspace_id=github_id,
+        )
+
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_success=github&workspace={github_login}"
+        )
+
+    except Exception as exc:
+        logger.exception("GitHub OAuth callback error")
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={str(exc)}&provider=github"
+        )
+
+
+@router.get("/github/repos")
+async def list_github_repos(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    List all repositories accessible to the connected GitHub account.
+    Returns both personal repos and org repos the user has access to.
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="GitHub integration not connected")
+
+    token = config.access_token
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    repos: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            # Fetch all repos accessible to the user (includes org repos user has access to)
+            page = 1
+            while True:
+                resp = await client.get(
+                    "https://api.github.com/user/repos",
+                    headers=headers,
+                    params={
+                        "type": "all",
+                        "sort": "updated",
+                        "per_page": 100,
+                        "page": page,
+                        "visibility": "all",
+                    },
+                )
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"GitHub API error: {resp.status_code} {resp.text[:200]}",
+                    )
+                batch = resp.json()
+                if not batch:
+                    break
+                for r in batch:
+                    repos.append({
+                        "id": r["id"],
+                        "name": r["name"],
+                        "full_name": r["full_name"],
+                        "private": r["private"],
+                        "description": r.get("description") or "",
+                        "default_branch": r.get("default_branch", "main"),
+                        "html_url": r["html_url"],
+                        "updated_at": r.get("updated_at", ""),
+                        "language": r.get("language") or "",
+                        "owner_login": r["owner"]["login"],
+                        "owner_type": r["owner"]["type"],  # "User" or "Organization"
+                    })
+                if len(batch) < 100:
+                    break
+                page += 1
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to list GitHub repos")
+        raise HTTPException(status_code=502, detail=f"Failed to list GitHub repos: {exc}")
+
+    return {"repos": repos, "total": len(repos), "github_login": config.workspace_name}
 
 
 async def _slack_fetch_channel_history(

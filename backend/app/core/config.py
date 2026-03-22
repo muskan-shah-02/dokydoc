@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Slack OAuth 2.0
     SLACK_CLIENT_ID: Optional[str] = Field(default=None, env="SLACK_CLIENT_ID")
     SLACK_CLIENT_SECRET: Optional[str] = Field(default=None, env="SLACK_CLIENT_SECRET")
+
+    # GitHub OAuth App (private repo integration)
+    GITHUB_CLIENT_ID: Optional[str] = Field(default=None, env="GITHUB_CLIENT_ID")
+    GITHUB_CLIENT_SECRET: Optional[str] = Field(default=None, env="GITHUB_CLIENT_SECRET")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB

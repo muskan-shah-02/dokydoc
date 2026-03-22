@@ -244,12 +244,18 @@ def scan_repo_preview(
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
 
+    # Look up tenant's GitHub integration token (enables private repo access)
+    from app.crud.crud_integration_config import crud_integration_config
+    gh_config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    github_token = gh_config.access_token if (gh_config and gh_config.is_active) else None
+
     try:
         # Run the async scan synchronously
         scan_result = asyncio.run(
             code_analysis_service._get_repo_file_list(
                 *code_analysis_service._detect_github_url_type(url)[1:3],  # owner, repo
-                body.get("branch")  # branch (optional, None = auto-detect)
+                body.get("branch"),  # branch (optional, None = auto-detect)
+                github_token=github_token,
             )
         )
     except Exception as e:
@@ -340,9 +346,14 @@ def trigger_analysis(
         status="analyzing"
     )
 
+    # Look up tenant's GitHub integration token (enables private repo analysis)
+    from app.crud.crud_integration_config import crud_integration_config
+    gh_config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    github_token = gh_config.access_token if (gh_config and gh_config.is_active) else None
+
     # Dispatch Celery task
     from app.tasks.code_analysis_tasks import repo_analysis_task
-    task = repo_analysis_task.delay(repo_id, tenant_id, file_list)
+    task = repo_analysis_task.delay(repo_id, tenant_id, file_list, github_token)
 
     logger.info(
         f"Repo analysis triggered for repo {repo_id} ({len(file_list)} files) "

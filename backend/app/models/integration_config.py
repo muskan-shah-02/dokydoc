@@ -24,7 +24,7 @@ class IntegrationConfig(Base):
     )
 
     provider: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    # notion | jira | confluence | sharepoint
+    # notion | jira | confluence | sharepoint | slack | github
 
     # Display info
     workspace_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
