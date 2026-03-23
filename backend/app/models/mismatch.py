@@ -18,6 +18,7 @@ class Mismatch(Base):
     __tablename__ = "mismatches"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
 
     mismatch_type: Mapped[str] = mapped_column(String, index=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)

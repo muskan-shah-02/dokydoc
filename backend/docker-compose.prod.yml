@@ -1,0 +1,274 @@
+################################################################################
+# DokydDoc — Production Docker Compose
+# Usage: docker compose -f docker-compose.prod.yml up -d
+#
+# Key differences from dev docker-compose.yml:
+#  - No code volume mount (uses built image only)
+#  - Gunicorn instead of uvicorn dev server (more workers, better performance)
+#  - Nginx reverse proxy always active
+#  - No debug mode, no exposed DB/Redis ports
+#  - Restart policies on all services
+#  - Stricter resource limits
+################################################################################
+
+services:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL 15 with pgvector
+  # ────────────────────────────────────────────────────────────────────────────
+  db:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    container_name: dokydoc_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dokydoc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}       # REQUIRED — no default
+      POSTGRES_DB: ${POSTGRES_DB:-dokydoc}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # No port exposure in production — only accessible within Docker network
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dokydoc}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Redis 7 — Celery broker + cache
+  # ────────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: dokydoc_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+    volumes:
+      - redis_data:/data
+    # No port exposure — internal only
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+        reservations:
+          memory: 256M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # FastAPI — Production API server (Gunicorn + uvicorn workers)
+  # ────────────────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base                      # Use the base (non-dev) stage
+    container_name: dokydoc_app
+    restart: unless-stopped
+    command: >
+      gunicorn main:app
+      --worker-class uvicorn.workers.UvicornWorker
+      --workers 4
+      --bind 0.0.0.0:8000
+      --timeout 120
+      --keep-alive 5
+      --max-requests 1000
+      --max-requests-jitter 100
+      --access-logfile -
+      --error-logfile -
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - app_logs:/app/logs
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Celery Worker — Background code analysis tasks
+  # ────────────────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: dokydoc_worker
+    restart: unless-stopped
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --max-tasks-per-child=100
+      --queues=default,analysis,high_priority
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - app_logs:/app/logs
+    networks:
+      - dokydoc_network
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G               # Workers need more memory for large repos
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Celery Beat — Scheduled tasks (cleanup, maintenance)
+  # ────────────────────────────────────────────────────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: dokydoc_beat
+    restart: unless-stopped
+    command: >
+      celery -A app.celery_app beat
+      --loglevel=info
+      --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dokydoc_network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Flower — Celery task monitor (restrict access via nginx in prod)
+  # ────────────────────────────────────────────────────────────────────────────
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    container_name: dokydoc_flower
+    restart: unless-stopped
+    command: >
+      celery -A app.celery_app flower
+      --port=5555
+      --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD}
+      --url_prefix=flower
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    networks:
+      - dokydoc_network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Nginx — SSL termination + reverse proxy
+  # ────────────────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: dokydoc_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro        # SSL certs from Certbot
+      - /var/www/certbot:/var/www/certbot:ro         # ACME challenge dir
+      - uploads_data:/var/www/uploads:ro             # Serve uploads directly
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - app
+    networks:
+      - dokydoc_network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+# ────────────────────────────────────────────────────────────────────────────
+# Named Volumes
+# ────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+  app_logs:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# ────────────────────────────────────────────────────────────────────────────
+# Networks
+# ────────────────────────────────────────────────────────────────────────────
+networks:
+  dokydoc_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

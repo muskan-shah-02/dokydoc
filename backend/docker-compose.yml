@@ -1,7 +1,9 @@
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    build:
+      context: ./db
+      dockerfile: Dockerfile
     container_name: dokydoc_db
     # ... (rest of db config is unchanged)
     restart: unless-stopped
@@ -12,6 +14,7 @@ services:
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db/init-extensions.sql:/docker-entrypoint-initdb.d/01-init-extensions.sql:ro
     ports:
       - "5432:5432"
     networks:
@@ -57,7 +60,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
-      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      # CONFIG-01 FIX: No default SECRET_KEY (SECURITY RISK) - Must be set in .env file
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY environment variable is required}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
@@ -104,7 +108,8 @@ services:
       - REDIS_URL=redis://redis:6379
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND_URL=redis://redis:6379/1
-      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-here-make-it-at-least-32-characters-long}
+      # CONFIG-01 FIX: No default SECRET_KEY (SECURITY RISK) - Must be set in .env file
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY environment variable is required}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -125,6 +130,25 @@ services:
         reservations:
           memory: 1G
           cpus: '0.5'
+
+  # FLAW-18 FIX: Flower - Celery Monitoring Dashboard
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dokydoc_flower
+    command: celery -A app.worker flower --port=5555 --broker=redis://redis:6379/0
+    env_file:
+      - .env
+    ports:
+      - "5555:5555"
+    volumes:
+      - .:/app                      # Mount code so restarts pick up changes
+    depends_on:
+      - redis
+    networks:
+      - dokydoc_network
+    restart: unless-stopped
 
   # Nginx Reverse Proxy (for production)
   nginx:

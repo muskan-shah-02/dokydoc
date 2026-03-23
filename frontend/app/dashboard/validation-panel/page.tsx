@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,12 @@ import {
   Users,
   Settings,
   Eye,
+  Sparkles,
+  GitBranch,
+  TicketCheck,
+  CircleCheck,
+  CircleDot,
+  CircleX,
 } from "lucide-react";
 import {
   Dialog,
@@ -120,11 +127,14 @@ export default function ValidationPanelPage() {
         }),
       ]);
 
-      if (!docResponse.ok) throw new Error("Failed to fetch documents.");
-      if (!mismatchResponse.ok) throw new Error("Failed to fetch mismatches.");
+      if (!docResponse.ok) throw new Error(`Unable to load documents (HTTP ${docResponse.status}). Check that the backend is running.`);
+      if (!mismatchResponse.ok) throw new Error(`Unable to load validation results (HTTP ${mismatchResponse.status}).`);
 
-      const docData: Document[] = await docResponse.json();
-      const mismatchData: Mismatch[] = await mismatchResponse.json();
+      // /documents/ returns a paginated object {items:[...]} not a plain array
+      const rawDoc = await docResponse.json();
+      const docData: Document[] = rawDoc.items ?? rawDoc.documents ?? (Array.isArray(rawDoc) ? rawDoc : []);
+      const rawMismatch = await mismatchResponse.json();
+      const mismatchData: Mismatch[] = rawMismatch.items ?? rawMismatch.mismatches ?? (Array.isArray(rawMismatch) ? rawMismatch : []);
 
       // Enhance documents with mismatch counts
       const enhancedDocuments = docData.map((doc) => ({
@@ -143,7 +153,15 @@ export default function ValidationPanelPage() {
       setFilteredDocuments(enhancedDocuments);
       setMismatches(mismatchData);
     } catch (err: any) {
-      setError(err.message);
+      // Show a clean, readable message — not a raw JS TypeError
+      const raw: string = err?.message ?? String(err);
+      if (raw.includes("is not a function") || raw.includes("is undefined") || raw.includes("Cannot read")) {
+        setError("Unexpected data format received from the server. Please refresh the page or contact support.");
+      } else if (raw.includes("NetworkError") || raw.includes("Failed to fetch")) {
+        setError("Cannot connect to the backend. Make sure the server is running on port 8000.");
+      } else {
+        setError(raw);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -221,11 +239,38 @@ export default function ValidationPanelPage() {
         throw new Error(errData.detail || "Failed to start validation scan.");
       }
 
-      // Switch to results tab and refresh data after scan
+      // BUG-01 FIX: Poll for fresh mismatches after scan completes.
+      // Capture the count BEFORE the scan to detect changes (avoids stale closure).
+      // Scans take 10-30s+ depending on document count and Gemini API latency.
       setActiveTab("results");
-      setTimeout(() => {
-        fetchData().finally(() => setIsScanning(false));
-      }, 3000);
+      const initialCount = mismatches.length;
+      const pollForResults = async () => {
+        const maxAttempts = 15;  // up to 45 seconds
+        const minAttempts = 3;   // wait at least 9 seconds before early exit
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const mismatchRes = await fetch(
+              "http://localhost:8000/api/v1/validation/mismatches",
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (mismatchRes.ok) {
+              const freshMismatches: Mismatch[] = await mismatchRes.json();
+              setMismatches(freshMismatches);
+              // Only stop early if results changed AND we've waited the minimum time
+              if (freshMismatches.length !== initialCount && attempt >= minAttempts) {
+                break;
+              }
+            }
+          } catch {
+            // Silently retry on network errors
+          }
+        }
+        // Final full refresh to sync documents + mismatches
+        await fetchData();
+        setIsScanning(false);
+      };
+      pollForResults();
     } catch (err: any) {
       setError(err.message);
       setIsScanning(false);
@@ -277,6 +322,100 @@ export default function ValidationPanelPage() {
     }
   };
 
+  // ── JIRA Validation state ──
+  const [jiraRepos, setJiraRepos] = useState<Array<{ id: number; name: string }>>([]);
+  const [jiraSelectedRepo, setJiraSelectedRepo] = useState<number | null>(null);
+  const [jiraProjectKey, setJiraProjectKey] = useState("");
+  const [jiraEpicKey, setJiraEpicKey] = useState("");
+  const [jiraSprintName, setJiraSprintName] = useState("");
+  const [jiraItems, setJiraItems] = useState<any[]>([]);
+  const [jiraItemsLoading, setJiraItemsLoading] = useState(false);
+  const [jiraScanRunning, setJiraScanRunning] = useState(false);
+  const [jiraScanResults, setJiraScanResults] = useState<any | null>(null);
+  const [jiraMismatches, setJiraMismatches] = useState<any[]>([]);
+
+  const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : "";
+
+  // Fetch repositories for JIRA validation
+  useEffect(() => {
+    if (!token) return;
+    fetch("http://localhost:8000/api/v1/repositories/", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const repos = d.items ?? d.repositories ?? (Array.isArray(d) ? d : []);
+        setJiraRepos(repos.map((r: any) => ({ id: r.id, name: r.name || `Repo #${r.id}` })));
+      })
+      .catch(() => {});
+  }, [token]);
+
+  // Preview JIRA items when filters change
+  const fetchJiraItems = async () => {
+    if (!jiraProjectKey && !jiraEpicKey && !jiraSprintName) return;
+    setJiraItemsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (jiraProjectKey) params.set("project_key", jiraProjectKey);
+      if (jiraEpicKey) params.set("epic_key", jiraEpicKey);
+      if (jiraSprintName) params.set("sprint_name", jiraSprintName);
+      params.set("limit", "50");
+      const resp = await fetch(`http://localhost:8000/api/v1/integrations/jira/items?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.ok) {
+        const d = await resp.json();
+        setJiraItems(d.items || []);
+      }
+    } catch {} finally {
+      setJiraItemsLoading(false);
+    }
+  };
+
+  const handleRunJiraScan = async () => {
+    if (!jiraSelectedRepo) { setError("Please select a repository."); return; }
+    if (!jiraProjectKey && !jiraEpicKey && !jiraSprintName) {
+      setError("Please specify a project key, epic key, or sprint name.");
+      return;
+    }
+    setJiraScanRunning(true);
+    setError(null);
+    setJiraScanResults(null);
+    try {
+      const body: any = { repository_id: jiraSelectedRepo };
+      if (jiraProjectKey) body.project_key = jiraProjectKey;
+      if (jiraEpicKey) body.epic_key = jiraEpicKey;
+      if (jiraSprintName) body.sprint_name = jiraSprintName;
+
+      const resp = await fetch("http://localhost:8000/api/v1/validation/run-jira-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.detail || "JIRA validation failed.");
+      }
+      const result = await resp.json();
+      setJiraScanResults(result.results);
+
+      // Fetch jira-category mismatches
+      const mResp = await fetch(
+        "http://localhost:8000/api/v1/validation/mismatches?limit=200",
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (mResp.ok) {
+        const mData = await mResp.json();
+        const all = mData.items ?? mData.mismatches ?? (Array.isArray(mData) ? mData : []);
+        setJiraMismatches(all.filter((m: any) => m.category === "jira_acceptance_criteria"));
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setJiraScanRunning(false);
+    }
+  };
+
   const stats = {
     totalDocuments: documents.length,
     selectedDocuments: selectedDocs.size,
@@ -307,12 +446,21 @@ export default function ValidationPanelPage() {
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/dashboard/chat"
+            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+          >
+            <Sparkles className="h-4 w-4" />
+            Explain mismatches
+          </Link>
         <Button variant="outline" onClick={fetchData} disabled={isLoading}>
           <RefreshCw
             className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
           />
           Refresh
         </Button>
+        </div>
       </div>
 
       {/* Statistics Cards */}
@@ -400,7 +548,7 @@ export default function ValidationPanelPage() {
         onValueChange={setActiveTab}
         className="space-y-4"
       >
-        <TabsList className="grid w-full grid-cols-2">
+        <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="select" className="flex items-center gap-2">
             <FileText className="h-4 w-4" />
             Select Documents
@@ -408,6 +556,10 @@ export default function ValidationPanelPage() {
           <TabsTrigger value="results" className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4" />
             Validation Results
+          </TabsTrigger>
+          <TabsTrigger value="jira" className="flex items-center gap-2">
+            <TicketCheck className="h-4 w-4" />
+            JIRA Validation
           </TabsTrigger>
         </TabsList>
 
@@ -698,6 +850,196 @@ export default function ValidationPanelPage() {
                     ))}
                   </TableBody>
                 </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+        {/* JIRA Validation Tab */}
+        <TabsContent value="jira" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <TicketCheck className="h-5 w-5 text-blue-600" />
+                JIRA-Aware Validation
+              </CardTitle>
+              <CardDescription>
+                Select a JIRA scope and a code repository. The engine checks whether the code
+                satisfies each acceptance criterion in the selected tickets.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Repository selector */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                    <GitBranch className="w-3.5 h-3.5 inline mr-1" />
+                    Code Repository
+                  </label>
+                  <select
+                    value={jiraSelectedRepo ?? ""}
+                    onChange={(e) => setJiraSelectedRepo(e.target.value ? Number(e.target.value) : null)}
+                    className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  >
+                    <option value="">Select repository…</option>
+                    {jiraRepos.map((r) => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Project key */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                    Jira Project Key
+                  </label>
+                  <Input
+                    value={jiraProjectKey}
+                    onChange={(e) => setJiraProjectKey(e.target.value.toUpperCase())}
+                    placeholder="e.g. PROJ"
+                    className="font-mono"
+                  />
+                </div>
+
+                {/* Epic key (optional) */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                    Epic Key <span className="text-gray-400 font-normal">(optional)</span>
+                  </label>
+                  <Input
+                    value={jiraEpicKey}
+                    onChange={(e) => setJiraEpicKey(e.target.value.toUpperCase())}
+                    placeholder="e.g. PROJ-42"
+                    className="font-mono"
+                  />
+                </div>
+
+                {/* Sprint name (optional) */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                    Sprint Name <span className="text-gray-400 font-normal">(optional)</span>
+                  </label>
+                  <Input
+                    value={jiraSprintName}
+                    onChange={(e) => setJiraSprintName(e.target.value)}
+                    placeholder="e.g. Sprint 14"
+                  />
+                </div>
+              </div>
+
+              {/* Preview + Run actions */}
+              <div className="flex gap-3">
+                <Button
+                  variant="outline"
+                  className="text-xs h-8 gap-1.5"
+                  onClick={fetchJiraItems}
+                  disabled={jiraItemsLoading || (!jiraProjectKey && !jiraEpicKey && !jiraSprintName)}
+                >
+                  {jiraItemsLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                  Preview Tickets
+                </Button>
+                <Button
+                  className="bg-green-600 hover:bg-green-700 text-xs h-8 gap-1.5"
+                  disabled={jiraScanRunning || !jiraSelectedRepo || (!jiraProjectKey && !jiraEpicKey && !jiraSprintName)}
+                  onClick={handleRunJiraScan}
+                >
+                  {jiraScanRunning ? (
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Validating…</>
+                  ) : (
+                    <><Zap className="w-3.5 h-3.5" /> Validate against JIRA</>
+                  )}
+                </Button>
+              </div>
+
+              {/* Ticket preview */}
+              {jiraItems.length > 0 && !jiraScanResults && (
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 border-b">
+                    {jiraItems.length} tickets in scope
+                  </div>
+                  <div className="divide-y max-h-48 overflow-y-auto">
+                    {jiraItems.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between px-4 py-2.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-xs font-mono text-blue-600 flex-shrink-0">{item.external_key}</span>
+                          <span className="text-xs text-gray-700 truncate">{item.title}</span>
+                        </div>
+                        <div className="flex items-center gap-2 ml-3 flex-shrink-0">
+                          <Badge variant="outline" className="text-xs">{item.item_type}</Badge>
+                          {item.has_acceptance_criteria && (
+                            <Badge className="bg-green-100 text-green-700 text-xs">AC</Badge>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Scan results summary */}
+              {jiraScanResults && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      { label: "Checked", value: jiraScanResults.checked ?? 0, color: "text-gray-800", icon: <TicketCheck className="w-5 h-5 text-gray-500" /> },
+                      { label: "Satisfied", value: jiraScanResults.satisfied ?? 0, color: "text-green-700", icon: <CircleCheck className="w-5 h-5 text-green-500" /> },
+                      { label: "Partial", value: jiraScanResults.partial ?? 0, color: "text-yellow-700", icon: <CircleDot className="w-5 h-5 text-yellow-500" /> },
+                      { label: "Missing", value: jiraScanResults.missing ?? 0, color: "text-red-700", icon: <CircleX className="w-5 h-5 text-red-500" /> },
+                    ].map((s) => (
+                      <div key={s.label} className="bg-white border rounded-lg p-3 flex items-center gap-3">
+                        {s.icon}
+                        <div>
+                          <p className="text-xs text-gray-500">{s.label}</p>
+                          <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Per-criterion results */}
+                  {jiraMismatches.length > 0 && (
+                    <div className="border rounded-lg overflow-hidden">
+                      <div className="bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 border-b">
+                        Acceptance Criteria Results
+                      </div>
+                      <div className="divide-y max-h-80 overflow-y-auto">
+                        {jiraMismatches.map((m: any) => {
+                          const details = m.details || {};
+                          const verdict = details.verdict || (m.status === "resolved" ? "satisfied" : "missing");
+                          const verdictColors: Record<string, string> = {
+                            satisfied: "bg-green-100 text-green-700",
+                            partial: "bg-yellow-100 text-yellow-700",
+                            missing: "bg-red-100 text-red-700",
+                          };
+                          const VIcon = verdict === "satisfied" ? CircleCheck : verdict === "partial" ? CircleDot : CircleX;
+                          return (
+                            <div key={m.id} className="px-4 py-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex items-start gap-2 min-w-0">
+                                  <VIcon className={`w-4 h-4 flex-shrink-0 mt-0.5 ${
+                                    verdict === "satisfied" ? "text-green-500" :
+                                    verdict === "partial" ? "text-yellow-500" : "text-red-500"
+                                  }`} />
+                                  <div className="min-w-0">
+                                    {details.jira_key && (
+                                      <span className="text-xs font-mono text-blue-600 mr-2">{details.jira_key}</span>
+                                    )}
+                                    <p className="text-xs text-gray-700">{details.criterion || m.description}</p>
+                                    {details.evidence && (
+                                      <p className="text-xs text-gray-400 mt-1 italic">{details.evidence}</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${verdictColors[verdict] || "bg-gray-100 text-gray-600"}`}>
+                                  {verdict}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </CardContent>
           </Card>

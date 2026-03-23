@@ -30,6 +30,7 @@ class DocumentSegment(Base):
     __tablename__ = "document_segments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     
     # The type of content this segment represents, determined by Pass 1.
     # Example: "BRD", "API_DOCS", "UNKNOWN"

@@ -40,20 +40,45 @@ class CodeComponentInDBBase(CodeComponentBase):
     owner_id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
-    # The new analysis fields are included here
+
+    # Analysis fields
     summary: Optional[str] = None
     structured_analysis: Optional[Dict[str, Any]] = None
     analysis_status: str
 
+    # Link to parent repository (nullable for standalone file components)
+    repository_id: Optional[int] = None
+
+    # Cost tracking fields
+    ai_cost_inr: Optional[float] = None
+    token_count_input: Optional[int] = None
+    token_count_output: Optional[int] = None
+    cost_breakdown: Optional[Dict[str, Any]] = None
+
+    # Analysis timing
+    analysis_started_at: Optional[datetime] = None
+    analysis_completed_at: Optional[datetime] = None
+
     class Config:
         # This vital setting allows Pydantic to read data directly from
         # a SQLAlchemy ORM model instance.
-        orm_mode = True
+        # Pydantic V2: renamed from 'orm_mode' to 'from_attributes'
+        from_attributes = True
 
 # --- Main API Response Schema ---
 # This is the final schema that will be used when returning data from the API.
 # It inherits everything from our InDBBase and represents a complete object.
 class CodeComponent(CodeComponentInDBBase):
     pass
+
+
+class CodeComponentWithProgress(CodeComponent):
+    """Extended response that includes repository analysis progress.
+    For components linked to a repository, these fields show how many
+    files have been analyzed out of the total — enabling real-time
+    progress indicators in the UI.
+    """
+    repo_analyzed_files: Optional[int] = None
+    repo_total_files: Optional[int] = None
+    repo_analysis_status: Optional[str] = None
 

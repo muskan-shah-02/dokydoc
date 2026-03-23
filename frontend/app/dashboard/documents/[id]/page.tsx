@@ -2,11 +2,11 @@
   frontend/app/dashboard/documents/[id]/page.tsx
   -----------------------------------------------
   Status: FINAL MASTER
-  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal
+  Features: Pulse Pipeline + Vital Signs + Narrative Report + Live Terminal + Billing Notifications
 */
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,6 +56,16 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DocumentAnalysisView } from "@/components/analysis/DocumentAnalysisView";
+import { useBillingNotification } from "@/components/BillingToast";
+import { api } from "@/lib/api";
+import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
+import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
+import { OntologyGraph } from "@/components/ontology/OntologyGraph";
+import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
+import { Network, History, Upload, GitCompare } from "lucide-react";
+import { VersionHistoryPanel } from "@/components/documents/VersionHistoryPanel";
+import { VersionDiffModal } from "@/components/documents/VersionDiffModal";
 
 // --- 1. Types ---
 
@@ -71,6 +81,9 @@ interface Document {
   progress: number | null;
   file_size_kb?: number | null;
   error_message?: string | null;
+  ai_cost_inr?: number | null;
+  token_count_input?: number | null;
+  token_count_output?: number | null;
 }
 
 interface DocumentSegment {
@@ -829,6 +842,43 @@ export default function DocumentDetailPage() {
   const [segments, setSegments] = useState<AnalyzedSegment[]>([]);
   const [isLive, setIsLive] = useState(false);
   const [loading, setLoading] = useState(true);
+  const notifiedProcessingRef = useRef(false);
+  const previousStatusRef = useRef<string | null>(null);
+  const billingNotification = useBillingNotification();
+  const [graphData, setGraphData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphSelectedId, setGraphSelectedId] = useState<number | null>(null);
+  const [versionPanelOpen, setVersionPanelOpen] = useState(false);
+  const [extracting, setExtracting] = useState(false);
+  const [diffModal, setDiffModal] = useState<{ versionA: number; versionB: number } | null>(null);
+  const [uploadingVersion, setUploadingVersion] = useState(false);
+  const uploadVersionInputRef = React.useRef<HTMLInputElement>(null);
+
+  const triggerExtraction = useCallback(async (docId: string) => {
+    setExtracting(true);
+    try {
+      await api.post(`/ontology/extract/document/${docId}`, {});
+      // Wait a bit, then refresh graph data
+      setTimeout(() => {
+        fetchGraphData(docId);
+        setExtracting(false);
+      }, 3000);
+    } catch {
+      setExtracting(false);
+    }
+  }, []);
+
+  const fetchGraphData = useCallback(async (docId: string) => {
+    setGraphLoading(true);
+    try {
+      const data = await api.get<any>(`/ontology/graph/document-source/${docId}`);
+      setGraphData(data);
+    } catch {
+      setGraphData(null);
+    } finally {
+      setGraphLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -863,6 +913,29 @@ export default function DocumentDetailPage() {
     fetchFullAnalysis();
   }, [fetchFullAnalysis]);
 
+  const handleUploadNewVersion = useCallback(async (file: File) => {
+    if (!documentId) return;
+    setUploadingVersion(true);
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("parent_document_id", documentId);
+    const token = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(`http://localhost:8000/api/v1/documents/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      await fetchFullAnalysis();
+    } catch {
+      alert("Failed to upload new version.");
+    } finally {
+      setUploadingVersion(false);
+    }
+  }, [documentId, fetchFullAnalysis]);
+
+  // Polling with billing notifications
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isLive && documentId) {
@@ -875,20 +948,61 @@ export default function DocumentDetailPage() {
           );
           if (res.ok) {
             const statusData = await res.json();
+            const newStatus = statusData.status;
+            const prevStatus = previousStatusRef.current;
+
+            // Show "Processing Started" notification when entering AI phases
+            const aiStates = ["analyzing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"];
+            if (aiStates.includes(newStatus) && !notifiedProcessingRef.current) {
+              notifiedProcessingRef.current = true;
+              const balance = await billingNotification.refreshBalance();
+              if (balance !== null) {
+                billingNotification.showProcessingStarted(balance);
+              }
+            }
+
             setDoc((prev) =>
               prev
                 ? {
                     ...prev,
-                    status: statusData.status,
+                    status: newStatus,
                     progress: statusData.progress,
                     error_message: statusData.error_message,
                   }
                 : null
             );
-            if (!ACTIVE_STATES.includes(statusData.status)) {
+
+            // Check if processing just completed
+            if (!ACTIVE_STATES.includes(newStatus)) {
               setIsLive(false);
+
+              // Show completion or error notification
+              if (newStatus === "completed") {
+                try {
+                  // Fetch both cost and full document data for tokens
+                  const [costData, docData, newBalance] = await Promise.all([
+                    api.get<{ ai_cost_inr: number }>(`/billing/documents/${documentId}/cost`),
+                    api.get<Document>(`/documents/${documentId}`),
+                    billingNotification.refreshBalance(),
+                  ]);
+                  const cost = costData?.ai_cost_inr || 0;
+                  const tokens = docData?.token_count_input && docData?.token_count_output
+                    ? { input: docData.token_count_input, output: docData.token_count_output }
+                    : undefined;
+                  billingNotification.showProcessingComplete(cost, newBalance || 0, tokens);
+                } catch (err) {
+                  console.error("Failed to fetch document cost:", err);
+                }
+              } else if (newStatus.includes("failed")) {
+                billingNotification.showError(statusData.error_message || "Document processing failed");
+              }
+
+              // Reset notification flag for next run
+              notifiedProcessingRef.current = false;
               fetchFullAnalysis();
             }
+
+            previousStatusRef.current = newStatus;
           }
         } catch (e) {
           console.error(e);
@@ -896,11 +1010,15 @@ export default function DocumentDetailPage() {
       }, 3000);
     }
     return () => clearInterval(interval);
-  }, [isLive, documentId, fetchFullAnalysis]);
+  }, [isLive, documentId, fetchFullAnalysis, billingNotification]);
 
   const handleRunAnalysis = async () => {
     if (!documentId) return;
     const token = localStorage.getItem("accessToken");
+
+    // Reset notification flag when starting new analysis
+    notifiedProcessingRef.current = false;
+
     setIsLive(true);
     setDoc((prev) =>
       prev ? { ...prev, status: "processing", progress: 0 } : null
@@ -954,7 +1072,33 @@ export default function DocumentDetailPage() {
             </div>
           </div>
         </div>
-        <div>
+        <div className="flex items-center gap-2">
+          {/* Hidden file input for uploading a new version */}
+          <input
+            ref={uploadVersionInputRef}
+            type="file"
+            className="hidden"
+            accept=".pdf,.docx,.txt,.md,.csv,.xlsx"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleUploadNewVersion(file);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => uploadVersionInputRef.current?.click()}
+            disabled={uploadingVersion || isLive}
+            className="gap-1.5 text-xs"
+          >
+            {uploadingVersion ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Upload className="w-3.5 h-3.5" />
+            )}
+            {uploadingVersion ? "Uploading..." : "Upload New Version"}
+          </Button>
           {!isLive && (
             <Button
               onClick={handleRunAnalysis}
@@ -982,19 +1126,27 @@ export default function DocumentDetailPage() {
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />
 
-      <Tabs defaultValue="executive" className="space-y-6">
+      <Tabs defaultValue="insights" className="space-y-6" onValueChange={(v) => {
+        if (v === "graph" && !graphData && doc) fetchGraphData(String(doc.id));
+      }}>
         <TabsList className="bg-white border shadow-sm p-1 h-12 w-full justify-start print:hidden">
           <TabsTrigger
-            value="executive"
+            value="insights"
             className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 h-10 px-6"
           >
-            <LayoutDashboard className="w-4 h-4 mr-2" /> Executive Summary
+            <Sparkles className="w-4 h-4 mr-2" /> Insights
+          </TabsTrigger>
+          <TabsTrigger
+            value="smart"
+            className="data-[state=active]:bg-gray-100 h-10 px-6"
+          >
+            <BrainCircuit className="w-4 h-4 mr-2" /> Detailed View
           </TabsTrigger>
           <TabsTrigger
             value="technical"
             className="data-[state=active]:bg-gray-100 h-10 px-6"
           >
-            <Database className="w-4 h-4 mr-2" /> Technical Details
+            <Database className="w-4 h-4 mr-2" /> Technical
           </TabsTrigger>
           <TabsTrigger
             value="raw"
@@ -1002,39 +1154,37 @@ export default function DocumentDetailPage() {
           >
             <FileCode className="w-4 h-4 mr-2" /> Raw Text
           </TabsTrigger>
+          <TabsTrigger
+            value="graph"
+            className="data-[state=active]:bg-purple-50 data-[state=active]:text-purple-700 h-10 px-6"
+          >
+            <Network className="w-4 h-4 mr-2" /> Knowledge Graph
+          </TabsTrigger>
+          <TabsTrigger
+            value="versions"
+            className="data-[state=active]:bg-amber-50 data-[state=active]:text-amber-700 h-10 px-6"
+          >
+            <History className="w-4 h-4 mr-2" /> Version History
+          </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="executive">
-          <VitalSignsBar
-            segments={segments}
-            composition={doc.composition_analysis}
-          />
-          <ExecutiveReport segments={segments} />
+        {/* Dynamic Analysis View - Adapts to Document Type & User Role */}
+        <TabsContent value="insights">
+          <DynamicAnalysisView segments={segments} document={doc} />
+        </TabsContent>
+
+        {/* Smart Analysis View - Detailed Structured View */}
+        <TabsContent value="smart">
+          <SmartAnalysisView segments={segments} document={doc} />
         </TabsContent>
 
         <TabsContent value="technical">
-          <Card className="border-gray-200 shadow-sm">
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                <List className="w-5 h-5 mr-2" /> Segment Analysis Breakdown
-              </CardTitle>
-              <CardDescription>
-                Detailed view of all {segments.length} identified document
-                segments.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {segments.length > 0 ? (
-                segments.map((item, idx) => (
-                  <SegmentCard key={idx} index={idx} item={item} />
-                ))
-              ) : (
-                <div className="text-center py-12 text-gray-400 border-2 border-dashed rounded-xl">
-                  No segments found. Run analysis to populate this list.
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          {/* SPRINT 3: Rich DocumentAnalysisView replaces raw JSON cards */}
+          <DocumentAnalysisView
+            segments={segments}
+            documentType={doc.document_type}
+            filename={doc.filename}
+          />
         </TabsContent>
 
         <TabsContent value="raw">
@@ -1042,7 +1192,99 @@ export default function DocumentDetailPage() {
             {doc.raw_text || "No text extracted."}
           </div>
         </TabsContent>
+
+        <TabsContent value="graph">
+          {/* Extraction + Version History buttons */}
+          <div className="flex justify-end gap-2 mb-3">
+            {doc && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => triggerExtraction(String(doc.id))}
+                disabled={extracting}
+                className="gap-1.5 text-xs"
+              >
+                {extracting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <BrainCircuit className="w-3.5 h-3.5" />
+                )}
+                {extracting ? "Extracting..." : "Extract BOE"}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVersionPanelOpen(true)}
+              className="gap-1.5 text-xs"
+            >
+              <History className="w-3.5 h-3.5" />
+              Version History
+            </Button>
+          </div>
+          {graphLoading ? (
+            <div className="flex items-center justify-center h-64">
+              <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
+              <span className="ml-2 text-sm text-gray-500">Loading knowledge graph...</span>
+            </div>
+          ) : graphData && graphData.nodes.length > 0 ? (
+            <OntologyGraph
+              nodes={graphData.nodes}
+              edges={graphData.edges}
+              selectedId={graphSelectedId}
+              onSelectNode={setGraphSelectedId}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+              <Network className="w-12 h-12 mb-3" />
+              <p className="text-sm font-medium">No concepts extracted yet</p>
+              <p className="text-xs mt-1">Concepts will appear after document analysis completes</p>
+              <button
+                onClick={() => doc && fetchGraphData(String(doc.id))}
+                className="mt-3 text-xs text-purple-600 hover:text-purple-800 underline"
+              >
+                Refresh
+              </button>
+            </div>
+          )}
+          {/* Graph Version Panel (slide-over) */}
+          {doc && (
+            <GraphVersionPanel
+              sourceType="document"
+              sourceId={doc.id}
+              isOpen={versionPanelOpen}
+              onClose={() => setVersionPanelOpen(false)}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="versions">
+          <div className="bg-white border rounded-xl p-6 shadow-sm">
+            <div className="flex items-center gap-2 mb-4">
+              <History className="w-5 h-5 text-amber-600" />
+              <h2 className="text-base font-semibold text-gray-900">Version History</h2>
+            </div>
+            {doc && (
+              <VersionHistoryPanel
+                documentId={doc.id}
+                onCompare={(versionA, versionB) => setDiffModal({ versionA, versionB })}
+                onRestored={fetchFullAnalysis}
+              />
+            )}
+          </div>
+        </TabsContent>
       </Tabs>
+
+      {/* Version Diff Modal */}
+      {doc && diffModal && (
+        <VersionDiffModal
+          documentId={doc.id}
+          versionA={diffModal.versionA}
+          versionB={diffModal.versionB}
+          isOpen={!!diffModal}
+          onClose={() => setDiffModal(null)}
+        />
+      )}
     </div>
   );
 }

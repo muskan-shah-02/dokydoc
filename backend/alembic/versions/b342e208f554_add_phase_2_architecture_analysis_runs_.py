@@ -2,9 +2,10 @@
 """Add Phase 2 architecture: analysis_runs table and status fields
 
 Revision ID: b342e208f554
-Revises: 3d4d38b70252
+Revises: d4f3e2a1b567
 Create Date: 2025-09-11 20:15:27.801157
 
+SPRINT 2 Phase 8: Fixed down_revision to point to Sprint 2 tenant migration
 """
 from typing import Sequence, Union
 
@@ -14,39 +15,50 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'b342e208f554'
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = 'd4f3e2a1b567'  # SPRINT 2 Phase 8: Fixed to depend on tenant migration
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
     # ### Strategy 1: Smart Default Migration ###
-    
+
     # Step 1: Create enums if they don't exist
     connection = op.get_bind()
-    
-    # Check and create enums safely
-    try:
-        op.execute("CREATE TYPE analysisrunstatus AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')")
-    except Exception:
-        pass  # Enum already exists
-    
-    try:
-        op.execute("CREATE TYPE analysisresultstatus AS ENUM ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED')")
-    except Exception:
-        pass  # Enum already exists
-        
-    try:
-        op.execute("CREATE TYPE segmentstatus AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED')")
-    except Exception:
-        pass  # Enum already exists
+
+    # Check and create enums safely using PostgreSQL IF NOT EXISTS
+    # Note: DO $$ blocks allow us to check for existence without causing transaction errors
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE analysisrunstatus AS ENUM ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE analysisresultstatus AS ENUM ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE segmentstatus AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
     
     # Step 2: Create the analysis_runs table first
+    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
     op.create_table('analysis_runs',
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('document_id', sa.Integer(), nullable=False),
         sa.Column('triggered_by_user_id', sa.Integer(), nullable=False),
-        sa.Column('status', sa.Enum('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', name='analysisrunstatus'), nullable=False),
+        sa.Column('status', postgresql.ENUM('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', name='analysisrunstatus', create_type=False), nullable=False),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.Column('started_at', sa.DateTime(), nullable=True),
         sa.Column('completed_at', sa.DateTime(), nullable=True),
@@ -61,13 +73,14 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['triggered_by_user_id'], ['users.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
-    
+
     # Step 2: Add nullable columns to existing tables
-    op.add_column('analysisresult', sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED', name='analysisresultstatus'), nullable=True))
+    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
+    op.add_column('analysisresult', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED', name='analysisresultstatus', create_type=False), nullable=True))
     op.add_column('analysisresult', sa.Column('error_message', sa.Text(), nullable=True))
     op.add_column('analysisresult', sa.Column('processing_time_ms', sa.Integer(), nullable=True))
-    
-    op.add_column('document_segments', sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED', name='segmentstatus'), nullable=True))
+
+    op.add_column('document_segments', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED', name='segmentstatus', create_type=False), nullable=True))
     op.add_column('document_segments', sa.Column('retry_count', sa.Integer(), nullable=True))
     op.add_column('document_segments', sa.Column('last_error', sa.String(), nullable=True))
     op.add_column('document_segments', sa.Column('analysis_run_id', sa.Integer(), nullable=True))

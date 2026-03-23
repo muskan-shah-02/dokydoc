@@ -13,9 +13,25 @@ from app.core.logging import logger, setup_logging
 from app.core.exceptions import DokyDocException, handle_dokydoc_exception, create_error_response
 from app.db.session import init_database, close_database_connections, check_database_health
 from app.api.endpoints import (
-    login, dashboard, documents, code_components, 
-    document_code_links, analysis_results, validation
+    login, dashboard, documents, code_components,
+    document_code_links, analysis_results, validation, billing, tenants, users, tasks,  # SPRINT 2 Phase 10
+    ontology, initiatives,  # SPRINT 3: Business Ontology Engine + Governance
+    repositories,  # SPRINT 3: Code Analysis Engine
+    webhooks,  # SPRINT 4: Git Webhook Integration (ADHOC-09)
+    audit, notifications, exports,  # SPRINT 5: Audit Trail, Notifications, Exports
+    search,  # SPRINT 5: Unified Semantic Search
+    approvals,  # SPRINT 6: Approval Workflow
+    chat,  # SPRINT 7: RAG/Chat Assistant
+    api_keys,  # SPRINT 8: API Key Authentication
+    auto_docs,  # SPRINT 8: Auto Docs (Module 12)
+    integrations,  # SPRINT 8: Documentation Integrations (Module 11)
+    analytics,  # SPRINT 8: Analytics Dashboard
 )
+from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
+from app.middleware.tenant_context import TenantContextMiddleware
+from app.middleware.audit_middleware import AuditMiddleware
+from app.middleware.api_key_auth import ApiKeyAuthMiddleware
+from slowapi.errors import RateLimitExceeded
 
 # Setup logging
 setup_logging()
@@ -32,10 +48,15 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Database initialization failed")
     
     logger.info("✅ Database initialized successfully")
+
+    # Sprint 6: Initialize field encryption listeners
+    from app.services.field_encryption import register_encryption_listeners
+    register_encryption_listeners()
+
     logger.info(f"🌍 Environment: {settings.ENVIRONMENT}")
     logger.info(f"🔧 Debug mode: {settings.DEBUG}")
     logger.info(f"📊 API Version: {settings.API_VERSION}")
-    
+
     yield
     
     # Shutdown
@@ -54,7 +75,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# API-01 FIX: Add rate limiter state to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
+
 # --- Middleware Configuration ---
+
+# SPRINT 8: API Key Auth Middleware (resolves X-API-Key before tenant context)
+app.add_middleware(ApiKeyAuthMiddleware)
+
+# SPRINT 5: Audit Middleware (logs mutating requests, runs AFTER tenant context)
+app.add_middleware(AuditMiddleware)
+
+# SPRINT 2: Tenant Context Middleware (MUST be added BEFORE CORS)
+# This extracts tenant_id from JWT and injects it into request.state
+app.add_middleware(TenantContextMiddleware)
 
 # CORS middleware
 app.add_middleware(
@@ -151,19 +186,53 @@ async def dokydoc_exception_handler(request: Request, exc: DokyDocException):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle all other exceptions."""
+    """
+    Handle all other exceptions.
+    BE-01 FIX: Provides actionable error messages in production without exposing sensitive details.
+    """
     logger.error(
         f"Unhandled exception in {request.method} {request.url.path}: {str(exc)}\n"
         f"Traceback: {traceback.format_exc()}"
     )
-    
+
+    # BE-01 FIX: Categorize errors and provide actionable messages
+    error_type = type(exc).__name__
+    error_message = str(exc)
+
+    # Provide user-friendly messages based on error type
+    if "Database" in error_type or "sqlalchemy" in str(type(exc).__module__).lower():
+        user_message = "Database operation failed. Please try again in a few moments."
+        error_code = "DATABASE_ERROR"
+    elif "Connection" in error_type or "Timeout" in error_type:
+        user_message = "Service temporarily unavailable. Please try again."
+        error_code = "CONNECTION_ERROR"
+    elif "Permission" in error_type or "Access" in error_type:
+        user_message = "Access denied. Please check your permissions."
+        error_code = "PERMISSION_ERROR"
+    elif "File" in error_type or "IO" in error_type:
+        user_message = "File operation failed. Please check your file and try again."
+        error_code = "FILE_ERROR"
+    elif "Value" in error_type or "Type" in error_type:
+        user_message = "Invalid data provided. Please check your input."
+        error_code = "DATA_ERROR"
+    else:
+        user_message = "An unexpected error occurred. Our team has been notified."
+        error_code = "INTERNAL_ERROR"
+
+    # In debug mode, include full error details
+    if settings.DEBUG:
+        user_message = f"{user_message} (Debug: {error_type}: {error_message})"
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=create_error_response(
-            error_code="INTERNAL_ERROR",
-            message="An unexpected error occurred" if not settings.DEBUG else str(exc),
+            error_code=error_code,
+            message=user_message,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            details={"traceback": traceback.format_exc()} if settings.DEBUG else None
+            details={
+                "error_type": error_type,
+                "traceback": traceback.format_exc()
+            } if settings.DEBUG else {"error_type": error_type}  # Still provide error type in production
         )
     )
 
@@ -213,14 +282,28 @@ async def read_root():
 
 # Include the routers from the endpoint modules
 app.include_router(
-    login.router, 
-    tags=["Authentication"], 
+    login.router,
+    tags=["Authentication"],
     prefix="/api"
 )
 
+# SPRINT 2 Phase 3: Tenant registration and management
 app.include_router(
-    dashboard.router, 
-    tags=["Dashboard"], 
+    tenants.router,
+    tags=["Tenants"],
+    prefix=f"/api/{settings.API_VERSION}/tenants"
+)
+
+# SPRINT 2 Phase 5: Tenant user management (RBAC)
+app.include_router(
+    users.router,
+    tags=["User Management"],
+    prefix=f"/api/{settings.API_VERSION}/users"
+)
+
+app.include_router(
+    dashboard.router,
+    tags=["Dashboard"],
     prefix="/api/dashboard"
 )
 
@@ -249,9 +332,120 @@ app.include_router(
 )
 
 app.include_router(
-    validation.router, 
-    prefix=f"/api/{settings.API_VERSION}/validation", 
+    validation.router,
+    prefix=f"/api/{settings.API_VERSION}/validation",
     tags=["Validation"]
+)
+
+app.include_router(
+    billing.router,
+    prefix=f"/api/{settings.API_VERSION}/billing",
+    tags=["Billing"]
+)
+
+# SPRINT 2 Extended Phase 10: Task Management
+app.include_router(
+    tasks.router,
+    prefix=f"/api/{settings.API_VERSION}/tasks",
+    tags=["Tasks"]
+)
+
+# SPRINT 3: Business Ontology Engine
+app.include_router(
+    ontology.router,
+    prefix=f"/api/{settings.API_VERSION}/ontology",
+    tags=["Ontology"]
+)
+
+# SPRINT 3: Initiative Governance
+app.include_router(
+    initiatives.router,
+    prefix=f"/api/{settings.API_VERSION}/initiatives",
+    tags=["Initiatives"]
+)
+
+# SPRINT 3: Code Analysis Engine — Repository Management
+app.include_router(
+    repositories.router,
+    prefix=f"/api/{settings.API_VERSION}/repositories",
+    tags=["Repositories"]
+)
+
+# SPRINT 4: Git Webhook Integration (ADHOC-09) — no auth required (signature-verified)
+app.include_router(
+    webhooks.router,
+    prefix=f"/api/{settings.API_VERSION}/webhooks",
+    tags=["Webhooks"]
+)
+
+# SPRINT 5: Audit Trail
+app.include_router(
+    audit.router,
+    prefix=f"/api/{settings.API_VERSION}/audit",
+    tags=["Audit Trail"]
+)
+
+# SPRINT 5: Notifications
+app.include_router(
+    notifications.router,
+    prefix=f"/api/{settings.API_VERSION}/notifications",
+    tags=["Notifications"]
+)
+
+# SPRINT 5: Data Exports
+app.include_router(
+    exports.router,
+    prefix=f"/api/{settings.API_VERSION}/exports",
+    tags=["Exports"]
+)
+
+# SPRINT 5: Unified Semantic Search
+app.include_router(
+    search.router,
+    prefix=f"/api/{settings.API_VERSION}/search",
+    tags=["Search"]
+)
+
+# SPRINT 6: Approval Workflow
+app.include_router(
+    approvals.router,
+    prefix=f"/api/{settings.API_VERSION}/approvals",
+    tags=["Approvals"]
+)
+
+# SPRINT 7: RAG/Chat Assistant
+app.include_router(
+    chat.router,
+    prefix=f"/api/{settings.API_VERSION}/chat",
+    tags=["Chat"]
+)
+
+# SPRINT 8: API Key Management
+app.include_router(
+    api_keys.router,
+    prefix=f"/api/{settings.API_VERSION}/api-keys",
+    tags=["API Keys"]
+)
+
+# SPRINT 8: Auto Docs (Module 12)
+app.include_router(
+    auto_docs.router,
+    prefix=f"/api/{settings.API_VERSION}/auto-docs",
+    tags=["Auto Docs"]
+)
+
+# SPRINT 8: Documentation Integrations (Module 11)
+app.include_router(
+    integrations.router,
+    prefix=f"/api/{settings.API_VERSION}/integrations",
+    tags=["Integrations"]
+)
+
+# SPRINT 8: Analytics Dashboard
+app.include_router(
+    analytics.router,
+    prefix=f"/api/{settings.API_VERSION}/analytics",
+    tags=["Analytics"]
 )
 
 # --- Startup Event (Legacy support) ---

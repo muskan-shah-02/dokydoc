@@ -13,17 +13,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Layers,
   Lightbulb,
-  Users,
   Code,
   GitMerge,
   ShieldCheck,
   AlertTriangle,
   CheckCircle,
-  Clock,
   Star,
   TrendingUp,
   Package,
-  Zap,
 } from "lucide-react";
 
 interface RepositoryAnalysisViewProps {
@@ -114,21 +111,6 @@ const InfoItem = ({
   );
 };
 
-// Helper to get stage icon and color
-const getStageInfo = (stage: string) => {
-  const lower = stage?.toLowerCase();
-  if (lower?.includes("production") || lower?.includes("stable")) {
-    return { icon: CheckCircle, color: "text-green-600" };
-  }
-  if (lower?.includes("beta") || lower?.includes("testing")) {
-    return { icon: AlertTriangle, color: "text-yellow-600" };
-  }
-  if (lower?.includes("alpha") || lower?.includes("development")) {
-    return { icon: Clock, color: "text-blue-600" };
-  }
-  return { icon: Code, color: "text-muted-foreground" };
-};
-
 export function RepositoryAnalysisView({
   analysis,
   isLoading = false,
@@ -185,36 +167,42 @@ export function RepositoryAnalysisView({
     );
   }
 
+  // Map from the actual Gemini CODE_ANALYSIS response format
+  // Gemini returns: language_info, components, dependencies, patterns_and_architecture, quality_assessment
   const {
-    architecture = {},
-    project_insights = {},
-    technology_assessment = {},
-    primary_language,
-    confidence_score,
+    language_info = {} as Record<string, any>,
+    components = [] as any[],
+    dependencies = [] as string[],
+    exports = [] as string[],
+    patterns_and_architecture = {} as Record<string, any>,
+    quality_assessment,
     analysis_timestamp,
   } = analysis;
 
-  const stageInfo = getStageInfo(project_insights.development_stage || "");
+  const primary_language = language_info.primary_language;
+  const framework = language_info.framework;
+  const architectural_style = patterns_and_architecture.architectural_style;
+  const design_patterns = patterns_and_architecture.design_patterns || [];
+  const key_concepts = patterns_and_architecture.key_concepts || [];
+
+  // Group components by type for stats
+  const componentsByType: Record<string, number> = {};
+  components.forEach((c: any) => {
+    const type = c.type || "Unknown";
+    componentsByType[type] = (componentsByType[type] || 0) + 1;
+  });
+  const componentTypeNames = Object.keys(componentsByType).sort(
+    (a, b) => componentsByType[b] - componentsByType[a]
+  );
 
   return (
     <div className="space-y-6">
-      {(confidence_score || analysis_timestamp) && (
+      {analysis_timestamp && (
         <Alert>
           <Star className="h-4 w-4" />
           <AlertDescription>
-            Analysis completed
-            {analysis_timestamp && (
-              <span>
-                {" "}
-                on {new Date(analysis_timestamp).toLocaleDateString()}
-              </span>
-            )}
-            {confidence_score && (
-              <span>
-                {" "}
-                with {Math.round(confidence_score * 100)}% confidence
-              </span>
-            )}
+            Analysis completed on{" "}
+            {new Date(analysis_timestamp).toLocaleDateString()}
           </AlertDescription>
         </Alert>
       )}
@@ -233,24 +221,10 @@ export function RepositoryAnalysisView({
             </CardHeader>
             <CardContent className="space-y-6">
               <InfoItem
-                label="Architecture Pattern"
-                value={architecture.type || "Not identified"}
+                label="Architecture Style"
+                value={architectural_style || "Not identified"}
                 icon={Layers}
-                variant={architecture.type ? "success" : "default"}
-              />
-              <InfoList
-                title="System Components"
-                items={architecture.components}
-                icon={GitMerge}
-                emptyMessage="No specific components identified"
-                maxItems={8}
-              />
-              <InfoList
-                title="Technology Stack"
-                items={architecture.tech_stack}
-                icon={Code}
-                emptyMessage="Technology stack not analyzed"
-                maxItems={6}
+                variant={architectural_style ? "success" : "default"}
               />
               {primary_language && (
                 <InfoItem
@@ -260,139 +234,156 @@ export function RepositoryAnalysisView({
                   variant="success"
                 />
               )}
+              {framework && (
+                <InfoItem
+                  label="Framework"
+                  value={framework}
+                  icon={Code}
+                  variant="default"
+                />
+              )}
+              <InfoList
+                title="Key Concepts"
+                items={key_concepts}
+                icon={GitMerge}
+                emptyMessage="No key concepts identified"
+                maxItems={10}
+              />
+              <InfoList
+                title="Design Patterns"
+                items={design_patterns}
+                icon={CheckCircle}
+                emptyMessage="No design patterns identified"
+                maxItems={8}
+              />
             </CardContent>
           </Card>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center">
                 <ShieldCheck className="w-5 h-5 mr-3 text-green-600" />
-                Technology Assessment
+                Dependencies & Technology Stack
               </CardTitle>
               <CardDescription>
-                Analysis of technology choices, dependencies, and scalability
-                considerations
+                External libraries and technology dependencies found in the
+                repository
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {technology_assessment.language_choice_rationale && (
-                <div className="p-4 bg-muted/30 rounded-lg">
-                  <h4 className="font-semibold mb-2 flex items-center">
-                    <Lightbulb className="w-4 h-4 mr-2 text-yellow-500" />
-                    Language Choice Rationale
-                  </h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {technology_assessment.language_choice_rationale}
-                  </p>
-                </div>
-              )}
               <InfoList
-                title="Notable Dependencies"
-                items={technology_assessment.notable_dependencies}
+                title="Dependencies"
+                items={Array.isArray(dependencies) ? dependencies : []}
                 icon={Package}
-                emptyMessage="No notable dependencies identified"
-                maxItems={8}
+                emptyMessage="No dependencies identified"
+                maxItems={12}
               />
-              {technology_assessment.scalability_considerations && (
-                <div className="p-4 bg-muted/30 rounded-lg">
-                  <h4 className="font-semibold mb-2 flex items-center">
-                    <TrendingUp className="w-4 h-4 mr-2 text-blue-500" />
-                    Scalability Considerations
-                  </h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {technology_assessment.scalability_considerations}
-                  </p>
-                </div>
+              {exports.length > 0 && (
+                <InfoList
+                  title="Exports"
+                  items={exports}
+                  icon={TrendingUp}
+                  emptyMessage="No exports identified"
+                  maxItems={8}
+                />
               )}
             </CardContent>
           </Card>
-        </div>
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                <Lightbulb className="w-5 h-5 mr-3 text-yellow-500" />
-                Project Insights
-              </CardTitle>
-              <CardDescription>
-                High-level project characteristics and development status
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <InfoItem
-                label="Complexity Level"
-                value={project_insights.complexity}
-                icon={Zap}
-                variant={
-                  project_insights.complexity?.toLowerCase().includes("high")
-                    ? "warning"
-                    : project_insights.complexity?.toLowerCase().includes("low")
-                    ? "success"
-                    : "default"
-                }
-              />
-              <InfoItem
-                label="Development Stage"
-                value={project_insights.development_stage}
-                icon={stageInfo.icon}
-              />
-              {project_insights.target_users && (
-                <div className="p-3 bg-muted/30 rounded-lg">
-                  <h4 className="font-semibold mb-2 flex items-center text-sm">
-                    <Users className="w-4 h-4 mr-2 text-muted-foreground" />
-                    Target Users
-                  </h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {project_insights.target_users}
-                  </p>
-                </div>
-              )}
-              {project_insights.maintenance_notes && (
-                <div className="p-3 bg-muted/30 rounded-lg">
-                  <h4 className="font-semibold mb-2 flex items-center text-sm">
-                    <AlertTriangle className="w-4 h-4 mr-2 text-yellow-500" />
-                    Maintenance Notes
-                  </h4>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    {project_insights.maintenance_notes}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          {(architecture.components?.length ||
-            technology_assessment.notable_dependencies?.length) && (
+          {/* Code Components Found */}
+          {components.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Quick Stats</CardTitle>
+                <CardTitle className="flex items-center">
+                  <Code className="w-5 h-5 mr-3 text-purple-600" />
+                  Code Components ({components.length})
+                </CardTitle>
+                <CardDescription>
+                  Functions, classes, services, and other code elements found
+                  across the repository
+                </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {architecture.components?.length && (
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium">Components</span>
-                    <Badge variant="outline">
-                      {architecture.components.length}
-                    </Badge>
-                  </div>
-                )}
-                {technology_assessment.notable_dependencies?.length && (
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium">Dependencies</span>
-                    <Badge variant="outline">
-                      {technology_assessment.notable_dependencies.length}
-                    </Badge>
-                  </div>
-                )}
-                {architecture.tech_stack?.length && (
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium">Technologies</span>
-                    <Badge variant="outline">
-                      {architecture.tech_stack.length}
-                    </Badge>
-                  </div>
-                )}
+              <CardContent>
+                <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
+                  {components.slice(0, 30).map((comp: any, idx: number) => (
+                    <div
+                      key={idx}
+                      className="flex items-start justify-between p-3 bg-muted/30 rounded-lg"
+                    >
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm">
+                            {comp.name}
+                          </span>
+                          <Badge variant="secondary" className="text-xs">
+                            {comp.type}
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {comp.purpose}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {components.length > 30 && (
+                    <p className="text-sm text-muted-foreground text-center py-2">
+                      +{components.length - 30} more components
+                    </p>
+                  )}
+                </div>
               </CardContent>
             </Card>
           )}
+        </div>
+        <div className="space-y-6">
+          {/* Quality Assessment */}
+          {quality_assessment && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center">
+                  <Lightbulb className="w-5 h-5 mr-3 text-yellow-500" />
+                  Quality Assessment
+                </CardTitle>
+                <CardDescription>
+                  AI-generated code quality analysis
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="p-3 bg-muted/30 rounded-lg">
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    {quality_assessment}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Quick Stats</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Total Components</span>
+                <Badge variant="outline">{components.length}</Badge>
+              </div>
+              {componentTypeNames.slice(0, 5).map((type) => (
+                <div key={type} className="flex justify-between items-center">
+                  <span className="text-sm font-medium">{type}s</span>
+                  <Badge variant="outline">{componentsByType[type]}</Badge>
+                </div>
+              ))}
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Dependencies</span>
+                <Badge variant="outline">
+                  {Array.isArray(dependencies) ? dependencies.length : 0}
+                </Badge>
+              </div>
+              {design_patterns.length > 0 && (
+                <div className="flex justify-between items-center">
+                  <span className="text-sm font-medium">Design Patterns</span>
+                  <Badge variant="outline">{design_patterns.length}</Badge>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>

@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # --- Security Settings ---
     SECRET_KEY: str = Field(..., env="SECRET_KEY")
     ALGORITHM: str = Field(default="HS256", env="ALGORITHM")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, env="ACCESS_TOKEN_EXPIRE_MINUTES")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=480, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 8 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7, env="REFRESH_TOKEN_EXPIRE_DAYS")
     
     # --- CORS Settings ---
@@ -43,12 +43,48 @@ class Settings(BaseSettings):
     # --- NEW: ALLOWED_HOSTS (Fix for CONFIG-01) ---
     ALLOWED_HOSTS: List[str] = Field(default=["localhost", "127.0.0.1"], env="ALLOWED_HOSTS")
 
-    # --- AI Service Settings ---
+    # --- AI Service Settings: Gemini ---
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
     GEMINI_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL")
     GEMINI_VISION_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_VISION_MODEL")
     GEMINI_MAX_RETRIES: int = Field(default=3, env="GEMINI_MAX_RETRIES")
     GEMINI_TIMEOUT: int = Field(default=60, env="GEMINI_TIMEOUT")
+
+    # --- AI Service Settings: Claude/Anthropic (ADHOC-07) ---
+    ANTHROPIC_API_KEY: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+    ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-5-20250929", env="ANTHROPIC_MODEL")
+    ANTHROPIC_MAX_TOKENS: int = Field(default=4096, env="ANTHROPIC_MAX_TOKENS")
+    ANTHROPIC_TIMEOUT: int = Field(default=120, env="ANTHROPIC_TIMEOUT")
+
+    # --- AI Provider Routing (ADHOC-08) ---
+    # "gemini" = Gemini only (default), "dual" = Claude for code + Gemini for docs
+    AI_PROVIDER_MODE: str = Field(default="gemini", env="AI_PROVIDER_MODE")
+
+    # --- Git Webhook Settings (ADHOC-09) ---
+    WEBHOOK_SECRET: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
+    GITHUB_TOKEN: Optional[str] = Field(default=None, env="GITHUB_TOKEN")
+
+    # --- OAuth Integration Settings (Sprint 8) ---
+    FRONTEND_URL: str = Field(default="http://localhost:3000", env="FRONTEND_URL")
+    BACKEND_URL: str = Field(default="http://localhost:8000", env="BACKEND_URL")
+
+    # Jira / Atlassian OAuth 2.0
+    JIRA_CLIENT_ID: Optional[str] = Field(default=None, env="JIRA_CLIENT_ID")
+    JIRA_CLIENT_SECRET: Optional[str] = Field(default=None, env="JIRA_CLIENT_SECRET")
+
+    # Slack OAuth 2.0
+    SLACK_CLIENT_ID: Optional[str] = Field(default=None, env="SLACK_CLIENT_ID")
+    SLACK_CLIENT_SECRET: Optional[str] = Field(default=None, env="SLACK_CLIENT_SECRET")
+
+    # GitHub OAuth App (private repo integration)
+    GITHUB_CLIENT_ID: Optional[str] = Field(default=None, env="GITHUB_CLIENT_ID")
+    GITHUB_CLIENT_SECRET: Optional[str] = Field(default=None, env="GITHUB_CLIENT_SECRET")
+
+    # Confluence / Atlassian OAuth 2.0
+    # Tip: if you use the same Atlassian OAuth App for Jira + Confluence, set these
+    # to the same values as JIRA_CLIENT_ID / JIRA_CLIENT_SECRET.
+    CONFLUENCE_CLIENT_ID: Optional[str] = Field(default=None, env="CONFLUENCE_CLIENT_ID")
+    CONFLUENCE_CLIENT_SECRET: Optional[str] = Field(default=None, env="CONFLUENCE_CLIENT_SECRET")
     
     # --- File Upload Settings ---
     MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB

@@ -33,7 +33,14 @@ import {
   XCircle,
   Download,
   Trash2,
+  Wallet,
+  RefreshCw,
+  IndianRupee,
+  Sparkles,
 } from "lucide-react";
+import { api } from "@/lib/api";
+import Link from "next/link";
+import { useBillingNotification } from "@/components/BillingToast";
 
 // --- Interface Definitions ---
 interface Document {
@@ -46,6 +53,7 @@ interface Document {
   progress: number;
   error_message?: string | null;
   link_count?: number;
+  ai_cost_inr?: number | null;
 }
 
 interface CodeComponent {
@@ -69,6 +77,7 @@ const formatStatus = (status: string) => {
     case "pass_1_composition":
       return "Classifying...";
     case "pass_2_segmenting":
+    case "pass_2_segmentation":
       return "Segmenting...";
     case "pass_3_extraction":
       return "Extracting Data...";
@@ -87,6 +96,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
   const [uploadStep, setUploadStep] = useState<
     "idle" | "uploading" | "triggering" | "done"
   >("idle");
+  const [uploadProgress, setUploadProgress] = useState(0); // BUG-02 FIX
   const [error, setError] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -104,30 +114,52 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
 
     const token = localStorage.getItem("accessToken");
     setError(null);
+    setUploadProgress(0);
 
     try {
-      // --- Step 1: Upload ---
+      // --- Step 1: Upload with progress tracking (BUG-02 FIX) ---
       setUploadStep("uploading");
       const formData = new FormData();
       formData.append("file", selectedFile);
       formData.append("version", version);
       formData.append("document_type", documentType);
 
-      const uploadRes = await fetch(
-        "http://localhost:8000/api/v1/documents/upload",
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData,
-        }
-      );
+      // Show immediate visual feedback with a minimum progress value
+      setUploadProgress(5);
+      const docData = await new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "http://localhost:8000/api/v1/documents/upload");
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
-      if (!uploadRes.ok) {
-        const errData = await uploadRes.json();
-        throw new Error(errData.detail || "Upload failed");
-      }
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            // Ensure progress never appears to go backwards and always starts visible
+            const pct = Math.max(5, Math.round((event.loaded / event.total) * 100));
+            setUploadProgress(pct);
+          }
+        };
 
-      const docData = await uploadRes.json();
+        xhr.onload = () => {
+          setUploadProgress(100);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch {
+              reject(new Error("Invalid response from server"));
+            }
+          } else {
+            try {
+              const errData = JSON.parse(xhr.responseText);
+              reject(new Error(errData.detail || "Upload failed"));
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`));
+            }
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Network error during upload"));
+        xhr.send(formData);
+      });
 
       // --- Step 2: Trigger Analysis ---
       setUploadStep("triggering");
@@ -153,10 +185,12 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
         setUploadStep("idle");
         setSelectedFile(null);
         setVersion("");
+        setUploadProgress(0);
       }, 1000);
     } catch (err) {
       setError((err as Error).message);
       setUploadStep("idle");
+      setUploadProgress(0);
     }
   };
 
@@ -210,6 +244,16 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
             </select>
           </div>
           {error && <p className="text-red-500 text-sm">{error}</p>}
+          {/* BUG-02 FIX: Show upload progress bar */}
+          {uploadStep === "uploading" && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>Uploading file...</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <Progress value={uploadProgress} className="h-2" />
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button
@@ -219,7 +263,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
             {uploadStep === "idle" && "Upload & Analyze"}
             {uploadStep === "uploading" && (
               <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Uploading...
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Uploading {uploadProgress}%
               </>
             )}
             {uploadStep === "triggering" && (
@@ -379,7 +423,7 @@ const ManageLinksDialog = ({
   );
 };
 
-// --- Document Status Cell Component (With Live Polling) ---
+// --- Document Status Cell Component (With Live Polling & Billing Notifications) ---
 const DocumentStatusCell = ({
   doc,
   onUpdate,
@@ -390,6 +434,8 @@ const DocumentStatusCell = ({
   const [status, setStatus] = useState(doc.status);
   const [progress, setProgress] = useState(doc.progress);
   const [errorMessage, setErrorMessage] = useState(doc.error_message);
+  const [notifiedProcessing, setNotifiedProcessing] = useState(false);
+  const billingNotification = useBillingNotification();
 
   useEffect(() => {
     // Define active states that require polling
@@ -400,8 +446,21 @@ const DocumentStatusCell = ({
       "analyzing",
       "pass_1_composition",
       "pass_2_segmenting",
+      "pass_2_segmentation",
       "pass_3_extraction",
     ];
+
+    // Show processing started notification when entering AI analysis phases
+    const aiStates = ["analyzing", "pass_1_composition", "pass_2_segmenting", "pass_3_extraction"];
+    if (aiStates.includes(status) && !notifiedProcessing) {
+      setNotifiedProcessing(true);
+      // Fetch current balance and show notification
+      billingNotification.refreshBalance().then((balance) => {
+        if (balance !== null) {
+          billingNotification.showProcessingStarted(balance);
+        }
+      });
+    }
 
     if (activeStates.includes(status)) {
       const intervalId = setInterval(async () => {
@@ -422,7 +481,28 @@ const DocumentStatusCell = ({
             setProgress(data.progress);
             setErrorMessage(data.error_message);
 
-            if (data.status === "completed" || data.status.includes("failed")) {
+            // Show completion notification with cost
+            if (data.status === "completed") {
+              // Fetch document cost and new balance
+              try {
+                const [costData, newBalance] = await Promise.all([
+                  api.get<{ ai_cost_inr: number }>(`/billing/documents/${doc.id}/cost`),
+                  billingNotification.refreshBalance(),
+                ]);
+                const cost = costData?.ai_cost_inr || 0;
+                billingNotification.showProcessingComplete(cost, newBalance || 0);
+              } catch (err) {
+                console.error("Failed to fetch document cost:", err);
+              }
+
+              onUpdate({
+                ...doc,
+                status: data.status,
+                progress: data.progress,
+                error_message: data.error_message,
+              });
+            } else if (data.status.includes("failed")) {
+              billingNotification.showError(data.error_message || "Document processing failed");
               onUpdate({
                 ...doc,
                 status: data.status,
@@ -443,7 +523,7 @@ const DocumentStatusCell = ({
 
       return () => clearInterval(intervalId);
     }
-  }, [status, doc.id, onUpdate, doc, progress]);
+  }, [status, doc.id, onUpdate, doc, progress, notifiedProcessing, billingNotification]);
 
   if (status === "completed") {
     return (
@@ -482,12 +562,92 @@ const DocumentStatusCell = ({
   );
 };
 
+// --- Balance Display Component ---
+const BalanceDisplay = ({
+  balance,
+  billingType,
+  lowBalanceAlert,
+  onRefresh,
+  isRefreshing
+}: {
+  balance: number;
+  billingType: string;
+  lowBalanceAlert: boolean;
+  onRefresh: () => void;
+  isRefreshing: boolean;
+}) => {
+  if (billingType !== "prepaid") return null;
+
+  const isLow = balance < 100 || lowBalanceAlert;
+
+  return (
+    <div className={`flex items-center gap-2 rounded-lg px-3 py-2 ${
+      isLow ? "bg-orange-50 border border-orange-200" : "bg-green-50 border border-green-200"
+    }`}>
+      <Wallet className={`h-4 w-4 ${isLow ? "text-orange-600" : "text-green-600"}`} />
+      <div className="flex flex-col">
+        <span className="text-xs text-gray-500">Balance</span>
+        <span className={`font-semibold ${isLow ? "text-orange-700" : "text-green-700"}`}>
+          INR {balance.toFixed(2)}
+        </span>
+      </div>
+      <button
+        onClick={onRefresh}
+        disabled={isRefreshing}
+        className="ml-1 p-1 rounded hover:bg-white/50"
+        title="Refresh balance"
+      >
+        <RefreshCw className={`h-3 w-3 text-gray-400 ${isRefreshing ? "animate-spin" : ""}`} />
+      </button>
+      {isLow && (
+        <Link
+          href="/settings/billing"
+          className="text-xs text-orange-600 underline hover:text-orange-800"
+        >
+          Top up
+        </Link>
+      )}
+    </div>
+  );
+};
+
 // --- Main Documents Page Component ---
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [billingInfo, setBillingInfo] = useState<{
+    balance: number;
+    billingType: string;
+    lowBalanceAlert: boolean;
+  } | null>(null);
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
+
+  interface BillingUsageResponse {
+    balance_inr?: number;
+    billing_type?: string;
+    low_balance_alert?: boolean;
+  }
+
+  const fetchBillingInfo = useCallback(async () => {
+    try {
+      const data = await api.get<BillingUsageResponse>("/billing/usage");
+      setBillingInfo({
+        balance: data?.balance_inr || 0,
+        billingType: data?.billing_type || "prepaid",
+        lowBalanceAlert: data?.low_balance_alert || false,
+      });
+    } catch (err) {
+      console.error("Failed to fetch billing info:", err);
+    }
+  }, []);
+
+  const handleRefreshBalance = async () => {
+    setRefreshingBalance(true);
+    await fetchBillingInfo();
+    setRefreshingBalance(false);
+  };
 
   const fetchDocuments = useCallback(async () => {
     setIsLoading(true);
@@ -506,7 +666,8 @@ export default function DocumentsPage() {
         const errData = await response.json();
         throw new Error(errData.detail || "Failed to fetch documents.");
       }
-      const data: Document[] = await response.json();
+      const raw = await response.json();
+      const data: Document[] = Array.isArray(raw) ? raw : (raw.items ?? raw.documents ?? []);
 
       // Fetch link counts
       const documentsWithLinkCounts = await Promise.all(
@@ -541,12 +702,17 @@ export default function DocumentsPage() {
 
   useEffect(() => {
     fetchDocuments();
-  }, [fetchDocuments]);
+    fetchBillingInfo();
+  }, [fetchDocuments, fetchBillingInfo]);
 
   const handleDocumentUpdate = (updatedDoc: Document) => {
     setDocuments((currentDocs) =>
       currentDocs.map((d) => (d.id === updatedDoc.id ? updatedDoc : d))
     );
+    // Refresh balance when a document finishes processing (completed or failed)
+    if (updatedDoc.status === "completed" || updatedDoc.status.includes("failed")) {
+      fetchBillingInfo();
+    }
   };
 
   // Helper for download
@@ -605,11 +771,33 @@ export default function DocumentsPage() {
 
   return (
     <div className="p-2 sm:p-4">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
           Document Library
         </h1>
-        <UploadDialog onUploadSuccess={fetchDocuments} />
+        <div className="flex items-center gap-3">
+          <Link
+            href="/dashboard/chat?doc=0"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors"
+          >
+            <Sparkles className="h-4 w-4" />
+            Ask AI about documents
+          </Link>
+          {billingInfo && (
+            <BalanceDisplay
+              balance={billingInfo.balance}
+              billingType={billingInfo.billingType}
+              lowBalanceAlert={billingInfo.lowBalanceAlert}
+              onRefresh={handleRefreshBalance}
+              isRefreshing={refreshingBalance}
+            />
+          )}
+          <UploadDialog onUploadSuccess={() => {
+            fetchDocuments();
+            // Refresh balance after upload triggers analysis
+            setTimeout(fetchBillingInfo, 2000);
+          }} />
+        </div>
       </div>
 
       {isLoading && (
@@ -633,6 +821,7 @@ export default function DocumentsPage() {
                 <TableHead>Type</TableHead>
                 <TableHead>Version</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Analysis Cost</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -671,6 +860,18 @@ export default function DocumentsPage() {
                         onUpdate={handleDocumentUpdate}
                       />
                     </TableCell>
+                    <TableCell>
+                      {doc.status === "completed" && doc.ai_cost_inr != null ? (
+                        <span className="flex items-center gap-1 text-green-700 font-medium">
+                          <IndianRupee className="h-3 w-3" />
+                          {doc.ai_cost_inr.toFixed(2)}
+                        </span>
+                      ) : doc.status === "completed" ? (
+                        <span className="text-gray-400 text-sm">-</span>
+                      ) : (
+                        <span className="text-gray-400 text-sm">-</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end items-center gap-2">
                         <ManageLinksDialog
@@ -700,7 +901,7 @@ export default function DocumentsPage() {
               ) : (
                 <TableRow>
                   <TableCell
-                    colSpan={5}
+                    colSpan={6}
                     className="text-center h-24 text-muted-foreground"
                   >
                     No documents found. Upload your first document to get

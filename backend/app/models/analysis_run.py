@@ -26,6 +26,7 @@ class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
     
     # Foreign key to document
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)

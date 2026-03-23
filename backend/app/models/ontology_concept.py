@@ -5,7 +5,7 @@ Represents a concept in the business ontology (e.g., "User Authentication", "Pay
 These are the nodes in the knowledge graph.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 from app.db.base_class import Base
@@ -15,10 +15,15 @@ class OntologyConcept(Base):
     __tablename__ = "ontology_concepts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False, index=True)  # Multi-tenancy support
+    initiative_id: Mapped[int] = mapped_column(Integer, ForeignKey("initiatives.id"), nullable=True, index=True)  # SPRINT 4: Project-scoped ontology (NULL = global/unscoped)
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     concept_type: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., "FEATURE", "TECHNOLOGY", "PROCESS"
     description: Mapped[str] = mapped_column(Text, nullable=True)
     confidence_score: Mapped[float] = mapped_column(nullable=True)  # AI confidence in this concept
+    source_type: Mapped[str] = mapped_column(String(20), default="document", nullable=False, index=True)  # "document", "code", or "both"
+    source_component_id: Mapped[int] = mapped_column(Integer, ForeignKey("code_components.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to originating code file
+    source_document_id: Mapped[int] = mapped_column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)  # Link to originating document
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
