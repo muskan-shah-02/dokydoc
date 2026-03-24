@@ -181,7 +181,8 @@ type SourceType =
   | "jira_item"
   | "analysis"
   | "folder"
-  | "api_endpoint";
+  | "api_endpoint"
+  | "confluence_page";
 
 interface SourceItem {
   id: number;
@@ -211,8 +212,9 @@ const SOURCE_STYLES: Record<
   standalone:   { chip: "bg-teal-100 text-teal-700",     hover: "hover:bg-teal-50",     check: "text-teal-600",     icon: Code },
   jira_item:    { chip: "bg-purple-100 text-purple-700", hover: "hover:bg-purple-50",   check: "text-purple-600",   icon: Tag },
   analysis:     { chip: "bg-indigo-100 text-indigo-700", hover: "hover:bg-indigo-50",   check: "text-indigo-600",   icon: Sparkles },
-  folder:       { chip: "bg-orange-100 text-orange-700", hover: "hover:bg-orange-50",   check: "text-orange-600",   icon: FolderOpen },
-  api_endpoint: { chip: "bg-cyan-100 text-cyan-700",     hover: "hover:bg-cyan-50",     check: "text-cyan-600",     icon: Zap },
+  folder:          { chip: "bg-orange-100 text-orange-700",  hover: "hover:bg-orange-50",    check: "text-orange-600",    icon: FolderOpen },
+  api_endpoint:    { chip: "bg-cyan-100 text-cyan-700",      hover: "hover:bg-cyan-50",      check: "text-cyan-600",      icon: Zap },
+  confluence_page: { chip: "bg-blue-100 text-blue-800",      hover: "hover:bg-blue-50",      check: "text-blue-700",      icon: BookOpen },
 };
 
 // ----- Main Page -----
@@ -224,6 +226,7 @@ export default function AutoDocsPage() {
   const [standaloneFiles, setStandaloneFiles] = useState<SourceItem[]>([]);
   const [jiraItems, setJiraItems] = useState<SourceItem[]>([]);
   const [analysisResults, setAnalysisResults] = useState<SourceItem[]>([]);
+  const [confluencePages, setConfluencePages] = useState<SourceItem[]>([]);
   // Lazy-loaded repo files: repoId → SourceItem[]
   const [repoFiles, setRepoFiles] = useState<Record<number, SourceItem[]>>({});
   const [repoFilesLoading, setRepoFilesLoading] = useState<Set<number>>(new Set());
@@ -346,6 +349,20 @@ export default function AutoDocsPage() {
         );
       })
       .catch(() => {/* Jira may not be connected — silently ignore */});
+
+    // Confluence pages (only if integration is connected)
+    (api.get("/integrations/confluence/pages?limit=50") as Promise<any>)
+      .then((data) => {
+        const arr = data.items || [];
+        setConfluencePages(
+          arr.map((p: any) => ({
+            id: parseInt(p.id, 10),
+            name: p.space_name ? `[${p.space_name}] ${p.title}` : p.title,
+            type: "confluence_page" as const,
+          }))
+        );
+      })
+      .catch(() => {/* Confluence may not be connected — silently ignore */});
   }, []);
 
   const fetchHistory = () => {
@@ -1035,6 +1052,16 @@ export default function AutoDocsPage() {
                       </div>
                     )}
 
+                    {/* Confluence pages section */}
+                    {filtered(confluencePages).length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 px-3 pt-2 pb-1 bg-gray-50">
+                          Confluence Pages
+                        </p>
+                        {filtered(confluencePages).map((s) => <SourceRow key={`confluence:${s.id}`} src={s} />)}
+                      </div>
+                    )}
+
                     {/* Previous analyses section */}
                     {filtered(analysisResults).length > 0 && (
                       <div>
@@ -1050,6 +1077,7 @@ export default function AutoDocsPage() {
                       repositories.length === 0 &&
                       standaloneFiles.length === 0 &&
                       jiraItems.length === 0 &&
+                      confluencePages.length === 0 &&
                       analysisResults.length === 0 && (
                         <p className="text-xs text-gray-400 px-3 py-3">
                           No analyzed sources found. Upload documents or connect a repository first.

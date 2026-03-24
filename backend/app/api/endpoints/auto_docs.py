@@ -44,7 +44,7 @@ class GenerateDocRequest(BaseModel):
 class SourceEntry(BaseModel):
     type: str = Field(
         ...,
-        pattern="^(document|repository|code_file|standalone|jira_item|analysis|folder|api_endpoint)$",
+        pattern="^(document|repository|code_file|standalone|jira_item|analysis|folder|api_endpoint|confluence_page)$",
     )
     id: int
     folder_path: Optional[str] = Field(None, description="For type='folder': path prefix within the repo")

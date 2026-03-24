@@ -682,6 +682,8 @@ class AutoDocsService(LoggerMixin):
                 if doc:
                     return doc.title[:50] if doc.title else f"Analysis #{source_id}"
                 return f"Analysis #{source_id}"
+            elif source_type == "confluence_page":
+                return f"Confluence Page #{source_id}"
         except Exception:
             pass
         return f"{source_type} #{source_id}"
@@ -1101,6 +1103,8 @@ class AutoDocsService(LoggerMixin):
                     src_parts = self._context_from_jira_item(db, src_id, tenant_id)
                 elif src_type == "analysis":
                     src_parts = self._context_from_analysis(db, src_id, tenant_id)
+                elif src_type == "confluence_page":
+                    src_parts = self._context_from_confluence_page(db, src_id, tenant_id)
                 else:
                     continue
 
@@ -1198,6 +1202,62 @@ class AutoDocsService(LoggerMixin):
         parts.append(f"TYPE: {doc.doc_type} | SOURCE: {doc.source_name or 'unknown'}")
         if doc.content:
             parts.append(f"CONTENT:\n{doc.content[:4000]}")
+
+        return parts
+
+    def _context_from_confluence_page(
+        self, db: Session, page_id: int, tenant_id: int
+    ) -> list[str]:
+        """Fetch a Confluence page via the stored OAuth token and return its content as context."""
+        import re as _re
+        import httpx
+        from app.crud.crud_integration_config import crud_integration_config
+
+        config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="confluence")
+        if not config or not config.is_active or not config.access_token:
+            return [f"[Confluence integration not connected — cannot fetch page #{page_id}]"]
+
+        base_url = config.base_url or ""
+        headers = {"Authorization": f"Bearer {config.access_token}", "Accept": "application/json"}
+
+        try:
+            with httpx.Client(timeout=20) as client:
+                resp = client.get(
+                    f"{base_url}/wiki/rest/api/content/{page_id}",
+                    headers=headers,
+                    params={"expand": "body.storage,space,version,ancestors"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            return [f"[Confluence page #{page_id} fetch error: {e}]"]
+
+        title = data.get("title", f"page_{page_id}")
+        space = data.get("space", {}).get("name", "")
+        ancestors = data.get("ancestors", [])
+        breadcrumb = " > ".join(a["title"] for a in ancestors) if ancestors else ""
+
+        storage_body = data.get("body", {}).get("storage", {}).get("value", "")
+        # Convert Confluence storage XML to readable text
+        text = _re.sub(r'<h([1-6])[^>]*>(.*?)</h\1>', lambda m: "#" * int(m.group(1)) + " " + m.group(2) + "\n", storage_body, flags=_re.DOTALL)
+        text = _re.sub(r'<li[^>]*>(.*?)</li>', r'- \1\n', text, flags=_re.DOTALL)
+        text = _re.sub(r'<p[^>]*>(.*?)</p>', r'\1\n\n', text, flags=_re.DOTALL)
+        text = _re.sub(r'<br\s*/?>', '\n', text)
+        text = _re.sub(r'<strong[^>]*>(.*?)</strong>', r'**\1**', text, flags=_re.DOTALL)
+        text = _re.sub(r'<em[^>]*>(.*?)</em>', r'*\1*', text, flags=_re.DOTALL)
+        text = _re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', text, flags=_re.DOTALL)
+        text = _re.sub(r'<[^>]+>', ' ', text)
+        text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
+        text = _re.sub(r' {2,}', ' ', text)
+        text = _re.sub(r'\n{3,}', '\n\n', text.strip())
+
+        parts = [f"CONFLUENCE PAGE: {title}"]
+        if space:
+            parts.append(f"SPACE: {space}")
+        if breadcrumb:
+            parts.append(f"PATH: {breadcrumb} > {title}")
+        if text:
+            parts.append(f"CONTENT:\n{text[:4000]}")
 
         return parts
 
