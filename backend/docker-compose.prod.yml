@@ -286,14 +286,34 @@ services:
 volumes:
   postgres_data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/HC_Volume_105219175/postgres_data
   redis_data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/HC_Volume_105219175/redis_data
   uploads_data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/HC_Volume_105219175/uploads_data
   app_logs:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/HC_Volume_105219175/app_logs
   nginx_logs:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/HC_Volume_105219175/nginx_logs
 
 # ────────────────────────────────────────────────────────────────────────────
 # Networks
