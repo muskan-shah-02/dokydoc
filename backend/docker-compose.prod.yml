@@ -137,7 +137,7 @@ services:
     container_name: dokydoc_worker
     restart: unless-stopped
     command: >
-      celery -A app.celery_app worker
+      celery -A app.worker worker
       --loglevel=info
       --concurrency=4
       --max-tasks-per-child=100
@@ -177,7 +177,7 @@ services:
     container_name: dokydoc_beat
     restart: unless-stopped
     command: >
-      celery -A app.celery_app beat
+      celery -A app.worker beat
       --loglevel=info
       --scheduler celery.beat:PersistentScheduler
     env_file:
@@ -207,7 +207,7 @@ services:
     container_name: dokydoc_flower
     restart: unless-stopped
     command: >
-      celery -A app.celery_app flower
+      celery -A app.worker flower
       --port=5555
       --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD}
       --url_prefix=flower
