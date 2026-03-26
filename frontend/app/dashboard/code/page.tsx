@@ -483,17 +483,6 @@ export default function CodePage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const savedScrollRef = useRef<number>(0);
 
-  // Auto-open GitHub repo picker when navigated from integrations page (?add=github)
-  useEffect(() => {
-    if (searchParams.get("add") === "github") {
-      setIsDialogOpen(true);
-      setAddMode("github");
-      fetchGithubRepos();
-      // Clean the URL without reloading
-      window.history.replaceState({}, "", "/dashboard/code");
-    }
-  }, [searchParams, fetchGithubRepos]);
-
   // --- Data Fetching ---
 
   const fetchData = useCallback(async (showRefreshing = false) => {
@@ -559,6 +548,16 @@ export default function CodePage() {
       setLoadingGithubRepos(false);
     }
   }, []);
+
+  // Auto-open GitHub repo picker when navigated from integrations page (?add=github)
+  useEffect(() => {
+    if (searchParams.get("add") === "github") {
+      setIsDialogOpen(true);
+      setAddMode("github");
+      fetchGithubRepos();
+      window.history.replaceState({}, "", "/dashboard/code");
+    }
+  }, [searchParams, fetchGithubRepos]);
 
   const fetchRepoComponents = useCallback(async (repoId: number, isPolling = false) => {
     const token = localStorage.getItem("accessToken");
