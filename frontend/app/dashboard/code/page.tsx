@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -415,7 +415,7 @@ function FileTreeRows({
   );
 }
 
-export default function CodePage() {
+function CodePageInner() {
   // --- State: Repositories (primary view) ---
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [standaloneComponents, setStandaloneComponents] = useState<CodeComponent[]>([]);
@@ -2367,5 +2367,13 @@ export default function CodePage() {
         </Card>
       )}
     </div>
+  );
+}
+
+export default function CodePage() {
+  return (
+    <Suspense fallback={null}>
+      <CodePageInner />
+    </Suspense>
   );
 }
