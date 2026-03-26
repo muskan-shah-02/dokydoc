@@ -70,7 +70,7 @@ import {
   BarChart2,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { API_BASE_URL } from "@/lib/api";
 
@@ -476,11 +476,23 @@ export default function CodePage() {
   } | null>(null);
 
   const router = useRouter();
+  const searchParams = useSearchParams();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Scroll position preservation — prevent auto-scroll to top on polling re-renders
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const savedScrollRef = useRef<number>(0);
+
+  // Auto-open GitHub repo picker when navigated from integrations page (?add=github)
+  useEffect(() => {
+    if (searchParams.get("add") === "github") {
+      setIsDialogOpen(true);
+      setAddMode("github");
+      fetchGithubRepos();
+      // Clean the URL without reloading
+      window.history.replaceState({}, "", "/dashboard/code");
+    }
+  }, [searchParams, fetchGithubRepos]);
 
   // --- Data Fetching ---
 
@@ -1232,7 +1244,7 @@ export default function CodePage() {
                             .filter((r) =>
                               !githubRepoSearch ||
                               r.full_name.toLowerCase().includes(githubRepoSearch.toLowerCase()) ||
-                              r.description.toLowerCase().includes(githubRepoSearch.toLowerCase())
+                              (r.description ?? "").toLowerCase().includes(githubRepoSearch.toLowerCase())
                             )
                             .map((repo) => {
                               const isSelected = newComponent.location === repo.html_url;

@@ -507,13 +507,13 @@ function IntegrationsContent() {
                     {connected ? (
                       <>
                         {provider === "github" ? (
-                          <Link href="/dashboard/code" className="flex-1">
+                          <Link href="/dashboard/code?add=github" className="flex-1">
                             <Button
                               size="sm"
                               variant="outline"
                               className="w-full h-8 text-xs gap-1"
                             >
-                              <GitBranch className="w-3.5 h-3.5" /> View Repos
+                              <GitBranch className="w-3.5 h-3.5" /> Add Repo
                             </Button>
                           </Link>
                         ) : (
