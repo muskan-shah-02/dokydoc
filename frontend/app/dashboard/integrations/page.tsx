@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 
 import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   Link2,
   Loader2,
@@ -23,6 +24,7 @@ import {
   Zap,
   ChevronDown,
   ChevronUp,
+  GitBranch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -504,14 +506,26 @@ function IntegrationsContent() {
                   <div className="flex gap-2 mt-auto pt-1">
                     {connected ? (
                       <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="flex-1 h-8 text-xs gap-1"
-                          onClick={() => handleBrowse(provider)}
-                        >
-                          <FileText className="w-3.5 h-3.5" /> Browse
-                        </Button>
+                        {provider === "github" ? (
+                          <Link href="/dashboard/code" className="flex-1">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="w-full h-8 text-xs gap-1"
+                            >
+                              <GitBranch className="w-3.5 h-3.5" /> View Repos
+                            </Button>
+                          </Link>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="flex-1 h-8 text-xs gap-1"
+                            onClick={() => handleBrowse(provider)}
+                          >
+                            <FileText className="w-3.5 h-3.5" /> Browse
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline"

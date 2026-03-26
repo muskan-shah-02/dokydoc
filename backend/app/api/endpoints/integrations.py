@@ -1304,7 +1304,21 @@ async def github_oauth_callback(
     Exchange the authorization code for an access token, fetch user info, and save.
     Redirect browser back to the frontend integrations page.
     """
-    tenant_id, user_id = _verify_oauth_state(state)
+    # Guard: credentials must be configured
+    if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
+        logger.error("GitHub OAuth callback hit but CLIENT_ID/SECRET not configured")
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": "GitHub OAuth is not configured on this server", "provider": "github"})
+        )
+
+    try:
+        tenant_id, user_id = _verify_oauth_state(state)
+    except Exception:
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": "Invalid OAuth state — please try again", "provider": "github"})
+        )
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1319,13 +1333,19 @@ async def github_oauth_callback(
                     "redirect_uri": f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/github/oauth/callback",
                 },
             )
+            if token_resp.status_code != 200:
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": f"GitHub token exchange failed ({token_resp.status_code})", "provider": "github"})
+                )
             token_data = token_resp.json()
 
             access_token = token_data.get("access_token")
             if not access_token:
                 error = token_data.get("error_description", "Failed to obtain access token")
                 return RedirectResponse(
-                    f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={error}&provider=github"
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": error, "provider": "github"})
                 )
 
             # 2. Fetch GitHub user info
@@ -1333,9 +1353,20 @@ async def github_oauth_callback(
                 "https://api.github.com/user",
                 headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
             )
+            if user_resp.status_code != 200:
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": f"Failed to fetch GitHub user info ({user_resp.status_code})", "provider": "github"})
+                )
             user_data = user_resp.json()
             github_login = user_data.get("login", "")
             github_id = str(user_data.get("id", ""))
+
+            if not github_login or not github_id or github_id == "0":
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": "Invalid GitHub user data received", "provider": "github"})
+                )
 
         # 3. Save to integration_configs
         crud_integration_config.upsert(
@@ -1349,13 +1380,15 @@ async def github_oauth_callback(
         )
 
         return RedirectResponse(
-            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_success=github&workspace={github_login}"
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_success": "github", "workspace": github_login})
         )
 
     except Exception as exc:
         logger.exception("GitHub OAuth callback error")
         return RedirectResponse(
-            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={str(exc)}&provider=github"
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": str(exc), "provider": "github"})
         )
 
 
