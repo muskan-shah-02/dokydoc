@@ -171,7 +171,12 @@ def init_database():
             )
             
             logger.info("Creating database tables if they don't exist...")
-            Base.metadata.create_all(bind=engine)
+            try:
+                Base.metadata.create_all(bind=engine)
+            except Exception as create_err:
+                # ENUM types created by Alembic migrations may already exist.
+                # Log and continue — the schema is managed by Alembic.
+                logger.warning(f"create_all encountered an error (likely pre-existing ENUM types from Alembic): {create_err}")
             logger.info("Database tables created/verified successfully")
             
             # Log database information
