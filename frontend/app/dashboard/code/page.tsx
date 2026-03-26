@@ -445,6 +445,7 @@ function CodePageInner() {
   const [githubLogin, setGithubLogin] = useState<string | null>(null);
   const [loadingGithubRepos, setLoadingGithubRepos] = useState(false);
   const [githubRepoSearch, setGithubRepoSearch] = useState("");
+  const [githubReposError, setGithubReposError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState<"url" | "github">("url");
 
   // --- State: UI ---
@@ -530,6 +531,7 @@ function CodePageInner() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     setLoadingGithubRepos(true);
+    setGithubReposError(null);
     try {
       const res = await fetch(`${API_BASE_URL}/integrations/github/repos`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -541,9 +543,20 @@ function CodePageInner() {
         setGithubConnected(true);
       } else if (res.status === 404) {
         setGithubConnected(false);
+        setGithubReposError(null);
+      } else {
+        // 401, 502, etc. — GitHub is connected but API call failed
+        let detail = `Error ${res.status}`;
+        try {
+          const err = await res.json();
+          detail = err.detail || detail;
+        } catch {}
+        setGithubConnected(false);
+        setGithubReposError(detail);
       }
-    } catch {
+    } catch (e: any) {
       setGithubConnected(false);
+      setGithubReposError(e?.message || "Network error — could not reach server");
     } finally {
       setLoadingGithubRepos(false);
     }
@@ -552,6 +565,8 @@ function CodePageInner() {
   // Auto-open GitHub repo picker when navigated from integrations page (?add=github)
   useEffect(() => {
     if (searchParams.get("add") === "github") {
+      setGithubConnected(false);
+      setGithubReposError(null);
       setIsDialogOpen(true);
       setAddMode("github");
       fetchGithubRepos();
@@ -1136,6 +1151,8 @@ function CodePageInner() {
                 setAddMode("url");
                 setScanPreview(null);
                 setGithubRepoSearch("");
+                setGithubReposError(null);
+                setGithubConnected(false);
                 fetchGithubRepos();
               }
             }}
@@ -1210,17 +1227,38 @@ function CodePageInner() {
                 {/* ── GitHub Repo Picker ── */}
                 {addMode === "github" ? (
                   <div className="space-y-3">
-                    {!githubConnected ? (
+                    {loadingGithubRepos ? (
+                      <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-6 text-center">
+                        <Loader2 className="w-6 h-6 animate-spin text-blue-500 mx-auto mb-2" />
+                        <p className="text-xs text-gray-500">Loading your GitHub repositories…</p>
+                      </div>
+                    ) : !githubConnected ? (
                       <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-center space-y-2">
                         <FolderGit2 className="w-8 h-8 text-gray-400 mx-auto" />
-                        <p className="text-sm text-gray-600 font-medium">GitHub not connected</p>
-                        <p className="text-xs text-gray-400">
-                          Go to{" "}
-                          <a href="/dashboard/integrations" className="text-blue-600 underline">
-                            Integrations
-                          </a>{" "}
-                          and connect your GitHub account to browse private repos.
-                        </p>
+                        {githubReposError ? (
+                          <>
+                            <p className="text-sm text-red-600 font-medium">Failed to load repositories</p>
+                            <p className="text-xs text-gray-500">{githubReposError}</p>
+                            <button
+                              type="button"
+                              onClick={() => fetchGithubRepos()}
+                              className="text-xs text-blue-600 underline"
+                            >
+                              Try again
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm text-gray-600 font-medium">GitHub not connected</p>
+                            <p className="text-xs text-gray-400">
+                              Go to{" "}
+                              <a href="/dashboard/integrations" className="text-blue-600 underline">
+                                Integrations
+                              </a>{" "}
+                              and connect your GitHub account to browse private repos.
+                            </p>
+                          </>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -1235,7 +1273,6 @@ function CodePageInner() {
                               className="w-full pl-8 pr-3 py-2 text-sm border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400"
                             />
                           </div>
-                          {loadingGithubRepos && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />}
                         </div>
 
                         <div className="max-h-52 overflow-y-auto rounded-md border border-input divide-y">
