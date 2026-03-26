@@ -446,6 +446,8 @@ function CodePageInner() {
   const [loadingGithubRepos, setLoadingGithubRepos] = useState(false);
   const [githubRepoSearch, setGithubRepoSearch] = useState("");
   const [githubReposError, setGithubReposError] = useState<string | null>(null);
+  const [githubSelectedRepo, setGithubSelectedRepo] = useState<typeof githubRepos[0] | null>(null);
+  const [githubFilePath, setGithubFilePath] = useState("");
   const [addMode, setAddMode] = useState<"url" | "github">("url");
 
   // --- State: UI ---
@@ -567,6 +569,8 @@ function CodePageInner() {
     if (searchParams.get("add") === "github") {
       setGithubConnected(false);
       setGithubReposError(null);
+      setGithubSelectedRepo(null);
+      setGithubFilePath("");
       setIsDialogOpen(true);
       setAddMode("github");
       fetchGithubRepos();
@@ -797,8 +801,14 @@ function CodePageInner() {
   ) => {
     const { name, value } = e.target;
     setNewComponent((prev) => ({ ...prev, [name]: value }));
-    // Clear scan preview when URL changes
     if (name === "location") setScanPreview(null);
+    // When component type changes, reset GitHub file selection state
+    if (name === "component_type") {
+      setGithubSelectedRepo(null);
+      setGithubFilePath("");
+      setNewComponent((prev) => ({ ...prev, component_type: value, location: "", version: "" }));
+      setScanPreview(null);
+    }
   };
 
   const handleScanPreview = async () => {
@@ -823,16 +833,19 @@ function CodePageInner() {
     }
   };
 
-  const registerComponent = async () => {
+  const registerComponent = async (locationOverride?: string) => {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
+    const payload = locationOverride
+      ? { ...newComponent, location: locationOverride }
+      : newComponent;
     const res = await fetch(`${API_BASE_URL}/code-components/`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(newComponent),
+      body: JSON.stringify(payload),
     });
     if (res.ok) {
       setIsDialogOpen(false);
@@ -856,6 +869,37 @@ function CodePageInner() {
       setIsSubmitting(false);
       return;
     }
+
+    const isRepo = newComponent.component_type === "Repository";
+
+    // For File/Class/Function in GitHub mode: build location from selected repo + file path
+    if (addMode === "github" && !isRepo) {
+      if (githubSelectedRepo) {
+        const trimmedPath = githubFilePath.trim().replace(/^\//, "");
+        if (!trimmedPath) {
+          setSubmissionError("Enter the file path within the repository (e.g., src/auth/utils.py)");
+          setIsSubmitting(false);
+          return;
+        }
+        // Build a direct blob URL so the backend can fetch the file
+        const builtLocation = `${githubSelectedRepo.html_url}/blob/${githubSelectedRepo.default_branch}/${trimmedPath}`;
+        setNewComponent((prev) => ({ ...prev, location: builtLocation }));
+        // Use the built location directly in the request below
+        try {
+          await registerComponent(builtLocation);
+        } catch (error: any) {
+          setSubmissionError(error.message);
+        } finally {
+          setIsSubmitting(false);
+        }
+        return;
+      } else if (!newComponent.location) {
+        setSubmissionError("Select a repository from the list or paste a file URL directly.");
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     if (!newComponent.location) {
       setSubmissionError(
         addMode === "github"
@@ -1153,6 +1197,8 @@ function CodePageInner() {
                 setGithubRepoSearch("");
                 setGithubReposError(null);
                 setGithubConnected(false);
+                setGithubSelectedRepo(null);
+                setGithubFilePath("");
                 fetchGithubRepos();
               }
             }}
@@ -1283,20 +1329,35 @@ function CodePageInner() {
                               (r.description ?? "").toLowerCase().includes(githubRepoSearch.toLowerCase())
                             )
                             .map((repo) => {
-                              const isSelected = newComponent.location === repo.html_url;
+                              const isSelected = newComponent.component_type === "Repository"
+                                ? newComponent.location === repo.html_url
+                                : githubSelectedRepo?.id === repo.id;
                               return (
                                 <button
                                   key={repo.id}
                                   type="button"
                                   onClick={() => {
-                                    setNewComponent((prev) => ({
-                                      ...prev,
-                                      location: repo.html_url,
-                                      name: prev.name || repo.name,
-                                      component_type: "Repository",
-                                      version: repo.default_branch,
-                                    }));
-                                    setScanPreview(null);
+                                    if (newComponent.component_type === "Repository") {
+                                      // Repository type: select whole repo
+                                      setNewComponent((prev) => ({
+                                        ...prev,
+                                        location: repo.html_url,
+                                        name: prev.name || repo.name,
+                                        version: repo.default_branch,
+                                      }));
+                                      setScanPreview(null);
+                                      setGithubSelectedRepo(null);
+                                    } else {
+                                      // File/Class/Function: select repo as source, then user enters file path
+                                      setGithubSelectedRepo(repo);
+                                      setGithubFilePath("");
+                                      setNewComponent((prev) => ({
+                                        ...prev,
+                                        name: prev.name || repo.name,
+                                        version: repo.default_branch,
+                                        location: "", // cleared — will be built from repo + file path
+                                      }));
+                                    }
                                   }}
                                   className={`w-full text-left px-3 py-2.5 hover:bg-muted transition-colors ${
                                     isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""
@@ -1334,8 +1395,8 @@ function CodePageInner() {
                           )}
                         </div>
 
-                        {/* Selected repo + scan preview */}
-                        {newComponent.location && newComponent.location.includes("github.com") && (
+                        {/* Repository type: selected repo + scan preview */}
+                        {newComponent.component_type === "Repository" && newComponent.location && newComponent.location.includes("github.com") && (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted rounded px-3 py-1.5">
                               <GitBranch className="w-3 h-3" />
@@ -1370,6 +1431,50 @@ function CodePageInner() {
                             )}
                           </div>
                         )}
+
+                        {/* File/Class/Function type: show file path input after repo selection */}
+                        {newComponent.component_type !== "Repository" && githubSelectedRepo && (
+                          <div className="space-y-2 pt-1">
+                            {/* Selected repo badge */}
+                            <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <FolderGit2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                                <span className="text-xs font-medium text-green-800 truncate">{githubSelectedRepo.full_name}</span>
+                                {githubSelectedRepo.language && (
+                                  <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded shrink-0">{githubSelectedRepo.language}</span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => { setGithubSelectedRepo(null); setGithubFilePath(""); }}
+                                className="text-[10px] text-gray-400 hover:text-gray-600 underline ml-2 shrink-0"
+                              >
+                                Change
+                              </button>
+                            </div>
+                            {/* File path input */}
+                            <div>
+                              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                                File path in repository <span className="text-red-500">*</span>
+                              </label>
+                              <div className="relative">
+                                <File className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
+                                <input
+                                  type="text"
+                                  value={githubFilePath}
+                                  onChange={(e) => setGithubFilePath(e.target.value)}
+                                  placeholder="e.g., src/auth/utils.py"
+                                  className="w-full pl-8 pr-3 py-2 text-sm border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                />
+                              </div>
+                              {githubFilePath.trim() && (
+                                <p className="text-[11px] text-muted-foreground mt-1 font-mono truncate">
+                                  → {githubSelectedRepo.html_url}/blob/{githubSelectedRepo.default_branch}/{githubFilePath.trim().replace(/^\//, "")}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -1381,7 +1486,13 @@ function CodePageInner() {
                       <div className="relative flex-1">
                         <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
                         <Input id="location" name="location" value={newComponent.location}
-                          onChange={handleInputChange} placeholder="https://github.com/owner/repo (public) or any raw file URL" className="pl-10" required />
+                          onChange={handleInputChange}
+                          placeholder={
+                            newComponent.component_type === "Repository"
+                              ? "https://github.com/owner/repo"
+                              : "https://github.com/owner/repo/blob/main/src/file.py"
+                          }
+                          className="pl-10" required />
                       </div>
                       {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
                         <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"
