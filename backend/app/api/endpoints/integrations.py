@@ -1423,11 +1423,10 @@ async def list_github_repos(
                     "https://api.github.com/user/repos",
                     headers=headers,
                     params={
-                        "type": "all",
+                        "visibility": "all",
                         "sort": "updated",
                         "per_page": 100,
                         "page": page,
-                        "visibility": "all",
                     },
                 )
                 if resp.status_code != 200:
