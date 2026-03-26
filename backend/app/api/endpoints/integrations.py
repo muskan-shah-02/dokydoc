@@ -1463,6 +1463,80 @@ async def list_github_repos(
     return {"repos": repos, "total": len(repos), "github_login": config.workspace_name}
 
 
+@router.get("/github/tree")
+async def get_github_file_tree(
+    repo_url: str,
+    branch: Optional[str] = None,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Fetch the full recursive file tree for a connected GitHub repository.
+    Used to power the file browser in the Add Component dialog.
+    Returns a flat list of file paths (blobs only, no directories).
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="GitHub integration not connected")
+
+    # Extract owner/repo from URL like https://github.com/owner/repo
+    import re as _re
+    match = _re.match(r"https://github\.com/([^/]+)/([^/\s]+?)(?:\.git)?/?$", repo_url.strip())
+    if not match:
+        raise HTTPException(status_code=422, detail=f"Invalid GitHub repo URL: {repo_url}")
+    owner, repo = match.group(1), match.group(2)
+
+    headers = {
+        "Authorization": f"Bearer {config.access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Resolve default branch if not supplied
+            if not branch:
+                repo_resp = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}", headers=headers
+                )
+                if repo_resp.status_code == 200:
+                    branch = repo_resp.json().get("default_branch", "main")
+                else:
+                    branch = "main"
+
+            # Fetch full recursive tree
+            tree_resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
+                headers=headers,
+                params={"recursive": "1"},
+            )
+            if tree_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"GitHub API error: {tree_resp.status_code} {tree_resp.text[:200]}",
+                )
+            data = tree_resp.json()
+            files = [
+                item["path"]
+                for item in data.get("tree", [])
+                if item["type"] == "blob"
+            ]
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to fetch GitHub file tree")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file tree: {exc}")
+
+    return {
+        "files": files,
+        "total": len(files),
+        "branch": branch,
+        "truncated": data.get("truncated", False),
+    }
+
+
 async def _slack_fetch_channel_history(
     token: str, channel_id: str, channel_name: Optional[str] = None, limit: int = 100
 ) -> tuple[str, str]:

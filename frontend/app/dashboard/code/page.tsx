@@ -448,6 +448,11 @@ function CodePageInner() {
   const [githubReposError, setGithubReposError] = useState<string | null>(null);
   const [githubSelectedRepo, setGithubSelectedRepo] = useState<typeof githubRepos[0] | null>(null);
   const [githubFilePath, setGithubFilePath] = useState("");
+  const [githubFileTree, setGithubFileTree] = useState<string[]>([]);
+  const [githubFileTreeLoading, setGithubFileTreeLoading] = useState(false);
+  const [githubFileTreeSearch, setGithubFileTreeSearch] = useState("");
+  const [githubTreeMode, setGithubTreeMode] = useState<"search" | "tree">("search");
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [addMode, setAddMode] = useState<"url" | "github">("url");
 
   // --- State: UI ---
@@ -577,6 +582,29 @@ function CodePageInner() {
       window.history.replaceState({}, "", "/dashboard/code");
     }
   }, [searchParams, fetchGithubRepos]);
+
+  const fetchGithubFileTree = useCallback(async (repoUrl: string, branch: string) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setGithubFileTreeLoading(true);
+    setGithubFileTree([]);
+    setGithubFileTreeSearch("");
+    setExpandedFolders(new Set());
+    try {
+      const params = new URLSearchParams({ repo_url: repoUrl, branch });
+      const res = await fetch(`${API_BASE_URL}/integrations/github/tree?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGithubFileTree(data.files || []);
+      }
+    } catch {
+      // silently fail — user can still type path manually
+    } finally {
+      setGithubFileTreeLoading(false);
+    }
+  }, []);
 
   const fetchRepoComponents = useCallback(async (repoId: number, isPolling = false) => {
     const token = localStorage.getItem("accessToken");
@@ -1199,6 +1227,9 @@ function CodePageInner() {
                 setGithubConnected(false);
                 setGithubSelectedRepo(null);
                 setGithubFilePath("");
+                setGithubFileTree([]);
+                setGithubFileTreeSearch("");
+                setExpandedFolders(new Set());
                 fetchGithubRepos();
               }
             }}
@@ -1348,15 +1379,17 @@ function CodePageInner() {
                                       setScanPreview(null);
                                       setGithubSelectedRepo(null);
                                     } else {
-                                      // File/Class/Function: select repo as source, then user enters file path
+                                      // File/Class/Function: select repo as source, load file tree
                                       setGithubSelectedRepo(repo);
                                       setGithubFilePath("");
+                                      setGithubTreeMode("search");
                                       setNewComponent((prev) => ({
                                         ...prev,
                                         name: prev.name || repo.name,
                                         version: repo.default_branch,
-                                        location: "", // cleared — will be built from repo + file path
+                                        location: "",
                                       }));
+                                      fetchGithubFileTree(repo.html_url, repo.default_branch);
                                     }
                                   }}
                                   className={`w-full text-left px-3 py-2.5 hover:bg-muted transition-colors ${
@@ -1432,7 +1465,7 @@ function CodePageInner() {
                           </div>
                         )}
 
-                        {/* File/Class/Function type: show file path input after repo selection */}
+                        {/* File/Class/Function: full file browser after repo selection */}
                         {newComponent.component_type !== "Repository" && githubSelectedRepo && (
                           <div className="space-y-2 pt-1">
                             {/* Selected repo badge */}
@@ -1443,33 +1476,213 @@ function CodePageInner() {
                                 {githubSelectedRepo.language && (
                                   <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded shrink-0">{githubSelectedRepo.language}</span>
                                 )}
+                                <span className="text-[10px] text-green-600">/{githubSelectedRepo.default_branch}</span>
                               </div>
                               <button
                                 type="button"
-                                onClick={() => { setGithubSelectedRepo(null); setGithubFilePath(""); }}
+                                onClick={() => {
+                                  setGithubSelectedRepo(null);
+                                  setGithubFilePath("");
+                                  setGithubFileTree([]);
+                                  setGithubFileTreeSearch("");
+                                }}
                                 className="text-[10px] text-gray-400 hover:text-gray-600 underline ml-2 shrink-0"
                               >
-                                Change
+                                Change repo
                               </button>
                             </div>
-                            {/* File path input */}
-                            <div>
-                              <label className="text-xs font-medium text-gray-600 mb-1 block">
-                                File path in repository <span className="text-red-500">*</span>
-                              </label>
+
+                            {/* File browser */}
+                            {githubFileTreeLoading ? (
+                              <div className="flex items-center gap-2 text-xs text-gray-500 py-3 justify-center">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                Loading file tree…
+                              </div>
+                            ) : (
+                              <div className="rounded-md border border-input overflow-hidden">
+                                {/* Mode toggle + search */}
+                                <div className="flex items-center border-b bg-gray-50">
+                                  <div className="relative flex-1">
+                                    <Search className="absolute left-2.5 top-2.5 w-3 h-3 text-muted-foreground" />
+                                    <input
+                                      type="text"
+                                      value={githubFileTreeSearch}
+                                      onChange={(e) => {
+                                        setGithubFileTreeSearch(e.target.value);
+                                        setGithubTreeMode("search");
+                                      }}
+                                      placeholder="Search files…"
+                                      className="w-full pl-7 pr-2 py-2 text-xs bg-transparent focus:outline-none"
+                                    />
+                                  </div>
+                                  <div className="flex border-l text-[10px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => setGithubTreeMode("search")}
+                                      className={`px-2 py-2 ${githubTreeMode === "search" ? "bg-white font-medium text-blue-600" : "text-gray-400 hover:text-gray-600"}`}
+                                    >
+                                      List
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setGithubTreeMode("tree")}
+                                      className={`px-2 py-2 border-l ${githubTreeMode === "tree" ? "bg-white font-medium text-blue-600" : "text-gray-400 hover:text-gray-600"}`}
+                                    >
+                                      Tree
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* File list */}
+                                <div className="max-h-48 overflow-y-auto">
+                                  {githubTreeMode === "search" ? (
+                                    // Flat search/filter list
+                                    (() => {
+                                      const q = githubFileTreeSearch.toLowerCase();
+                                      const filtered = githubFileTree
+                                        .filter((p) => !q || p.toLowerCase().includes(q))
+                                        .slice(0, 60);
+                                      return filtered.length === 0 ? (
+                                        <p className="text-xs text-muted-foreground text-center py-4">
+                                          {q ? `No files matching "${githubFileTreeSearch}"` : "No files found"}
+                                        </p>
+                                      ) : (
+                                        <>
+                                          {filtered.map((filePath) => {
+                                            const isSelected = githubFilePath === filePath;
+                                            const parts = filePath.split("/");
+                                            const fileName = parts[parts.length - 1];
+                                            const dir = parts.slice(0, -1).join("/");
+                                            return (
+                                              <button
+                                                key={filePath}
+                                                type="button"
+                                                onClick={() => setGithubFilePath(filePath)}
+                                                className={`w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-muted transition-colors text-xs ${isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""}`}
+                                              >
+                                                <File className={`w-3 h-3 shrink-0 ${isSelected ? "text-blue-600" : "text-gray-400"}`} />
+                                                <span className={`font-medium truncate ${isSelected ? "text-blue-700" : ""}`}>{fileName}</span>
+                                                {dir && <span className="text-[10px] text-muted-foreground truncate">{dir}/</span>}
+                                              </button>
+                                            );
+                                          })}
+                                          {githubFileTree.filter((p) => !q || p.toLowerCase().includes(q)).length > 60 && (
+                                            <p className="text-[10px] text-center text-muted-foreground py-1.5 border-t">
+                                              Showing 60 of {githubFileTree.filter((p) => !q || p.toLowerCase().includes(q)).length} — search to narrow down
+                                            </p>
+                                          )}
+                                        </>
+                                      );
+                                    })()
+                                  ) : (
+                                    // Tree view — folder hierarchy
+                                    (() => {
+                                      // Build tree structure
+                                      const allFolders = new Set<string>();
+                                      githubFileTree.forEach((p) => {
+                                        const parts = p.split("/");
+                                        for (let i = 1; i < parts.length; i++) {
+                                          allFolders.add(parts.slice(0, i).join("/"));
+                                        }
+                                      });
+
+                                      const rootItems: { path: string; isDir: boolean; depth: number }[] = [];
+                                      const seen = new Set<string>();
+
+                                      // Add root-level folders and files
+                                      const addChildren = (prefix: string, depth: number) => {
+                                        const children = new Set<string>();
+                                        githubFileTree.forEach((p) => {
+                                          if (prefix ? p.startsWith(prefix + "/") : true) {
+                                            const rel = prefix ? p.slice(prefix.length + 1) : p;
+                                            const firstPart = rel.split("/")[0];
+                                            const fullPath = prefix ? `${prefix}/${firstPart}` : firstPart;
+                                            if (!seen.has(fullPath)) {
+                                              children.add(fullPath);
+                                              seen.add(fullPath);
+                                            }
+                                          }
+                                        });
+                                        [...children].sort().forEach((childPath) => {
+                                          const isDir = allFolders.has(childPath);
+                                          rootItems.push({ path: childPath, isDir, depth });
+                                          if (isDir && expandedFolders.has(childPath)) {
+                                            addChildren(childPath, depth + 1);
+                                          }
+                                        });
+                                      };
+                                      addChildren("", 0);
+
+                                      return rootItems.length === 0 ? (
+                                        <p className="text-xs text-muted-foreground text-center py-4">No files</p>
+                                      ) : (
+                                        rootItems.map(({ path, isDir, depth }) => {
+                                          const name = path.split("/").pop()!;
+                                          const isSelected = !isDir && githubFilePath === path;
+                                          const isExpanded = expandedFolders.has(path);
+                                          return (
+                                            <button
+                                              key={path}
+                                              type="button"
+                                              onClick={() => {
+                                                if (isDir) {
+                                                  setExpandedFolders((prev) => {
+                                                    const next = new Set(prev);
+                                                    next.has(path) ? next.delete(path) : next.add(path);
+                                                    return next;
+                                                  });
+                                                } else {
+                                                  setGithubFilePath(path);
+                                                }
+                                              }}
+                                              className={`w-full text-left flex items-center gap-1.5 py-1 pr-2 text-xs hover:bg-muted transition-colors ${isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""}`}
+                                              style={{ paddingLeft: `${8 + depth * 14}px` }}
+                                            >
+                                              {isDir ? (
+                                                <>
+                                                  <ChevronRight className={`w-3 h-3 text-gray-400 shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+                                                  <Folder className="w-3 h-3 text-yellow-500 shrink-0" />
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <span className="w-3 shrink-0" />
+                                                  <File className={`w-3 h-3 shrink-0 ${isSelected ? "text-blue-600" : "text-gray-400"}`} />
+                                                </>
+                                              )}
+                                              <span className={`truncate ${isSelected ? "text-blue-700 font-medium" : ""}`}>{name}</span>
+                                            </button>
+                                          );
+                                        })
+                                      );
+                                    })()
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Selected file preview + manual override */}
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between">
+                                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">
+                                  {githubFilePath ? "Selected file" : "Or type path manually"}
+                                </label>
+                                {githubFilePath && (
+                                  <button type="button" onClick={() => setGithubFilePath("")} className="text-[10px] text-gray-400 hover:text-red-500">Clear</button>
+                                )}
+                              </div>
                               <div className="relative">
                                 <File className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
                                 <input
                                   type="text"
                                   value={githubFilePath}
                                   onChange={(e) => setGithubFilePath(e.target.value)}
-                                  placeholder="e.g., src/auth/utils.py"
-                                  className="w-full pl-8 pr-3 py-2 text-sm border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                  placeholder="src/auth/utils.py"
+                                  className={`w-full pl-8 pr-3 py-2 text-xs border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono ${githubFilePath ? "border-blue-300 bg-blue-50" : "border-input"}`}
                                 />
                               </div>
                               {githubFilePath.trim() && (
-                                <p className="text-[11px] text-muted-foreground mt-1 font-mono truncate">
-                                  → {githubSelectedRepo.html_url}/blob/{githubSelectedRepo.default_branch}/{githubFilePath.trim().replace(/^\//, "")}
+                                <p className="text-[10px] text-muted-foreground font-mono truncate pl-1">
+                                  {githubSelectedRepo.html_url}/blob/{githubSelectedRepo.default_branch}/{githubFilePath.trim().replace(/^\//, "")}
                                 </p>
                               )}
                             </div>
