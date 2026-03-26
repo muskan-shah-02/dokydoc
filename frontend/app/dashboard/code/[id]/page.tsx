@@ -50,7 +50,7 @@ import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
 import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 
 interface CodeComponentDetail {
   id: number;
@@ -186,7 +186,7 @@ export default function CodeComponentDetailPage() {
     }
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/code-components/${id}`,
+        `${API_BASE_URL}/code-components/${id}`,
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },
@@ -215,7 +215,7 @@ export default function CodeComponentDetailPage() {
       }
       try {
         const res = await fetch(
-          `http://localhost:8000/api/v1/code-components/${id}`,
+          `${API_BASE_URL}/code-components/${id}`,
           {
             headers: { Authorization: `Bearer ${token}` },
           }

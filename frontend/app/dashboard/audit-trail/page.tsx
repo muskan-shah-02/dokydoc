@@ -41,6 +41,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { SecurityInsightsPanel } from "@/components/audit/SecurityInsightsPanel";
+import { API_BASE_URL } from "@/lib/api";
 
 interface AuditEvent {
   id: number;
@@ -108,9 +109,9 @@ export default function AuditTrailPage() {
       }
 
       const headers = { Authorization: `Bearer ${token}` };
-      const logsPromise = fetch(`http://localhost:8000/api/v1/audit/logs?${params}`, { headers });
+      const logsPromise = fetch(`${API_BASE_URL}/audit/logs?${params}`, { headers });
       const statsPromise = !isAppend
-        ? fetch(`http://localhost:8000/api/v1/audit/stats?days=${days}`, { headers })
+        ? fetch(`${API_BASE_URL}/audit/stats?days=${days}`, { headers })
         : Promise.resolve(null);
 
       const [logsRes, statsRes] = await Promise.all([logsPromise, statsPromise]);
@@ -155,10 +156,10 @@ export default function AuditTrailPage() {
   const fetchLegacyAudit = async (token: string) => {
     try {
       const [docsRes, codeRes] = await Promise.all([
-        fetch("http://localhost:8000/api/v1/documents/", {
+        fetch(`${API_BASE_URL}/documents/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        fetch("http://localhost:8000/api/v1/code-components/", {
+        fetch(`${API_BASE_URL}/code-components/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -226,7 +227,7 @@ export default function AuditTrailPage() {
 
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/audit/export?days=${days}`,
+        `${API_BASE_URL}/audit/export?days=${days}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {

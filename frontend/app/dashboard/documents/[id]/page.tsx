@@ -58,7 +58,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DocumentAnalysisView } from "@/components/analysis/DocumentAnalysisView";
 import { useBillingNotification } from "@/components/BillingToast";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 import SmartAnalysisView from "@/components/analysis/SmartAnalysisView";
 import DynamicAnalysisView from "@/components/analysis/DynamicAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
@@ -892,7 +892,7 @@ export default function DocumentDetailPage() {
     const token = localStorage.getItem("accessToken");
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/documents/${documentId}/analysis`,
+        `${API_BASE_URL}/documents/${documentId}/analysis`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {
@@ -921,7 +921,7 @@ export default function DocumentDetailPage() {
     formData.append("parent_document_id", documentId);
     const token = localStorage.getItem("accessToken");
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/documents/upload`, {
+      const res = await fetch(`${API_BASE_URL}/documents/upload`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -943,7 +943,7 @@ export default function DocumentDetailPage() {
         const token = localStorage.getItem("accessToken");
         try {
           const res = await fetch(
-            `http://localhost:8000/api/v1/documents/${documentId}/status`,
+            `${API_BASE_URL}/documents/${documentId}/status`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
           if (res.ok) {
@@ -1024,7 +1024,7 @@ export default function DocumentDetailPage() {
       prev ? { ...prev, status: "processing", progress: 0 } : null
     );
     await fetch(
-      `http://localhost:8000/api/v1/documents/${documentId}/analyze`,
+      `${API_BASE_URL}/documents/${documentId}/analyze`,
       { method: "POST", headers: { Authorization: `Bearer ${token}` } }
     );
   };
@@ -1033,7 +1033,7 @@ export default function DocumentDetailPage() {
     if (!documentId) return;
     const token = localStorage.getItem("accessToken");
     try {
-      await fetch(`http://localhost:8000/api/v1/documents/${documentId}/stop`, {
+      await fetch(`${API_BASE_URL}/documents/${documentId}/stop`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });

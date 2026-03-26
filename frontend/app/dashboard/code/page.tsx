@@ -72,6 +72,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { API_BASE_URL } from "@/lib/api";
 
 // --- Types ---
 
@@ -493,10 +494,10 @@ export default function CodePage() {
     try {
       // Fetch repositories and standalone components in parallel
       const [reposRes, standaloneRes] = await Promise.all([
-        fetch("http://localhost:8000/api/v1/repositories/", {
+        fetch(`${API_BASE_URL}/repositories/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        fetch("http://localhost:8000/api/v1/code-components/?standalone=true", {
+        fetch(`${API_BASE_URL}/code-components/?standalone=true`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -529,7 +530,7 @@ export default function CodePage() {
     if (!token) return;
     setLoadingGithubRepos(true);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/integrations/github/repos", {
+      const res = await fetch(`${API_BASE_URL}/integrations/github/repos`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -557,7 +558,7 @@ export default function CodePage() {
     }
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/repositories/${repoId}/components?limit=500`,
+        `${API_BASE_URL}/repositories/${repoId}/components?limit=500`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {
@@ -606,7 +607,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/stats`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}/stats`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -677,7 +678,7 @@ export default function CodePage() {
         checkedForPushRef.current.add(comp.id);
         const basename = comp.name.trim().split("/").pop() || comp.name;
         fetch(
-          `http://localhost:8000/api/v1/code-components/check-name?name=${encodeURIComponent(basename)}`,
+          `${API_BASE_URL}/code-components/check-name?name=${encodeURIComponent(basename)}`,
           { headers: { Authorization: `Bearer ${token}` } }
         )
           .then((r) => r.json())
@@ -780,7 +781,7 @@ export default function CodePage() {
     setIsScanning(true);
     setScanPreview(null);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/repositories/scan-preview", {
+      const res = await fetch(`${API_BASE_URL}/repositories/scan-preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ url: newComponent.location }),
@@ -799,7 +800,7 @@ export default function CodePage() {
   const registerComponent = async () => {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
-    const res = await fetch("http://localhost:8000/api/v1/code-components/", {
+    const res = await fetch(`${API_BASE_URL}/code-components/`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -852,7 +853,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      await fetch(`http://localhost:8000/api/v1/code-components/${matchId}`, {
+      await fetch(`${API_BASE_URL}/code-components/${matchId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ location: compLocation }),
@@ -881,7 +882,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -895,7 +896,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/code-components/${id}`, {
+      const res = await fetch(`${API_BASE_URL}/code-components/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -915,7 +916,7 @@ export default function CodePage() {
     if (!token) return;
     setRetryingIds((prev) => new Set(prev).add(compId));
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/code-components/${compId}/retry`, {
+      const res = await fetch(`${API_BASE_URL}/code-components/${compId}/retry`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -960,7 +961,7 @@ export default function CodePage() {
     if (!token) return;
     setRetryingAllRepo(repoId);
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/retry-failed`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}/retry-failed`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1011,7 +1012,7 @@ export default function CodePage() {
 
       // Reset selected components to pending first
       for (const comp of selectedComps) {
-        await fetch(`http://localhost:8000/api/v1/code-components/${comp.id}/retry`, {
+        await fetch(`${API_BASE_URL}/code-components/${comp.id}/retry`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` },
         });

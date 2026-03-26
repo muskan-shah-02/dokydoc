@@ -9,6 +9,7 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { API_BASE_URL } from '@/lib/api';
 
 interface ProcessingState {
   status: 'idle' | 'uploading' | 'processing' | 'completed' | 'error';
@@ -53,7 +54,7 @@ export function useDocumentProcessing() {
       if (!isPolling.current) return;
 
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/documents/${docId}/status`, {
+        const res = await fetch(`${API_BASE_URL}/documents/${docId}/status`, {
           headers: { Authorization: `Bearer ${token}` }
         });
 

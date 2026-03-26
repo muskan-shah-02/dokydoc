@@ -38,7 +38,7 @@ import {
   IndianRupee,
   Sparkles,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 import Link from "next/link";
 import { useBillingNotification } from "@/components/BillingToast";
 
@@ -128,7 +128,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
       setUploadProgress(5);
       const docData = await new Promise<any>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open("POST", "http://localhost:8000/api/v1/documents/upload");
+        xhr.open("POST", `${API_BASE_URL}/documents/upload`);
         xhr.setRequestHeader("Authorization", `Bearer ${token}`);
 
         xhr.upload.onprogress = (event) => {
@@ -164,7 +164,7 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
       // --- Step 2: Trigger Analysis ---
       setUploadStep("triggering");
       const analyzeRes = await fetch(
-        `http://localhost:8000/api/v1/documents/${docData.id}/analyze`,
+        `${API_BASE_URL}/documents/${docData.id}/analyze`,
         {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` },
@@ -308,7 +308,7 @@ const ManageLinksDialog = ({
     setError(null);
     try {
       const componentsRes = await fetch(
-        "http://localhost:8000/api/v1/code-components/",
+        `${API_BASE_URL}/code-components/`,
         {
           headers: { Authorization: `Bearer ${token}` },
         }
@@ -319,7 +319,7 @@ const ManageLinksDialog = ({
       setAllCodeComponents(allComps);
 
       const linkedRes = await fetch(
-        `http://localhost:8000/api/v1/links/document/${document.id}`,
+        `${API_BASE_URL}/links/document/${document.id}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         }
@@ -340,7 +340,7 @@ const ManageLinksDialog = ({
 
   const handleLinkToggle = async (component: CodeComponent) => {
     const isCurrentlyLinked = linkedComponentIds.has(component.id);
-    const endpoint = "http://localhost:8000/api/v1/links/";
+    const endpoint = `${API_BASE_URL}/links/`;
     const method = isCurrentlyLinked ? "DELETE" : "POST";
     try {
       const response = await fetch(endpoint, {
@@ -467,7 +467,7 @@ const DocumentStatusCell = ({
         const token = localStorage.getItem("accessToken");
         try {
           const response = await fetch(
-            `http://localhost:8000/api/v1/documents/${doc.id}/status`,
+            `${API_BASE_URL}/documents/${doc.id}/status`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
 
@@ -659,7 +659,7 @@ export default function DocumentsPage() {
       return;
     }
     try {
-      const response = await fetch("http://localhost:8000/api/v1/documents/", {
+      const response = await fetch(`${API_BASE_URL}/documents/`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -674,7 +674,7 @@ export default function DocumentsPage() {
         data.map(async (doc) => {
           try {
             const linksResponse = await fetch(
-              `http://localhost:8000/api/v1/links/document/${doc.id}`,
+              `${API_BASE_URL}/links/document/${doc.id}`,
               { headers: { Authorization: `Bearer ${token}` } }
             );
             if (!linksResponse.ok) return { ...doc, link_count: 0 };
@@ -718,7 +718,7 @@ export default function DocumentsPage() {
   // Helper for download
   const handleDownload = (docId: number, filename: string) => {
     const token = localStorage.getItem("accessToken");
-    fetch(`http://localhost:8000/api/v1/documents/${docId}/download`, {
+    fetch(`${API_BASE_URL}/documents/${docId}/download`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((response) => response.blob())
@@ -749,7 +749,7 @@ export default function DocumentsPage() {
 
     try {
       const response = await fetch(
-        `http://localhost:8000/api/v1/documents/${id}`,
+        `${API_BASE_URL}/documents/${id}`,
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },

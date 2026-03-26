@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { API_BASE_URL } from "@/lib/api";
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -119,10 +120,10 @@ export default function ValidationPanelPage() {
 
     try {
       const [docResponse, mismatchResponse] = await Promise.all([
-        fetch("http://localhost:8000/api/v1/documents/", {
+        fetch(`${API_BASE_URL}/documents/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        fetch("http://localhost:8000/api/v1/validation/mismatches", {
+        fetch(`${API_BASE_URL}/validation/mismatches`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -223,7 +224,7 @@ export default function ValidationPanelPage() {
 
     try {
       const response = await fetch(
-        "http://localhost:8000/api/v1/validation/run-scan",
+        `${API_BASE_URL}/validation/run-scan`,
         {
           method: "POST",
           headers: {
@@ -251,7 +252,7 @@ export default function ValidationPanelPage() {
           await new Promise((r) => setTimeout(r, 3000));
           try {
             const mismatchRes = await fetch(
-              "http://localhost:8000/api/v1/validation/mismatches",
+              `${API_BASE_URL}/validation/mismatches`,
               { headers: { Authorization: `Bearer ${token}` } }
             );
             if (mismatchRes.ok) {
@@ -339,7 +340,7 @@ export default function ValidationPanelPage() {
   // Fetch repositories for JIRA validation
   useEffect(() => {
     if (!token) return;
-    fetch("http://localhost:8000/api/v1/repositories/", {
+    fetch(`${API_BASE_URL}/repositories/`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -360,7 +361,7 @@ export default function ValidationPanelPage() {
       if (jiraEpicKey) params.set("epic_key", jiraEpicKey);
       if (jiraSprintName) params.set("sprint_name", jiraSprintName);
       params.set("limit", "50");
-      const resp = await fetch(`http://localhost:8000/api/v1/integrations/jira/items?${params}`, {
+      const resp = await fetch(`${API_BASE_URL}/integrations/jira/items?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (resp.ok) {
@@ -387,7 +388,7 @@ export default function ValidationPanelPage() {
       if (jiraEpicKey) body.epic_key = jiraEpicKey;
       if (jiraSprintName) body.sprint_name = jiraSprintName;
 
-      const resp = await fetch("http://localhost:8000/api/v1/validation/run-jira-scan", {
+      const resp = await fetch(`${API_BASE_URL}/validation/run-jira-scan`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
@@ -401,7 +402,7 @@ export default function ValidationPanelPage() {
 
       // Fetch jira-category mismatches
       const mResp = await fetch(
-        "http://localhost:8000/api/v1/validation/mismatches?limit=200",
+        `${API_BASE_URL}/validation/mismatches?limit=200`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (mResp.ok) {

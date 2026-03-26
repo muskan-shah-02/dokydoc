@@ -9,7 +9,8 @@
  * - Type-safe requests
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+export const API_ROOT = API_BASE_URL.replace(/\/v1$/, '');
 
 export interface ApiError {
   detail: string;
@@ -230,7 +231,7 @@ export class ApiClient {
     tenant: Tenant;
   }> {
     // Login endpoint uses form data, not JSON
-    const response = await fetch('http://localhost:8000/api/login/access-token', {
+    const response = await fetch(`${API_ROOT}/login/access-token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
