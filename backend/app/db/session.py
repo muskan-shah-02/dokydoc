@@ -162,23 +162,12 @@ def init_database():
     try:
         if check_database_health():
             logger.info("Database connection established successfully")
-            
-            # Create all tables if they don't exist
-            from app.db.base_class import Base
-            from app.models import (
-                User, Document, DocumentCodeLink, CodeComponent,
-                Mismatch, AnalysisResult, DocumentSegment
-            )
-            
-            logger.info("Creating database tables if they don't exist...")
-            try:
-                Base.metadata.create_all(bind=engine)
-            except Exception as create_err:
-                # ENUM types created by Alembic migrations may already exist.
-                # Log and continue — the schema is managed by Alembic.
-                logger.warning(f"create_all encountered an error (likely pre-existing ENUM types from Alembic): {create_err}")
-            logger.info("Database tables created/verified successfully")
-            
+
+            # Schema is managed by Alembic migrations — skip create_all()
+            # to avoid conflicts with pre-existing ENUM types and blocking
+            # on startup. Run `alembic upgrade head` to apply migrations.
+            logger.info("Database schema managed by Alembic — skipping create_all()")
+
             # Log database information
             db_info = get_database_info()
             logger.info(f"Database info: {db_info}")
