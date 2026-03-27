@@ -481,6 +481,13 @@ async def generate_doc_multi(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Surface generation failures as HTTP 500 so the frontend catch block fires
+    if result.get("status") == "failed":
+        error_msg = result.get("content", "Generation failed")
+        # Strip markdown italics wrapper if present
+        error_msg = error_msg.strip("*").replace("Generation failed: ", "", 1)
+        raise HTTPException(status_code=500, detail=f"Generation failed: {error_msg}")
+
     # If only one source, use its type/id for backward compat; otherwise "multi"/0
     if len(sources) == 1:
         src_type = sources[0]["type"]

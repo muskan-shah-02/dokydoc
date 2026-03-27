@@ -525,11 +525,18 @@ export default function AutoDocsPage() {
         doc_type: selectedDocType,
       };
       const data = await api.post("/auto-docs/generate-multi", payload) as GeneratedDocFull;
-      setViewingDoc(data);
-      setDiagramView("rendered");
-      fetchHistory();
-    } catch {
-      alert("Generation failed. Please check that your selected sources have been analyzed.");
+      if (data.status === "failed") {
+        // Backend caught a generation error but returned 201 — show the embedded message
+        const failMsg = data.content?.replace(/^\*Generation failed: /, "").replace(/\*$/, "") || "Generation failed. Please check your sources are analyzed.";
+        alert(`Generation failed: ${failMsg}`);
+      } else {
+        setViewingDoc(data);
+        setDiagramView("rendered");
+        fetchHistory();
+      }
+    } catch (err: any) {
+      const msg = err?.message || err?.detail || "Generation failed. Please check that your selected sources have been analyzed.";
+      alert(`Generation failed: ${msg}`);
     } finally {
       setGenerating(false);
     }
