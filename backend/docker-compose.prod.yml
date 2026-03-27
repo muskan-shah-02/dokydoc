@@ -141,7 +141,7 @@ services:
       --loglevel=info
       --concurrency=4
       --max-tasks-per-child=100
-      --queues=default,analysis,high_priority
+      --queues=celery,default,analysis,high_priority
     env_file:
       - .env
     environment:
