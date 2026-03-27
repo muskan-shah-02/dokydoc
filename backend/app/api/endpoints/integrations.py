@@ -1304,7 +1304,21 @@ async def github_oauth_callback(
     Exchange the authorization code for an access token, fetch user info, and save.
     Redirect browser back to the frontend integrations page.
     """
-    tenant_id, user_id = _verify_oauth_state(state)
+    # Guard: credentials must be configured
+    if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
+        logger.error("GitHub OAuth callback hit but CLIENT_ID/SECRET not configured")
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": "GitHub OAuth is not configured on this server", "provider": "github"})
+        )
+
+    try:
+        tenant_id, user_id = _verify_oauth_state(state)
+    except Exception:
+        return RedirectResponse(
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": "Invalid OAuth state — please try again", "provider": "github"})
+        )
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1319,13 +1333,19 @@ async def github_oauth_callback(
                     "redirect_uri": f"{settings.BACKEND_URL}/api/{settings.API_VERSION}/integrations/github/oauth/callback",
                 },
             )
+            if token_resp.status_code != 200:
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": f"GitHub token exchange failed ({token_resp.status_code})", "provider": "github"})
+                )
             token_data = token_resp.json()
 
             access_token = token_data.get("access_token")
             if not access_token:
                 error = token_data.get("error_description", "Failed to obtain access token")
                 return RedirectResponse(
-                    f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={error}&provider=github"
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": error, "provider": "github"})
                 )
 
             # 2. Fetch GitHub user info
@@ -1333,9 +1353,20 @@ async def github_oauth_callback(
                 "https://api.github.com/user",
                 headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"},
             )
+            if user_resp.status_code != 200:
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": f"Failed to fetch GitHub user info ({user_resp.status_code})", "provider": "github"})
+                )
             user_data = user_resp.json()
             github_login = user_data.get("login", "")
             github_id = str(user_data.get("id", ""))
+
+            if not github_login or not github_id or github_id == "0":
+                return RedirectResponse(
+                    f"{settings.FRONTEND_URL}/dashboard/integrations?"
+                    + urlencode({"oauth_error": "Invalid GitHub user data received", "provider": "github"})
+                )
 
         # 3. Save to integration_configs
         crud_integration_config.upsert(
@@ -1349,13 +1380,15 @@ async def github_oauth_callback(
         )
 
         return RedirectResponse(
-            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_success=github&workspace={github_login}"
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_success": "github", "workspace": github_login})
         )
 
     except Exception as exc:
         logger.exception("GitHub OAuth callback error")
         return RedirectResponse(
-            f"{settings.FRONTEND_URL}/dashboard/integrations?oauth_error={str(exc)}&provider=github"
+            f"{settings.FRONTEND_URL}/dashboard/integrations?"
+            + urlencode({"oauth_error": str(exc), "provider": "github"})
         )
 
 
@@ -1390,11 +1423,10 @@ async def list_github_repos(
                     "https://api.github.com/user/repos",
                     headers=headers,
                     params={
-                        "type": "all",
+                        "visibility": "all",
                         "sort": "updated",
                         "per_page": 100,
                         "page": page,
-                        "visibility": "all",
                     },
                 )
                 if resp.status_code != 200:
@@ -1429,6 +1461,80 @@ async def list_github_repos(
         raise HTTPException(status_code=502, detail=f"Failed to list GitHub repos: {exc}")
 
     return {"repos": repos, "total": len(repos), "github_login": config.workspace_name}
+
+
+@router.get("/github/tree")
+async def get_github_file_tree(
+    repo_url: str,
+    branch: Optional[str] = None,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Fetch the full recursive file tree for a connected GitHub repository.
+    Used to power the file browser in the Add Component dialog.
+    Returns a flat list of file paths (blobs only, no directories).
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="GitHub integration not connected")
+
+    # Extract owner/repo from URL like https://github.com/owner/repo
+    import re as _re
+    match = _re.match(r"https://github\.com/([^/]+)/([^/\s]+?)(?:\.git)?/?$", repo_url.strip())
+    if not match:
+        raise HTTPException(status_code=422, detail=f"Invalid GitHub repo URL: {repo_url}")
+    owner, repo = match.group(1), match.group(2)
+
+    headers = {
+        "Authorization": f"Bearer {config.access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Resolve default branch if not supplied
+            if not branch:
+                repo_resp = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}", headers=headers
+                )
+                if repo_resp.status_code == 200:
+                    branch = repo_resp.json().get("default_branch", "main")
+                else:
+                    branch = "main"
+
+            # Fetch full recursive tree
+            tree_resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
+                headers=headers,
+                params={"recursive": "1"},
+            )
+            if tree_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"GitHub API error: {tree_resp.status_code} {tree_resp.text[:200]}",
+                )
+            data = tree_resp.json()
+            files = [
+                item["path"]
+                for item in data.get("tree", [])
+                if item["type"] == "blob"
+            ]
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to fetch GitHub file tree")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file tree: {exc}")
+
+    return {
+        "files": files,
+        "total": len(files),
+        "branch": branch,
+        "truncated": data.get("truncated", False),
+    }
 
 
 async def _slack_fetch_channel_history(

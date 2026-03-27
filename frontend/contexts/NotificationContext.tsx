@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { API_BASE_URL } from "@/lib/api";
 
 interface Notification {
   id: number;
@@ -49,7 +50,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   const fetchUnreadCount = useCallback(async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/v1/notifications/unread", {
+      const res = await fetch(`${API_BASE_URL}/notifications/unread`, {
         headers: getHeaders(),
       });
       if (res.ok) {
@@ -64,7 +65,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   const fetchNotifications = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/notifications/?limit=50", {
+      const res = await fetch(`${API_BASE_URL}/notifications/?limit=50`, {
         headers: getHeaders(),
       });
       if (res.ok) {
@@ -85,7 +86,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   const markRead = useCallback(async (id: number) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/notifications/${id}/read`, {
+      const res = await fetch(`${API_BASE_URL}/notifications/${id}/read`, {
         method: "PUT",
         headers: getHeaders(),
       });
@@ -102,7 +103,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   const markAllRead = useCallback(async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/v1/notifications/read-all", {
+      const res = await fetch(`${API_BASE_URL}/notifications/read-all`, {
         method: "PUT",
         headers: getHeaders(),
       });

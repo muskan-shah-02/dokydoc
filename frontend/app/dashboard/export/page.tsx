@@ -26,6 +26,7 @@ import {
   Brain,
   AlertCircle,
 } from "lucide-react";
+import { API_BASE_URL } from "@/lib/api";
 
 type ExportCategory = "documents" | "code" | "ontology" | "report";
 type ExportFormat = "json" | "csv";
@@ -84,10 +85,10 @@ export default function ExportPage() {
 
       try {
         const [docsRes, reposRes] = await Promise.all([
-          fetch("http://localhost:8000/api/v1/documents/", {
+          fetch(`${API_BASE_URL}/documents/`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
-          fetch("http://localhost:8000/api/v1/repositories/", {
+          fetch(`${API_BASE_URL}/repositories/`, {
             headers: { Authorization: `Bearer ${token}` },
           }),
         ]);
@@ -132,19 +133,19 @@ export default function ExportPage() {
 
       switch (selectedCategory) {
         case "documents":
-          url = `http://localhost:8000/api/v1/exports/documents?format=${selectedFormat}`;
+          url = `${API_BASE_URL}/exports/documents?format=${selectedFormat}`;
           filename = `documents_export.${selectedFormat}`;
           break;
         case "code":
-          url = `http://localhost:8000/api/v1/exports/code?format=${selectedFormat}`;
+          url = `${API_BASE_URL}/exports/code?format=${selectedFormat}`;
           filename = `code_export.${selectedFormat}`;
           break;
         case "ontology":
-          url = `http://localhost:8000/api/v1/exports/ontology?format=${selectedFormat}`;
+          url = `${API_BASE_URL}/exports/ontology?format=${selectedFormat}`;
           filename = `ontology_export.${selectedFormat}`;
           break;
         case "report":
-          url = `http://localhost:8000/api/v1/exports/report`;
+          url = `${API_BASE_URL}/exports/report`;
           filename = `dokydoc_report.json`;
           break;
         default:

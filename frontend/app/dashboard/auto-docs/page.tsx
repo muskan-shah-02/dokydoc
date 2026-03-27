@@ -39,7 +39,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
 
@@ -575,8 +575,7 @@ export default function AutoDocsPage() {
     setShowDownloadMenu(false);
     try {
       const token = localStorage.getItem("accessToken");
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
-      const resp = await fetch(`${apiBase}/auto-docs/${doc.id}/export?format=${format}`, {
+      const resp = await fetch(`${API_BASE_URL}/auto-docs/${doc.id}/export?format=${format}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!resp.ok) throw new Error(`Export failed: ${resp.status}`);

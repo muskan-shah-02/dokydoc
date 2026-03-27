@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { SelectRoleForm } from "@/components/auth/SelectRoleForm";
+import { API_ROOT } from "@/lib/api";
 
 interface User {
   email: string;
@@ -30,7 +31,7 @@ export default function SelectRolePage() {
 
       try {
         console.log("[3] Sending fetch request to /api/users/me...");
-        const response = await fetch("http://localhost:8000/api/users/me", {
+        const response = await fetch(`${API_ROOT}/users/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         console.log(

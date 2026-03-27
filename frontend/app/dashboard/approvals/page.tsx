@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import { API_BASE_URL } from "@/lib/api";
 import {
   CheckSquare,
   Clock,
@@ -92,12 +93,12 @@ export default function ApprovalsPage() {
     setLoading(true);
     try {
       const headers = getHeaders();
-      let url = "http://localhost:8000/api/v1/approvals/";
+      let url = `${API_BASE_URL}/approvals/`;
 
       if (activeTab === "pending") {
-        url = "http://localhost:8000/api/v1/approvals/pending";
+        url = `${API_BASE_URL}/approvals/pending`;
       } else if (activeTab === "history") {
-        url = "http://localhost:8000/api/v1/approvals/history";
+        url = `${API_BASE_URL}/approvals/history`;
       }
 
       const params = new URLSearchParams();
@@ -120,7 +121,7 @@ export default function ApprovalsPage() {
   const fetchStats = useCallback(async () => {
     try {
       const headers = getHeaders();
-      const res = await fetch("http://localhost:8000/api/v1/approvals/stats", { headers });
+      const res = await fetch(`${API_BASE_URL}/approvals/stats`, { headers });
       if (res.ok) {
         setStats(await res.json());
       }
@@ -138,7 +139,7 @@ export default function ApprovalsPage() {
     setActionLoading(approvalId);
     try {
       const headers = getHeaders();
-      const res = await fetch(`http://localhost:8000/api/v1/approvals/${approvalId}/${action}`, {
+      const res = await fetch(`${API_BASE_URL}/approvals/${approvalId}/${action}`, {
         method: "POST",
         headers,
         body: JSON.stringify({ resolution_notes: resolutionNotes || null }),
@@ -160,7 +161,7 @@ export default function ApprovalsPage() {
   const handleCreateApproval = async (entityType: string, entityId: number, entityName: string, level: number, notes: string) => {
     try {
       const headers = getHeaders();
-      const res = await fetch("http://localhost:8000/api/v1/approvals/", {
+      const res = await fetch(`${API_BASE_URL}/approvals/`, {
         method: "POST",
         headers,
         body: JSON.stringify({

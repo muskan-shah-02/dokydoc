@@ -104,7 +104,7 @@ app.add_middleware(
 if settings.ENVIRONMENT == "production":
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["yourdomain.com", "*.yourdomain.com"]  # Update with actual domain
+        allowed_hosts=["dokydoc.com", "*.dokydoc.com", "localhost", "127.0.0.1"]
     )
 
 # --- Request/Response Middleware ---

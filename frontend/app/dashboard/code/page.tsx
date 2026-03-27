@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -70,8 +70,9 @@ import {
   BarChart2,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { API_BASE_URL } from "@/lib/api";
 
 // --- Types ---
 
@@ -414,7 +415,7 @@ function FileTreeRows({
   );
 }
 
-export default function CodePage() {
+function CodePageInner() {
   // --- State: Repositories (primary view) ---
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [standaloneComponents, setStandaloneComponents] = useState<CodeComponent[]>([]);
@@ -444,6 +445,14 @@ export default function CodePage() {
   const [githubLogin, setGithubLogin] = useState<string | null>(null);
   const [loadingGithubRepos, setLoadingGithubRepos] = useState(false);
   const [githubRepoSearch, setGithubRepoSearch] = useState("");
+  const [githubReposError, setGithubReposError] = useState<string | null>(null);
+  const [githubSelectedRepo, setGithubSelectedRepo] = useState<typeof githubRepos[0] | null>(null);
+  const [githubFilePath, setGithubFilePath] = useState("");
+  const [githubFileTree, setGithubFileTree] = useState<string[]>([]);
+  const [githubFileTreeLoading, setGithubFileTreeLoading] = useState(false);
+  const [githubFileTreeSearch, setGithubFileTreeSearch] = useState("");
+  const [githubTreeMode, setGithubTreeMode] = useState<"search" | "tree">("search");
+  const [githubExpandedFolders, setGithubExpandedFolders] = useState<Set<string>>(new Set());
   const [addMode, setAddMode] = useState<"url" | "github">("url");
 
   // --- State: UI ---
@@ -475,6 +484,7 @@ export default function CodePage() {
   } | null>(null);
 
   const router = useRouter();
+  const searchParams = useSearchParams();
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Scroll position preservation — prevent auto-scroll to top on polling re-renders
@@ -493,10 +503,10 @@ export default function CodePage() {
     try {
       // Fetch repositories and standalone components in parallel
       const [reposRes, standaloneRes] = await Promise.all([
-        fetch("http://localhost:8000/api/v1/repositories/", {
+        fetch(`${API_BASE_URL}/repositories/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        fetch("http://localhost:8000/api/v1/code-components/?standalone=true", {
+        fetch(`${API_BASE_URL}/code-components/?standalone=true`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -528,8 +538,9 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     setLoadingGithubRepos(true);
+    setGithubReposError(null);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/integrations/github/repos", {
+      const res = await fetch(`${API_BASE_URL}/integrations/github/repos`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -539,11 +550,59 @@ export default function CodePage() {
         setGithubConnected(true);
       } else if (res.status === 404) {
         setGithubConnected(false);
+        setGithubReposError(null);
+      } else {
+        // 401, 502, etc. — GitHub is connected but API call failed
+        let detail = `Error ${res.status}`;
+        try {
+          const err = await res.json();
+          detail = err.detail || detail;
+        } catch {}
+        setGithubConnected(false);
+        setGithubReposError(detail);
       }
-    } catch {
+    } catch (e: any) {
       setGithubConnected(false);
+      setGithubReposError(e?.message || "Network error — could not reach server");
     } finally {
       setLoadingGithubRepos(false);
+    }
+  }, []);
+
+  // Auto-open GitHub repo picker when navigated from integrations page (?add=github)
+  useEffect(() => {
+    if (searchParams.get("add") === "github") {
+      setGithubConnected(false);
+      setGithubReposError(null);
+      setGithubSelectedRepo(null);
+      setGithubFilePath("");
+      setIsDialogOpen(true);
+      setAddMode("github");
+      fetchGithubRepos();
+      window.history.replaceState({}, "", "/dashboard/code");
+    }
+  }, [searchParams, fetchGithubRepos]);
+
+  const fetchGithubFileTree = useCallback(async (repoUrl: string, branch: string) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setGithubFileTreeLoading(true);
+    setGithubFileTree([]);
+    setGithubFileTreeSearch("");
+    setGithubExpandedFolders(new Set());
+    try {
+      const params = new URLSearchParams({ repo_url: repoUrl, branch });
+      const res = await fetch(`${API_BASE_URL}/integrations/github/tree?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGithubFileTree(data.files || []);
+      }
+    } catch {
+      // silently fail — user can still type path manually
+    } finally {
+      setGithubFileTreeLoading(false);
     }
   }, []);
 
@@ -557,7 +616,7 @@ export default function CodePage() {
     }
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/repositories/${repoId}/components?limit=500`,
+        `${API_BASE_URL}/repositories/${repoId}/components?limit=500`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {
@@ -606,7 +665,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/stats`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}/stats`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -677,7 +736,7 @@ export default function CodePage() {
         checkedForPushRef.current.add(comp.id);
         const basename = comp.name.trim().split("/").pop() || comp.name;
         fetch(
-          `http://localhost:8000/api/v1/code-components/check-name?name=${encodeURIComponent(basename)}`,
+          `${API_BASE_URL}/code-components/check-name?name=${encodeURIComponent(basename)}`,
           { headers: { Authorization: `Bearer ${token}` } }
         )
           .then((r) => r.json())
@@ -770,8 +829,14 @@ export default function CodePage() {
   ) => {
     const { name, value } = e.target;
     setNewComponent((prev) => ({ ...prev, [name]: value }));
-    // Clear scan preview when URL changes
     if (name === "location") setScanPreview(null);
+    // When component type changes, reset GitHub file selection state
+    if (name === "component_type") {
+      setGithubSelectedRepo(null);
+      setGithubFilePath("");
+      setNewComponent((prev) => ({ ...prev, component_type: value, location: "", version: "" }));
+      setScanPreview(null);
+    }
   };
 
   const handleScanPreview = async () => {
@@ -780,7 +845,7 @@ export default function CodePage() {
     setIsScanning(true);
     setScanPreview(null);
     try {
-      const res = await fetch("http://localhost:8000/api/v1/repositories/scan-preview", {
+      const res = await fetch(`${API_BASE_URL}/repositories/scan-preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ url: newComponent.location }),
@@ -796,16 +861,19 @@ export default function CodePage() {
     }
   };
 
-  const registerComponent = async () => {
+  const registerComponent = async (locationOverride?: string) => {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
-    const res = await fetch("http://localhost:8000/api/v1/code-components/", {
+    const payload = locationOverride
+      ? { ...newComponent, location: locationOverride }
+      : newComponent;
+    const res = await fetch(`${API_BASE_URL}/code-components/`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(newComponent),
+      body: JSON.stringify(payload),
     });
     if (res.ok) {
       setIsDialogOpen(false);
@@ -829,6 +897,37 @@ export default function CodePage() {
       setIsSubmitting(false);
       return;
     }
+
+    const isRepo = newComponent.component_type === "Repository";
+
+    // For File/Class/Function in GitHub mode: build location from selected repo + file path
+    if (addMode === "github" && !isRepo) {
+      if (githubSelectedRepo) {
+        const trimmedPath = githubFilePath.trim().replace(/^\//, "").replace(/\/$/, "");
+        if (!trimmedPath) {
+          setSubmissionError("Enter the file path within the repository (e.g., src/auth/utils.py)");
+          setIsSubmitting(false);
+          return;
+        }
+        // Build a direct blob URL so the backend can fetch the file
+        const builtLocation = `${githubSelectedRepo.html_url}/blob/${githubSelectedRepo.default_branch}/${trimmedPath}`;
+        setNewComponent((prev) => ({ ...prev, location: builtLocation }));
+        // Use the built location directly in the request below
+        try {
+          await registerComponent(builtLocation);
+        } catch (error: any) {
+          setSubmissionError(error.message);
+        } finally {
+          setIsSubmitting(false);
+        }
+        return;
+      } else if (!newComponent.location) {
+        setSubmissionError("Select a repository from the list or paste a file URL directly.");
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     if (!newComponent.location) {
       setSubmissionError(
         addMode === "github"
@@ -852,7 +951,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      await fetch(`http://localhost:8000/api/v1/code-components/${matchId}`, {
+      await fetch(`${API_BASE_URL}/code-components/${matchId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ location: compLocation }),
@@ -881,7 +980,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -895,7 +994,7 @@ export default function CodePage() {
     const token = localStorage.getItem("accessToken");
     if (!token) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/code-components/${id}`, {
+      const res = await fetch(`${API_BASE_URL}/code-components/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -915,7 +1014,7 @@ export default function CodePage() {
     if (!token) return;
     setRetryingIds((prev) => new Set(prev).add(compId));
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/code-components/${compId}/retry`, {
+      const res = await fetch(`${API_BASE_URL}/code-components/${compId}/retry`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -960,7 +1059,7 @@ export default function CodePage() {
     if (!token) return;
     setRetryingAllRepo(repoId);
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/repositories/${repoId}/retry-failed`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}/retry-failed`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1011,7 +1110,7 @@ export default function CodePage() {
 
       // Reset selected components to pending first
       for (const comp of selectedComps) {
-        await fetch(`http://localhost:8000/api/v1/code-components/${comp.id}/retry`, {
+        await fetch(`${API_BASE_URL}/code-components/${comp.id}/retry`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -1124,6 +1223,13 @@ export default function CodePage() {
                 setAddMode("url");
                 setScanPreview(null);
                 setGithubRepoSearch("");
+                setGithubReposError(null);
+                setGithubConnected(false);
+                setGithubSelectedRepo(null);
+                setGithubFilePath("");
+                setGithubFileTree([]);
+                setGithubFileTreeSearch("");
+                setGithubExpandedFolders(new Set());
                 fetchGithubRepos();
               }
             }}
@@ -1198,17 +1304,38 @@ export default function CodePage() {
                 {/* ── GitHub Repo Picker ── */}
                 {addMode === "github" ? (
                   <div className="space-y-3">
-                    {!githubConnected ? (
+                    {loadingGithubRepos ? (
+                      <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-6 text-center">
+                        <Loader2 className="w-6 h-6 animate-spin text-blue-500 mx-auto mb-2" />
+                        <p className="text-xs text-gray-500">Loading your GitHub repositories…</p>
+                      </div>
+                    ) : !githubConnected ? (
                       <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-center space-y-2">
                         <FolderGit2 className="w-8 h-8 text-gray-400 mx-auto" />
-                        <p className="text-sm text-gray-600 font-medium">GitHub not connected</p>
-                        <p className="text-xs text-gray-400">
-                          Go to{" "}
-                          <a href="/dashboard/integrations" className="text-blue-600 underline">
-                            Integrations
-                          </a>{" "}
-                          and connect your GitHub account to browse private repos.
-                        </p>
+                        {githubReposError ? (
+                          <>
+                            <p className="text-sm text-red-600 font-medium">Failed to load repositories</p>
+                            <p className="text-xs text-gray-500">{githubReposError}</p>
+                            <button
+                              type="button"
+                              onClick={() => fetchGithubRepos()}
+                              className="text-xs text-blue-600 underline"
+                            >
+                              Try again
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-sm text-gray-600 font-medium">GitHub not connected</p>
+                            <p className="text-xs text-gray-400">
+                              Go to{" "}
+                              <a href="/dashboard/integrations" className="text-blue-600 underline">
+                                Integrations
+                              </a>{" "}
+                              and connect your GitHub account to browse private repos.
+                            </p>
+                          </>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -1223,7 +1350,6 @@ export default function CodePage() {
                               className="w-full pl-8 pr-3 py-2 text-sm border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400"
                             />
                           </div>
-                          {loadingGithubRepos && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />}
                         </div>
 
                         <div className="max-h-52 overflow-y-auto rounded-md border border-input divide-y">
@@ -1231,23 +1357,40 @@ export default function CodePage() {
                             .filter((r) =>
                               !githubRepoSearch ||
                               r.full_name.toLowerCase().includes(githubRepoSearch.toLowerCase()) ||
-                              r.description.toLowerCase().includes(githubRepoSearch.toLowerCase())
+                              (r.description ?? "").toLowerCase().includes(githubRepoSearch.toLowerCase())
                             )
                             .map((repo) => {
-                              const isSelected = newComponent.location === repo.html_url;
+                              const isSelected = newComponent.component_type === "Repository"
+                                ? newComponent.location === repo.html_url
+                                : githubSelectedRepo?.id === repo.id;
                               return (
                                 <button
                                   key={repo.id}
                                   type="button"
                                   onClick={() => {
-                                    setNewComponent((prev) => ({
-                                      ...prev,
-                                      location: repo.html_url,
-                                      name: prev.name || repo.name,
-                                      component_type: "Repository",
-                                      version: repo.default_branch,
-                                    }));
-                                    setScanPreview(null);
+                                    if (newComponent.component_type === "Repository") {
+                                      // Repository type: select whole repo
+                                      setNewComponent((prev) => ({
+                                        ...prev,
+                                        location: repo.html_url,
+                                        name: prev.name || repo.name,
+                                        version: repo.default_branch,
+                                      }));
+                                      setScanPreview(null);
+                                      setGithubSelectedRepo(null);
+                                    } else {
+                                      // File/Class/Function: select repo as source, load file tree
+                                      setGithubSelectedRepo(repo);
+                                      setGithubFilePath("");
+                                      setGithubTreeMode("search");
+                                      setNewComponent((prev) => ({
+                                        ...prev,
+                                        name: prev.name || repo.name,
+                                        version: repo.default_branch,
+                                        location: "",
+                                      }));
+                                      fetchGithubFileTree(repo.html_url, repo.default_branch);
+                                    }
                                   }}
                                   className={`w-full text-left px-3 py-2.5 hover:bg-muted transition-colors ${
                                     isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""
@@ -1285,8 +1428,8 @@ export default function CodePage() {
                           )}
                         </div>
 
-                        {/* Selected repo + scan preview */}
-                        {newComponent.location && newComponent.location.includes("github.com") && (
+                        {/* Repository type: selected repo + scan preview */}
+                        {newComponent.component_type === "Repository" && newComponent.location && newComponent.location.includes("github.com") && (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted rounded px-3 py-1.5">
                               <GitBranch className="w-3 h-3" />
@@ -1321,6 +1464,240 @@ export default function CodePage() {
                             )}
                           </div>
                         )}
+
+                        {/* File/Class/Function: full file browser after repo selection */}
+                        {newComponent.component_type !== "Repository" && githubSelectedRepo && (
+                          <div className="space-y-2 pt-1">
+                            {/* Selected repo badge */}
+                            <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <FolderGit2 className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                                <span className="text-xs font-medium text-green-800 truncate">{githubSelectedRepo.full_name}</span>
+                                {githubSelectedRepo.language && (
+                                  <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded shrink-0">{githubSelectedRepo.language}</span>
+                                )}
+                                <span className="text-[10px] text-green-600">/{githubSelectedRepo.default_branch}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setGithubSelectedRepo(null);
+                                  setGithubFilePath("");
+                                  setGithubFileTree([]);
+                                  setGithubFileTreeSearch("");
+                                }}
+                                className="text-[10px] text-gray-400 hover:text-gray-600 underline ml-2 shrink-0"
+                              >
+                                Change repo
+                              </button>
+                            </div>
+
+                            {/* File browser */}
+                            {githubFileTreeLoading ? (
+                              <div className="flex items-center gap-2 text-xs text-gray-500 py-3 justify-center">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                Loading file tree…
+                              </div>
+                            ) : (
+                              <div className="rounded-md border border-input overflow-hidden">
+                                {/* Mode toggle + search */}
+                                <div className="flex items-center border-b bg-gray-50">
+                                  <div className="relative flex-1">
+                                    <Search className="absolute left-2.5 top-2.5 w-3 h-3 text-muted-foreground" />
+                                    <input
+                                      type="text"
+                                      value={githubFileTreeSearch}
+                                      onChange={(e) => {
+                                        setGithubFileTreeSearch(e.target.value);
+                                        setGithubTreeMode("search");
+                                      }}
+                                      placeholder="Search files…"
+                                      className="w-full pl-7 pr-2 py-2 text-xs bg-transparent focus:outline-none"
+                                    />
+                                  </div>
+                                  <div className="flex border-l text-[10px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => setGithubTreeMode("search")}
+                                      className={`px-2 py-2 ${githubTreeMode === "search" ? "bg-white font-medium text-blue-600" : "text-gray-400 hover:text-gray-600"}`}
+                                    >
+                                      List
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setGithubTreeMode("tree")}
+                                      className={`px-2 py-2 border-l ${githubTreeMode === "tree" ? "bg-white font-medium text-blue-600" : "text-gray-400 hover:text-gray-600"}`}
+                                    >
+                                      Tree
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* File list */}
+                                <div className="max-h-48 overflow-y-auto">
+                                  {githubTreeMode === "search" ? (
+                                    // Flat search/filter list
+                                    (() => {
+                                      const q = githubFileTreeSearch.toLowerCase();
+                                      const filtered = githubFileTree
+                                        .filter((p) => !q || p.toLowerCase().includes(q))
+                                        .slice(0, 60);
+                                      return filtered.length === 0 ? (
+                                        <p className="text-xs text-muted-foreground text-center py-4">
+                                          {q ? `No files matching "${githubFileTreeSearch}"` : "No files found"}
+                                        </p>
+                                      ) : (
+                                        <>
+                                          {filtered.map((filePath) => {
+                                            const isSelected = githubFilePath === filePath;
+                                            const parts = filePath.split("/");
+                                            const fileName = parts[parts.length - 1];
+                                            const dir = parts.slice(0, -1).join("/");
+                                            return (
+                                              <button
+                                                key={filePath}
+                                                type="button"
+                                                onClick={() => setGithubFilePath(filePath)}
+                                                className={`w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-muted transition-colors text-xs ${isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""}`}
+                                              >
+                                                <File className={`w-3 h-3 shrink-0 ${isSelected ? "text-blue-600" : "text-gray-400"}`} />
+                                                <span className={`font-medium truncate ${isSelected ? "text-blue-700" : ""}`}>{fileName}</span>
+                                                {dir && <span className="text-[10px] text-muted-foreground truncate">{dir}/</span>}
+                                              </button>
+                                            );
+                                          })}
+                                          {githubFileTree.filter((p) => !q || p.toLowerCase().includes(q)).length > 60 && (
+                                            <p className="text-[10px] text-center text-muted-foreground py-1.5 border-t">
+                                              Showing 60 of {githubFileTree.filter((p) => !q || p.toLowerCase().includes(q)).length} — search to narrow down
+                                            </p>
+                                          )}
+                                        </>
+                                      );
+                                    })()
+                                  ) : (
+                                    // Tree view — folder hierarchy
+                                    (() => {
+                                      // Build tree structure
+                                      const allFolders = new Set<string>();
+                                      githubFileTree.forEach((p) => {
+                                        const parts = p.split("/");
+                                        for (let i = 1; i < parts.length; i++) {
+                                          allFolders.add(parts.slice(0, i).join("/"));
+                                        }
+                                      });
+
+                                      const rootItems: { path: string; isDir: boolean; depth: number }[] = [];
+                                      const seen = new Set<string>();
+
+                                      // Add root-level folders and files
+                                      const addChildren = (prefix: string, depth: number) => {
+                                        const children = new Set<string>();
+                                        githubFileTree.forEach((p) => {
+                                          if (prefix ? p.startsWith(prefix + "/") : true) {
+                                            const rel = prefix ? p.slice(prefix.length + 1) : p;
+                                            const firstPart = rel.split("/")[0];
+                                            const fullPath = prefix ? `${prefix}/${firstPart}` : firstPart;
+                                            if (!seen.has(fullPath)) {
+                                              children.add(fullPath);
+                                              seen.add(fullPath);
+                                            }
+                                          }
+                                        });
+                                        [...children].sort().forEach((childPath) => {
+                                          const isDir = allFolders.has(childPath);
+                                          rootItems.push({ path: childPath, isDir, depth });
+                                          if (isDir && githubExpandedFolders.has(childPath)) {
+                                            addChildren(childPath, depth + 1);
+                                          }
+                                        });
+                                      };
+                                      addChildren("", 0);
+
+                                      return rootItems.length === 0 ? (
+                                        <p className="text-xs text-muted-foreground text-center py-4">No files</p>
+                                      ) : (
+                                        rootItems.map(({ path, isDir, depth }) => {
+                                          const name = path.split("/").pop()!;
+                                          const isSelected = !isDir && githubFilePath === path;
+                                          const isExpanded = githubExpandedFolders.has(path);
+                                          return (
+                                            <button
+                                              key={path}
+                                              type="button"
+                                              onClick={() => {
+                                                if (isDir) {
+                                                  setGithubExpandedFolders((prev) => {
+                                                    const next = new Set(prev);
+                                                    next.has(path) ? next.delete(path) : next.add(path);
+                                                    return next;
+                                                  });
+                                                } else {
+                                                  setGithubFilePath(path);
+                                                }
+                                              }}
+                                              className={`w-full text-left flex items-center gap-1.5 py-1 pr-2 text-xs hover:bg-muted transition-colors ${isSelected ? "bg-blue-50 border-l-2 border-blue-600" : ""}`}
+                                              style={{ paddingLeft: `${8 + depth * 14}px` }}
+                                            >
+                                              {isDir ? (
+                                                <>
+                                                  <ChevronRight className={`w-3 h-3 text-gray-400 shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+                                                  <Folder className="w-3 h-3 text-yellow-500 shrink-0" />
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <span className="w-3 shrink-0" />
+                                                  <File className={`w-3 h-3 shrink-0 ${isSelected ? "text-blue-600" : "text-gray-400"}`} />
+                                                </>
+                                              )}
+                                              <span className={`truncate ${isSelected ? "text-blue-700 font-medium" : ""}`}>{name}</span>
+                                            </button>
+                                          );
+                                        })
+                                      );
+                                    })()
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Selected file preview + manual override */}
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between">
+                                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">
+                                  {githubFilePath ? "Selected file" : "Or type path manually"}
+                                </label>
+                                {githubFilePath && (
+                                  <button type="button" onClick={() => setGithubFilePath("")} className="text-[10px] text-gray-400 hover:text-red-500">Clear</button>
+                                )}
+                              </div>
+                              <div className="relative">
+                                <File className="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-muted-foreground" />
+                                <input
+                                  type="text"
+                                  value={githubFilePath}
+                                  onChange={(e) => {
+                                    let val = e.target.value;
+                                    // If user pastes a full GitHub blob URL, extract just the file path
+                                    const blobMatch = val.match(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/(.+)$/);
+                                    if (blobMatch) val = blobMatch[1].replace(/\/$/, "");
+                                    setGithubFilePath(val);
+                                  }}
+                                  placeholder="src/auth/utils.py  (or paste full GitHub URL)"
+                                  className={`w-full pl-8 pr-3 py-2 text-xs border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono ${githubFilePath ? "border-blue-300 bg-blue-50" : "border-input"}`}
+                                />
+                              </div>
+                              {githubFilePath.trim() && (() => {
+                                const cleanPath = githubFilePath.trim().replace(/^\//, "").replace(/\/$/, "");
+                                const previewUrl = `${githubSelectedRepo.html_url}/blob/${githubSelectedRepo.default_branch}/${cleanPath}`;
+                                return (
+                                  <p className="text-[10px] text-muted-foreground font-mono break-all pl-1">
+                                    → {previewUrl}
+                                  </p>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
@@ -1332,7 +1709,13 @@ export default function CodePage() {
                       <div className="relative flex-1">
                         <Globe className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
                         <Input id="location" name="location" value={newComponent.location}
-                          onChange={handleInputChange} placeholder="https://github.com/owner/repo (public) or any raw file URL" className="pl-10" required />
+                          onChange={handleInputChange}
+                          placeholder={
+                            newComponent.component_type === "Repository"
+                              ? "https://github.com/owner/repo"
+                              : "https://github.com/owner/repo/blob/main/src/file.py"
+                          }
+                          className="pl-10" required />
                       </div>
                       {newComponent.location && newComponent.location.includes("github.com") && !newComponent.location.includes("/blob/") && (
                         <Button type="button" variant="outline" size="sm" className="shrink-0 h-10 px-3"
@@ -2355,5 +2738,13 @@ export default function CodePage() {
         </Card>
       )}
     </div>
+  );
+}
+
+export default function CodePage() {
+  return (
+    <Suspense fallback={null}>
+      <CodePageInner />
+    </Suspense>
   );
 }

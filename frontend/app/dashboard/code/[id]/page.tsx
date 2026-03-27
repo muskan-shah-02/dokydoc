@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   Card,
@@ -50,7 +50,7 @@ import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
 import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
-import { api } from "@/lib/api";
+import { api, API_BASE_URL } from "@/lib/api";
 
 interface CodeComponentDetail {
   id: number;
@@ -90,6 +90,11 @@ export default function CodeComponentDetailPage() {
   const [synthesisLoading, setSynthesisLoading] = useState(false);
   const [synthesisTriggering, setSynthesisTriggering] = useState(false);
   const [extracting, setExtracting] = useState(false);
+
+  // Elapsed time timer — counts while pending/processing, stops on completed/failed
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerStartRef = useRef<number | null>(null);
 
   const fetchSynthesis = async (repoId: string) => {
     setSynthesisLoading(true);
@@ -186,7 +191,7 @@ export default function CodeComponentDetailPage() {
     }
     try {
       const res = await fetch(
-        `http://localhost:8000/api/v1/code-components/${id}`,
+        `${API_BASE_URL}/code-components/${id}`,
         {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },
@@ -204,6 +209,14 @@ export default function CodeComponentDetailPage() {
     }
   };
 
+  const formatElapsed = (secs: number) => {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
   useEffect(() => {
     if (!id) return;
     const fetchComponentDetail = async () => {
@@ -215,17 +228,12 @@ export default function CodeComponentDetailPage() {
       }
       try {
         const res = await fetch(
-          `http://localhost:8000/api/v1/code-components/${id}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-          }
+          `${API_BASE_URL}/code-components/${id}`,
+          { headers: { Authorization: `Bearer ${token}` } }
         );
         if (!res.ok) {
           const errorData = await res.json();
-          throw new Error(
-            errorData.detail ||
-              `Failed to fetch component details: ${res.statusText}`
-          );
+          throw new Error(errorData.detail || `Failed to fetch component details: ${res.statusText}`);
         }
         const data = await res.json();
         setComponent(data);
@@ -249,8 +257,56 @@ export default function CodeComponentDetailPage() {
     return () => clearInterval(interval);
   }, [id, component?.analysis_status]);
 
+  // Start/stop elapsed timer based on analysis status
+  useEffect(() => {
+    const isActive = component?.analysis_status === "pending" || component?.analysis_status === "processing";
+    if (isActive) {
+      if (!timerRef.current) {
+        if (timerStartRef.current === null) timerStartRef.current = Date.now();
+        timerRef.current = setInterval(() => {
+          setElapsedSeconds(Math.floor((Date.now() - timerStartRef.current!) / 1000));
+        }, 1000);
+      }
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    }
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [component?.analysis_status]);
+
   // --- NEW: Component to intelligently render the correct analysis view ---
   const AnalysisResult = () => {
+    if (component?.analysis_status === "failed") {
+      return (
+        <Card className="border-red-200 bg-red-50">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-red-700">
+              <XCircle className="w-5 h-5" /> Analysis Failed
+            </CardTitle>
+            <CardDescription className="text-red-600">
+              The AI analysis could not be completed.
+              {elapsedSeconds > 0 && (
+                <span className="ml-2 font-mono text-red-500">
+                  (took {formatElapsed(elapsedSeconds)})
+                </span>
+              )}
+            </CardDescription>
+          </CardHeader>
+          {component.summary && (
+            <CardContent>
+              <p className="text-sm text-red-700 font-mono whitespace-pre-wrap break-all bg-red-100 rounded p-3">
+                {component.summary}
+              </p>
+            </CardContent>
+          )}
+        </Card>
+      );
+    }
+
     if (
       component?.analysis_status !== "completed" ||
       !component?.structured_analysis
@@ -258,16 +314,24 @@ export default function CodeComponentDetailPage() {
       return (
         <Card>
           <CardHeader>
-            <CardTitle>Analysis In Progress</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
+              Analysis In Progress
+              {elapsedSeconds > 0 && (
+                <span className="ml-auto text-sm font-mono font-normal text-blue-600 tabular-nums">
+                  {formatElapsed(elapsedSeconds)}
+                </span>
+              )}
+            </CardTitle>
             <CardDescription>
-              The AI analysis for this component is not yet complete. The status
-              is currently: {component?.analysis_status}. This page will
-              automatically refresh when the analysis is done.
+              Status: <span className="font-semibold capitalize">{component?.analysis_status}</span>.
+              This page refreshes automatically every 5 seconds.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center justify-center p-8">
-              <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+            <div className="flex flex-col items-center justify-center gap-3 p-8">
+              <Loader2 className="w-10 h-10 animate-spin text-blue-400" />
+              <p className="text-sm text-muted-foreground">AI is analyzing your code…</p>
             </div>
           </CardContent>
         </Card>
@@ -336,11 +400,24 @@ export default function CodeComponentDetailPage() {
           </p>
         </div>
         <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2 p-2 bg-muted rounded-lg">
+          <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold ${
+            component.analysis_status === "completed" ? "bg-green-100 text-green-700" :
+            component.analysis_status === "failed" ? "bg-red-100 text-red-700" :
+            component.analysis_status === "processing" ? "bg-blue-100 text-blue-700" :
+            "bg-muted text-muted-foreground"
+          }`}>
             {getStatusIcon(component.analysis_status)}
-            <span className="font-semibold capitalize">
-              {component.analysis_status}
-            </span>
+            <span className="capitalize">{component.analysis_status}</span>
+            {(component.analysis_status === "pending" || component.analysis_status === "processing") && elapsedSeconds > 0 && (
+              <span className="font-mono font-normal tabular-nums text-blue-600 ml-1">
+                {formatElapsed(elapsedSeconds)}
+              </span>
+            )}
+            {(component.analysis_status === "completed" || component.analysis_status === "failed") && elapsedSeconds > 0 && (
+              <span className="font-mono font-normal tabular-nums text-xs opacity-70 ml-1">
+                {formatElapsed(elapsedSeconds)}
+              </span>
+            )}
           </div>
           <AlertDialog>
             <AlertDialogTrigger asChild>

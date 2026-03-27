@@ -34,8 +34,7 @@ import {
   ArrowRight,
   Shield,
 } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+import { API_BASE_URL } from "@/lib/api";
 
 // --- Types ---
 
@@ -160,7 +159,7 @@ function ChatContent() {
 
   const loadConversations = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations?limit=50`, { headers: getHeaders() });
+      const res = await fetch(`${API_BASE_URL}/chat/conversations?limit=50`, { headers: getHeaders() });
       if (!res.ok) return;
       const data = await res.json();
       setConversations(data.conversations || []);
@@ -173,7 +172,7 @@ function ChatContent() {
 
   const loadMessages = useCallback(async (convId: number) => {
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations/${convId}/messages?limit=200`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations/${convId}/messages?limit=200`, {
         headers: getHeaders(),
       });
       if (!res.ok) return;
@@ -194,7 +193,7 @@ function ChatContent() {
 
   const loadSuggestedPrompts = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/chat/suggested-prompts`, { headers: getHeaders() });
+      const res = await fetch(`${API_BASE_URL}/chat/suggested-prompts`, { headers: getHeaders() });
       if (!res.ok) return;
       const data = await res.json();
       setSuggestedPrompts(data.prompts || []);
@@ -210,7 +209,7 @@ function ChatContent() {
     }
     try {
       const res = await fetch(
-        `${API_BASE}/chat/conversations/search?q=${encodeURIComponent(q)}&limit=20`,
+        `${API_BASE_URL}/chat/conversations/search?q=${encodeURIComponent(q)}&limit=20`,
         { headers: getHeaders() }
       );
       if (!res.ok) return;
@@ -248,7 +247,7 @@ function ChatContent() {
 
   const createConversation = async (contextType: string = "general", contextId?: number) => {
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({
@@ -271,7 +270,7 @@ function ChatContent() {
 
   const deleteConversation = async (convId: number) => {
     try {
-      await fetch(`${API_BASE}/chat/conversations/${convId}`, {
+      await fetch(`${API_BASE_URL}/chat/conversations/${convId}`, {
         method: "DELETE",
         headers: getHeaders(),
       });
@@ -288,7 +287,7 @@ function ChatContent() {
   const updateModelPreference = async (model: string) => {
     if (!activeConv) return;
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations/${activeConv.id}/model`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations/${activeConv.id}/model`, {
         method: "PUT",
         headers: getHeaders(),
         body: JSON.stringify({ model_preference: model }),
@@ -305,7 +304,7 @@ function ChatContent() {
 
   const submitFeedback = async (messageId: number, rating: number) => {
     try {
-      await fetch(`${API_BASE}/chat/messages/${messageId}/feedback?rating=${rating}`, {
+      await fetch(`${API_BASE_URL}/chat/messages/${messageId}/feedback?rating=${rating}`, {
         method: "POST",
         headers: getHeaders(),
       });
@@ -319,7 +318,7 @@ function ChatContent() {
 
   const exportConversation = async (convId: number) => {
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations/${convId}/export?format=json`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations/${convId}/export?format=json`, {
         headers: getHeaders(),
       });
       if (!res.ok) return;
@@ -370,7 +369,7 @@ function ChatContent() {
 
     if (!conv) {
       try {
-        const res = await fetch(`${API_BASE}/chat/conversations`, {
+        const res = await fetch(`${API_BASE_URL}/chat/conversations`, {
           method: "POST",
           headers: getHeaders(),
           body: JSON.stringify({
@@ -410,7 +409,7 @@ function ChatContent() {
     setTimeout(scrollToBottom, 50);
 
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations/${conv!.id}/messages`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations/${conv!.id}/messages`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({ content: userContent }),
@@ -509,7 +508,7 @@ function ChatContent() {
     if (!activeConv) {
       // Create a conversation first
       try {
-        const res = await fetch(`${API_BASE}/chat/conversations`, {
+        const res = await fetch(`${API_BASE_URL}/chat/conversations`, {
           method: "POST",
           headers: getHeaders(),
           body: JSON.stringify({ title: cmd.command, context_type: "general", model_preference: "auto" }),
@@ -545,7 +544,7 @@ function ChatContent() {
     setMessages((prev) => [...prev, optimisticUser]);
     setTimeout(scrollToBottom, 50);
     try {
-      const res = await fetch(`${API_BASE}/chat/conversations/${convId}/command`, {
+      const res = await fetch(`${API_BASE_URL}/chat/conversations/${convId}/command`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({ command, args }),

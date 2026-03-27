@@ -13,6 +13,7 @@ import {
   Clock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { API_ROOT } from "@/lib/api";
 
 // --- Type Definitions for Dashboard Data ---
 
@@ -181,7 +182,7 @@ export default function RoleDashboardPage() {
       try {
         // We are calling the backend endpoint that you will build.
         const response = await fetch(
-          `http://localhost:8000/api/dashboard/${role}`,
+          `${API_ROOT}/dashboard/${role}`,
           {
             headers: { Authorization: `Bearer ${token}` },
           }

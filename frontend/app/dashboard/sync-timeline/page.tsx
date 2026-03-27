@@ -26,6 +26,7 @@ import {
   Upload,
   LogIn,
 } from "lucide-react";
+import { API_BASE_URL } from "@/lib/api";
 
 interface TimelineEvent {
   id: number;
@@ -73,7 +74,7 @@ export default function SyncTimelinePage() {
       }
 
       const res = await fetch(
-        `http://localhost:8000/api/v1/audit/timeline?${params}`,
+        `${API_BASE_URL}/audit/timeline?${params}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
@@ -111,10 +112,10 @@ export default function SyncTimelinePage() {
   const fetchLegacyTimeline = async (token: string) => {
     try {
       const [docsRes, codeRes] = await Promise.all([
-        fetch("http://localhost:8000/api/v1/documents/", {
+        fetch(`${API_BASE_URL}/documents/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
-        fetch("http://localhost:8000/api/v1/repositories/", {
+        fetch(`${API_BASE_URL}/repositories/`, {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
