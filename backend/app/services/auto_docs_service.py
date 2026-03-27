@@ -611,7 +611,9 @@ class AutoDocsService(LoggerMixin):
         title = f"{_DOC_TYPE_TITLES.get(doc_type, doc_type)} — {source_name}"
 
         cap = _TOKEN_CAP.get(doc_type, 12000)
-        prompt = _PROMPTS[doc_type].format(context=context_text[:cap])
+        # Use replace() not .format() — context may contain literal {braces}
+        # from JSON (e.g. {"Decision": "..."}) which would cause KeyError with .format()
+        prompt = _PROMPTS[doc_type].replace("{context}", context_text[:cap])
 
         try:
             from app.services.ai.gemini import gemini_service
@@ -1033,7 +1035,9 @@ class AutoDocsService(LoggerMixin):
 
         title = f"{_DOC_TYPE_TITLES.get(doc_type, doc_type)} — {source_label}"
         cap = _TOKEN_CAP.get(doc_type, 12000)
-        prompt = _PROMPTS[doc_type].format(context=context_text[:cap])
+        # Use replace() not .format() — context may contain literal {braces}
+        # from JSON (e.g. {"Decision": "..."}) which would cause KeyError with .format()
+        prompt = _PROMPTS[doc_type].replace("{context}", context_text[:cap])
 
         try:
             from app.services.ai.gemini import gemini_service
