@@ -1043,6 +1043,38 @@ function CodePageInner() {
     }
   };
 
+  // --- Resume Analysis ---
+
+  const [resumingRepo, setResumingRepo] = useState<number | null>(null);
+
+  const handleResumeAnalysis = async (repoId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const token = localStorage.getItem("accessToken");
+    if (!token) return;
+    setResumingRepo(repoId);
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/repositories/${repoId}/resume`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        setSubmissionError(err.detail || "Failed to resume analysis");
+        setTimeout(() => setSubmissionError(null), 5000);
+        return;
+      }
+      const data = await res.json();
+      setSuccessMessage(`Resuming ${data.pending_files} pending files (${data.already_completed} already done).`);
+      setTimeout(() => setSuccessMessage(null), 6000);
+      fetchData(true);
+    } catch {
+      setSubmissionError("Failed to resume analysis");
+      setTimeout(() => setSubmissionError(null), 5000);
+    } finally {
+      setResumingRepo(null);
+    }
+  };
+
   // --- Retry All Failed ---
 
   const [retryingAllRepo, setRetryingAllRepo] = useState<number | null>(null);
@@ -2282,6 +2314,22 @@ function CodePageInner() {
                                     <Filter className="w-3 h-3 mr-1" />
                                     Re-Analyze
                                   </Button>
+                                  {pendingCount > 0 && (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-xs border-amber-200 text-amber-700 hover:bg-amber-50"
+                                      disabled={resumingRepo === repo.id}
+                                      onClick={(e) => handleResumeAnalysis(repo.id, e)}
+                                    >
+                                      {resumingRepo === repo.id ? (
+                                        <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                                      ) : (
+                                        <RefreshCw className="w-3 h-3 mr-1" />
+                                      )}
+                                      Resume ({pendingCount})
+                                    </Button>
+                                  )}
                                   {failedCount > 0 && (
                                     <Button
                                       variant="outline"

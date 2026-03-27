@@ -349,7 +349,18 @@ def static_analysis_worker(
     except Exception as e:
         logger.error(f"ANALYSIS_WORKER failed for component {component_id}: {e}")
         error_str = str(e)
-        error_summary = _build_error_with_solution(error_str, file_path or "unknown")
+        is_rate_limit = any(x in error_str.lower() for x in [
+            "429", "resource_exhausted", "quota", "rate limit", "ratelimit", "too many requests"
+        ])
+        if is_rate_limit:
+            error_summary = (
+                "Gemini API rate limit exceeded. "
+                "Click 'Resume' to retry when quota resets (usually resets after 1 minute for RPM limits, "
+                "or at midnight Pacific for daily quota)."
+            )
+            logger.warning(f"RATE LIMIT hit for component {component_id} ({file_path}): {e}")
+        else:
+            error_summary = _build_error_with_solution(error_str, file_path or "unknown")
         try:
             comp = crud.code_component.get(db=db, id=component_id, tenant_id=tenant_id)
             if comp:
@@ -395,9 +406,10 @@ def _file_analysis_priority(file_info: dict) -> tuple:
     return (1, path)  # Default: same priority as services
 
 
-@celery_app.task(name="repo_analysis_task", bind=True, max_retries=1)
+@celery_app.task(name="repo_analysis_task", bind=True, max_retries=1, time_limit=86400, soft_time_limit=82800)
 def repo_analysis_task(
-    self, repo_id: int, tenant_id: int, file_list: list, github_token: Optional[str] = None
+    self, repo_id: int, tenant_id: int, file_list: list, github_token: Optional[str] = None,
+    analyzed_offset: int = 0
 ):
     """
     Orchestrator: Iterates through the file list for a repository,
@@ -421,10 +433,10 @@ def repo_analysis_task(
             logger.error(f"Repo agent: Repository {repo_id} not found")
             return {"status": "error", "reason": "repo_not_found"}
 
-        # Mark repo as analyzing
+        # Mark repo as analyzing — offset lets resume start from where it left off
         crud.repository.update_analysis_progress(
             db=db, repo_id=repo_id, tenant_id=tenant_id,
-            analyzed_files=0, total_files=len(file_list),
+            analyzed_files=analyzed_offset, total_files=analyzed_offset + len(file_list),
             status="analyzing"
         )
 
@@ -472,11 +484,9 @@ def repo_analysis_task(
                 ).first()
 
                 if existing:
-                    from app.services.cache_service import cache_service as _cache
-                    cache_type = "enhanced_analysis" if repo.name else "code_analysis"
-                    cached = _cache.get_cached_analysis(content=code_content, analysis_type=cache_type)
-                    if cached and existing.analysis_status == "completed" and existing.structured_analysis:
-                        logger.info(f"SKIP re-analysis for {file_path} (cache hit)")
+                    # Skip files already completed — no need for cache hit
+                    if existing.analysis_status == "completed" and existing.structured_analysis:
+                        logger.info(f"SKIP re-analysis for {file_path} (already completed)")
                         return ("cached", existing, code_content, file_info)
                     return ("existing", existing, code_content, file_info)
                 else:
