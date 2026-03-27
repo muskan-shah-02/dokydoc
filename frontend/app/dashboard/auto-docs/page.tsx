@@ -637,7 +637,10 @@ export default function AutoDocsPage() {
 
   const filteredRepoFiles = (repoId: number) => {
     const files = repoFiles[repoId] || [];
-    return q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files;
+    return q ? files.filter((f) =>
+      f.name.toLowerCase().includes(q) ||
+      (f.location || "").toLowerCase().includes(q)
+    ) : files;
   };
 
   // Section row renderer
@@ -760,13 +763,27 @@ export default function AutoDocsPage() {
                           Repositories
                         </p>
                         {repositories
-                          .filter((r) => !q || r.name.toLowerCase().includes(q))
+                          .filter((r) => {
+                            if (!q) return true;
+                            if (r.name.toLowerCase().includes(q)) return true;
+                            // Also show repo if any of its loaded files match
+                            const files = repoFiles[r.id] || [];
+                            return repoFilesLoading.has(r.id) || files.some((f) =>
+                              f.name.toLowerCase().includes(q) ||
+                              (f.location || "").toLowerCase().includes(q)
+                            );
+                          })
                           .map((repo) => {
                             const repoSrc: SourceItem = { id: repo.id, name: repo.name, type: "repository" };
                             const isExpanded = expandedRepos.has(repo.id);
                             const isLoading = repoFilesLoading.has(repo.id);
                             const files = filteredRepoFiles(repo.id);
                             const repoSelected = isSelected(repoSrc);
+
+                            // Auto-load files when searching so results appear immediately
+                            if (q && repoFiles[repo.id] === undefined && !repoFilesLoading.has(repo.id)) {
+                              loadRepoFiles(repo.id, repo.name);
+                            }
 
                             return (
                               <div key={`repo:${repo.id}`}>
@@ -797,8 +814,8 @@ export default function AutoDocsPage() {
                                   </button>
                                 </div>
 
-                                {/* Expanded: Folders + Files */}
-                                {isExpanded && (
+                                {/* Expanded: Folders + Files (also show when searching) */}
+                                {(isExpanded || !!q) && (
                                   <div className="ml-6 border-l border-gray-200">
                                     {isLoading && (
                                       <div className="px-3 py-2 text-xs text-gray-400 flex items-center gap-2">
