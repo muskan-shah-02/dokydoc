@@ -452,7 +452,7 @@ function CodePageInner() {
   const [githubFileTreeLoading, setGithubFileTreeLoading] = useState(false);
   const [githubFileTreeSearch, setGithubFileTreeSearch] = useState("");
   const [githubTreeMode, setGithubTreeMode] = useState<"search" | "tree">("search");
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [githubExpandedFolders, setGithubExpandedFolders] = useState<Set<string>>(new Set());
   const [addMode, setAddMode] = useState<"url" | "github">("url");
 
   // --- State: UI ---
@@ -589,7 +589,7 @@ function CodePageInner() {
     setGithubFileTreeLoading(true);
     setGithubFileTree([]);
     setGithubFileTreeSearch("");
-    setExpandedFolders(new Set());
+    setGithubExpandedFolders(new Set());
     try {
       const params = new URLSearchParams({ repo_url: repoUrl, branch });
       const res = await fetch(`${API_BASE_URL}/integrations/github/tree?${params}`, {
@@ -903,7 +903,7 @@ function CodePageInner() {
     // For File/Class/Function in GitHub mode: build location from selected repo + file path
     if (addMode === "github" && !isRepo) {
       if (githubSelectedRepo) {
-        const trimmedPath = githubFilePath.trim().replace(/^\//, "");
+        const trimmedPath = githubFilePath.trim().replace(/^\//, "").replace(/\/$/, "");
         if (!trimmedPath) {
           setSubmissionError("Enter the file path within the repository (e.g., src/auth/utils.py)");
           setIsSubmitting(false);
@@ -1229,7 +1229,7 @@ function CodePageInner() {
                 setGithubFilePath("");
                 setGithubFileTree([]);
                 setGithubFileTreeSearch("");
-                setExpandedFolders(new Set());
+                setGithubExpandedFolders(new Set());
                 fetchGithubRepos();
               }
             }}
@@ -1606,7 +1606,7 @@ function CodePageInner() {
                                         [...children].sort().forEach((childPath) => {
                                           const isDir = allFolders.has(childPath);
                                           rootItems.push({ path: childPath, isDir, depth });
-                                          if (isDir && expandedFolders.has(childPath)) {
+                                          if (isDir && githubExpandedFolders.has(childPath)) {
                                             addChildren(childPath, depth + 1);
                                           }
                                         });
@@ -1619,14 +1619,14 @@ function CodePageInner() {
                                         rootItems.map(({ path, isDir, depth }) => {
                                           const name = path.split("/").pop()!;
                                           const isSelected = !isDir && githubFilePath === path;
-                                          const isExpanded = expandedFolders.has(path);
+                                          const isExpanded = githubExpandedFolders.has(path);
                                           return (
                                             <button
                                               key={path}
                                               type="button"
                                               onClick={() => {
                                                 if (isDir) {
-                                                  setExpandedFolders((prev) => {
+                                                  setGithubExpandedFolders((prev) => {
                                                     const next = new Set(prev);
                                                     next.has(path) ? next.delete(path) : next.add(path);
                                                     return next;
@@ -1675,16 +1675,26 @@ function CodePageInner() {
                                 <input
                                   type="text"
                                   value={githubFilePath}
-                                  onChange={(e) => setGithubFilePath(e.target.value)}
-                                  placeholder="src/auth/utils.py"
+                                  onChange={(e) => {
+                                    let val = e.target.value;
+                                    // If user pastes a full GitHub blob URL, extract just the file path
+                                    const blobMatch = val.match(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/(.+)$/);
+                                    if (blobMatch) val = blobMatch[1].replace(/\/$/, "");
+                                    setGithubFilePath(val);
+                                  }}
+                                  placeholder="src/auth/utils.py  (or paste full GitHub URL)"
                                   className={`w-full pl-8 pr-3 py-2 text-xs border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-400 font-mono ${githubFilePath ? "border-blue-300 bg-blue-50" : "border-input"}`}
                                 />
                               </div>
-                              {githubFilePath.trim() && (
-                                <p className="text-[10px] text-muted-foreground font-mono truncate pl-1">
-                                  {githubSelectedRepo.html_url}/blob/{githubSelectedRepo.default_branch}/{githubFilePath.trim().replace(/^\//, "")}
-                                </p>
-                              )}
+                              {githubFilePath.trim() && (() => {
+                                const cleanPath = githubFilePath.trim().replace(/^\//, "").replace(/\/$/, "");
+                                const previewUrl = `${githubSelectedRepo.html_url}/blob/${githubSelectedRepo.default_branch}/${cleanPath}`;
+                                return (
+                                  <p className="text-[10px] text-muted-foreground font-mono break-all pl-1">
+                                    → {previewUrl}
+                                  </p>
+                                );
+                              })()}
                             </div>
                           </div>
                         )}
