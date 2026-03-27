@@ -74,8 +74,13 @@ def read_documents(
 
     page = paginate_query(query, Document.id, cursor=cursor, page_size=page_size)
 
-    document_endpoints.logger.info(f"Retrieved {len(page['items'])} documents for tenant {tenant_id}")
-    return page
+    # Serialize SQLAlchemy objects → plain dicts so FastAPI can JSON-encode them
+    serialized = []
+    for doc in page["items"]:
+        serialized.append(schemas.Document.model_validate(doc).model_dump())
+
+    document_endpoints.logger.info(f"Retrieved {len(serialized)} documents for tenant {tenant_id}")
+    return {**page, "items": serialized}
 
 
 @router.get("/{document_id}", response_model=schemas.Document)

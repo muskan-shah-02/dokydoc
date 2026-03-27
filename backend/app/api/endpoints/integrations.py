@@ -435,17 +435,24 @@ def list_jira_items(
     limit: int = Query(100, ge=1, le=500),
 ) -> Any:
     """List synced JiraItems for this tenant with optional filters."""
-    from app.crud.crud_jira_item import crud_jira_item
-    items = crud_jira_item.get_multi(
-        db,
-        tenant_id=tenant_id,
-        item_type=item_type,
-        project_key=project_key,
-        epic_key=epic_key,
-        sprint_name=sprint_name,
-        skip=skip,
-        limit=limit,
-    )
+    try:
+        from app.crud.crud_jira_item import crud_jira_item
+        items = crud_jira_item.get_multi(
+            db,
+            tenant_id=tenant_id,
+            item_type=item_type,
+            project_key=project_key,
+            epic_key=epic_key,
+            sprint_name=sprint_name,
+            skip=skip,
+            limit=limit,
+        )
+    except Exception as e:
+        err_str = str(e).lower()
+        if "undefined table" in err_str or "does not exist" in err_str or "no such table" in err_str:
+            # jira_items table not yet migrated — return empty instead of 500
+            return {"items": [], "count": 0, "migration_pending": True}
+        raise HTTPException(status_code=500, detail=f"Failed to list Jira items: {e}")
     return {
         "items": [
             {

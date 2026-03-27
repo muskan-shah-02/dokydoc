@@ -2203,8 +2203,14 @@ function CodePageInner() {
                 const total = repo.total_files ?? 0;
                 const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0;
 
+                const hasSearchMatch = !!searchTerm && (repoComponents[repo.id] || []).some(
+                  (c) =>
+                    c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                    (c.location || "").toLowerCase().includes(searchTerm.toLowerCase())
+                );
+
                 return (
-                  <Collapsible key={repo.id} open={isExpanded} onOpenChange={() => toggleRepo(repo.id)}>
+                  <Collapsible key={repo.id} open={isExpanded || hasSearchMatch} onOpenChange={() => toggleRepo(repo.id)}>
                     {/* Repo Row */}
                     <div className="flex items-center border rounded-lg px-4 py-3 hover:bg-muted/50 transition-colors group">
                       <CollapsibleTrigger asChild>
@@ -2458,6 +2464,17 @@ function CodePageInner() {
                                 else if (activeTab === "failed") visibleComps = failedComps;
                                 else if (activeTab === "pending") visibleComps = pendingComps;
 
+                                // Filter by search term when active
+                                const searchActive = !!searchTerm;
+                                if (searchActive) {
+                                  const term = searchTerm.toLowerCase();
+                                  visibleComps = visibleComps.filter(
+                                    (c) =>
+                                      c.name.toLowerCase().includes(term) ||
+                                      (c.location || "").toLowerCase().includes(term)
+                                  );
+                                }
+
                                 return (
                                   <div className="border rounded-lg overflow-hidden">
                                     {/* Tab bar */}
@@ -2545,10 +2562,12 @@ function CodePageInner() {
                                       <div>
                                         {visibleComps.length === 0 ? (
                                           <div className="py-8 text-center text-sm text-muted-foreground">
-                                            {activeTab === "failed" ? "No failed files" :
-                                             activeTab === "analyzing" ? "No files currently analyzing" :
-                                             activeTab === "pending" ? "No files queued" :
-                                             activeTab === "completed" ? "No completed files yet" : "No files"}
+                                            {searchActive
+                                              ? `No files match "${searchTerm}"`
+                                              : activeTab === "failed" ? "No failed files" :
+                                                activeTab === "analyzing" ? "No files currently analyzing" :
+                                                activeTab === "pending" ? "No files queued" :
+                                                activeTab === "completed" ? "No completed files yet" : "No files"}
                                           </div>
                                         ) : (
                                           <>

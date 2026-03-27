@@ -481,6 +481,13 @@ async def generate_doc_multi(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Surface generation failures as HTTP 500 so the frontend catch block fires
+    if result.get("status") == "failed":
+        error_msg = result.get("content", "Generation failed")
+        # Strip markdown italics wrapper if present
+        error_msg = error_msg.strip("*").replace("Generation failed: ", "", 1)
+        raise HTTPException(status_code=500, detail=f"Generation failed: {error_msg}")
+
     # If only one source, use its type/id for backward compat; otherwise "multi"/0
     if len(sources) == 1:
         src_type = sources[0]["type"]
@@ -678,33 +685,6 @@ Return only the refined Markdown document, nothing else."""
     }
 
 
-@router.get("/{doc_id}")
-def get_generated_doc(
-    doc_id: int,
-    tenant_id: int = Depends(deps.get_tenant_id),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(deps.get_current_user),
-) -> Any:
-    """Get full content of a specific generated doc."""
-    obj = crud_generated_doc.get_by_id(db, doc_id=doc_id, tenant_id=tenant_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Generated doc not found")
-    return {
-        "id": obj.id,
-        "tenant_id": obj.tenant_id,
-        "user_id": obj.user_id,
-        "source_type": obj.source_type,
-        "source_id": obj.source_id,
-        "source_name": obj.source_name,
-        "source_ids": obj.source_ids,
-        "doc_type": obj.doc_type,
-        "title": obj.title,
-        "content": obj.content,
-        "metadata": obj.doc_metadata,
-        "status": obj.status,
-        "created_at": obj.created_at.isoformat(),
-    }
-
 @router.post("/recommend", status_code=200)
 def recommend_diagram_type(
     payload: RecommendRequest,
@@ -756,3 +736,31 @@ def get_discovered_endpoints(
         db, tenant_id=tenant_id, repo_id=repo_id, query=q
     )
     return {"endpoints": endpoints, "total": len(endpoints)}
+
+
+@router.get("/{doc_id}")
+def get_generated_doc(
+    doc_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Get full content of a specific generated doc."""
+    obj = crud_generated_doc.get_by_id(db, doc_id=doc_id, tenant_id=tenant_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Generated doc not found")
+    return {
+        "id": obj.id,
+        "tenant_id": obj.tenant_id,
+        "user_id": obj.user_id,
+        "source_type": obj.source_type,
+        "source_id": obj.source_id,
+        "source_name": obj.source_name,
+        "source_ids": obj.source_ids,
+        "doc_type": obj.doc_type,
+        "title": obj.title,
+        "content": obj.content,
+        "metadata": obj.doc_metadata,
+        "status": obj.status,
+        "created_at": obj.created_at.isoformat(),
+    }
