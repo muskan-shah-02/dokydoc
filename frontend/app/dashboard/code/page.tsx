@@ -2021,36 +2021,67 @@ function CodePageInner() {
           extCounts[ext] = (extCounts[ext] ?? 0) + 1;
         }
 
-        // Count repo-level skipped breakdown from repoStats (uses skipped_category_breakdown array)
+        // Aggregate from stats: language breakdown from scan + skipped categories
+        const langBreakdown: Record<string, number> = {};
         const skippedBreakdown: Record<string, number> = {};
+        let totalScanAnalyze = 0;
+        let totalScanSkipped = 0;
         for (const stats of Object.values(repoStats)) {
-          for (const cat of (stats as any).skipped_category_breakdown ?? []) {
+          const s = stats as any;
+          for (const [lang, cnt] of Object.entries(s.analyze_language_breakdown ?? {})) {
+            langBreakdown[lang] = (langBreakdown[lang] ?? 0) + (cnt as number);
+          }
+          for (const cat of s.skipped_category_breakdown ?? []) {
             skippedBreakdown[cat.category] = (skippedBreakdown[cat.category] ?? 0) + (cat.count ?? 0);
           }
+          totalScanAnalyze += s.scan_analyze_count ?? 0;
+          totalScanSkipped += s.skipped_files_count ?? 0;
         }
 
-        const topExts = Object.entries(extCounts)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 8);
+        // Fall back to extension breakdown from CodeComponents if no scan data yet
+        const hasLangData = Object.keys(langBreakdown).length > 0;
+        const topExts = Object.entries(extCounts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+        const topLangs = Object.entries(langBreakdown).sort((a, b) => b[1] - a[1]).slice(0, 10);
+        const totalScan = totalScanAnalyze + totalScanSkipped;
 
         return (
           <div className="rounded-lg border bg-white dark:bg-gray-950 p-4 space-y-3">
-            <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
-              <BarChart2 className="w-4 h-4 text-indigo-500" />
-              Repository File Breakdown
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {topExts.map(([ext, count]) => (
-                <div key={ext} className="rounded-md border bg-gray-50 dark:bg-gray-900 px-3 py-2 flex items-center justify-between">
-                  <span className="text-xs font-mono text-gray-600 dark:text-gray-400 truncate">{ext}</span>
-                  <span className="text-xs font-bold text-gray-900 dark:text-gray-100 ml-2">{count}</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300">
+                <BarChart2 className="w-4 h-4 text-indigo-500" />
+                Repository File Breakdown
+              </div>
+              {totalScan > 0 && (
+                <div className="flex items-center gap-3 text-xs">
+                  <span className="font-medium text-gray-600">{totalScan} total files</span>
+                  <span className="text-green-700 font-medium">✓ {totalScanAnalyze} to analyze</span>
+                  <span className="text-gray-400">⊘ {totalScanSkipped} skipped</span>
                 </div>
-              ))}
+              )}
             </div>
+            {/* Language breakdown from scan */}
+            {hasLangData ? (
+              <div className="flex flex-wrap gap-1.5">
+                {topLangs.map(([lang, count]) => (
+                  <span key={lang} className="text-xs bg-blue-50 border border-blue-200 text-blue-700 rounded-full px-2.5 py-0.5 font-mono font-medium">
+                    {lang}: {count}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {topExts.map(([ext, count]) => (
+                  <div key={ext} className="rounded-md border bg-gray-50 dark:bg-gray-900 px-3 py-2 flex items-center justify-between">
+                    <span className="text-xs font-mono text-gray-600 dark:text-gray-400 truncate">{ext}</span>
+                    <span className="text-xs font-bold text-gray-900 dark:text-gray-100 ml-2">{count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {Object.keys(skippedBreakdown).length > 0 && (
-              <div className="flex flex-wrap gap-2 pt-1 border-t">
-                <span className="text-xs text-gray-400 self-center">Skipped:</span>
-                {Object.entries(skippedBreakdown).map(([cat, cnt]) => (
+              <div className="flex flex-wrap gap-1.5 pt-1 border-t">
+                <span className="text-xs text-gray-400 self-center shrink-0">Skipped:</span>
+                {Object.entries(skippedBreakdown).sort((a,b) => b[1]-a[1]).map(([cat, cnt]) => (
                   <span key={cat} className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-500 rounded-full px-2 py-0.5">
                     {cat}: {cnt}
                   </span>
@@ -2272,32 +2303,59 @@ function CodePageInner() {
 
                               {/* Detailed Stats Panel (from backend) */}
                               {repoStats[repo.id] && (() => {
-                                const stats = repoStats[repo.id];
+                                const stats = repoStats[repo.id] as any;
+                                const langBreak = stats.analyze_language_breakdown ?? {};
+                                const topLangs = Object.entries(langBreak).sort((a: any, b: any) => b[1] - a[1]).slice(0, 10);
+                                const scanAnalyze = stats.scan_analyze_count ?? 0;
+                                const scanSkipped = stats.skipped_files_count ?? 0;
+                                const scanTotal = scanAnalyze + scanSkipped;
+                                const skippedCats = stats.skipped_category_breakdown ?? [];
                                 return (
                                   <div className="rounded-md border bg-slate-50/50 dark:bg-slate-950/50 p-3 space-y-2">
-                                    <div className="flex items-center gap-4 flex-wrap text-xs">
-                                      {stats.services_count > 0 && (
-                                        <span className="inline-flex items-center gap-1 bg-blue-100 text-blue-800 rounded-full px-2 py-0.5 font-medium">
-                                          Services: {stats.services_count}
-                                        </span>
-                                      )}
-                                      {stats.endpoints_count > 0 && (
-                                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 rounded-full px-2 py-0.5 font-medium">
-                                          Endpoints: {stats.endpoints_count}
-                                        </span>
-                                      )}
-                                      {stats.models_count > 0 && (
-                                        <span className="inline-flex items-center gap-1 bg-purple-100 text-purple-800 rounded-full px-2 py-0.5 font-medium">
-                                          Models: {stats.models_count}
-                                        </span>
-                                      )}
-                                    </div>
-                                    {stats.extension_breakdown?.length > 0 && (
-                                      <div className="flex items-center gap-2 flex-wrap text-[11px] text-muted-foreground">
-                                        <span className="font-medium text-foreground">Files:</span>
-                                        {stats.extension_breakdown.slice(0, 8).map((ext: any) => (
-                                          <span key={ext.ext} className="bg-muted rounded px-1.5 py-0.5 font-mono">
-                                            {ext.ext}: {ext.count}
+                                    {/* Scan summary row */}
+                                    {scanTotal > 0 && (
+                                      <div className="flex items-center gap-3 text-xs flex-wrap">
+                                        <span className="font-medium text-foreground">{scanTotal} total files</span>
+                                        <span className="text-green-700 font-medium">✓ {scanAnalyze} to analyze</span>
+                                        <span className="text-muted-foreground">⊘ {scanSkipped} skipped</span>
+                                        {(stats.services_count > 0 || stats.endpoints_count > 0 || stats.models_count > 0) && (
+                                          <span className="text-gray-300">·</span>
+                                        )}
+                                        {stats.services_count > 0 && (
+                                          <span className="bg-blue-100 text-blue-800 rounded-full px-2 py-0.5 font-medium">
+                                            Services: {stats.services_count}
+                                          </span>
+                                        )}
+                                        {stats.endpoints_count > 0 && (
+                                          <span className="bg-green-100 text-green-800 rounded-full px-2 py-0.5 font-medium">
+                                            Endpoints: {stats.endpoints_count}
+                                          </span>
+                                        )}
+                                        {stats.models_count > 0 && (
+                                          <span className="bg-purple-100 text-purple-800 rounded-full px-2 py-0.5 font-medium">
+                                            Models: {stats.models_count}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                    {/* Language breakdown from scan */}
+                                    {topLangs.length > 0 && (
+                                      <div className="flex items-center gap-1.5 flex-wrap text-[11px]">
+                                        <span className="text-muted-foreground shrink-0">Languages:</span>
+                                        {topLangs.map(([lang, cnt]: any) => (
+                                          <span key={lang} className="bg-blue-50 border border-blue-200 text-blue-700 rounded-full px-2 py-0.5 font-mono">
+                                            {lang}: {cnt}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {/* Skipped categories */}
+                                    {skippedCats.length > 0 && (
+                                      <div className="flex items-center gap-1.5 flex-wrap text-[11px] pt-1 border-t">
+                                        <span className="text-muted-foreground shrink-0">Skipped:</span>
+                                        {skippedCats.map((cat: any) => (
+                                          <span key={cat.category} className="bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">
+                                            {cat.category}: {cat.count}
                                           </span>
                                         ))}
                                       </div>

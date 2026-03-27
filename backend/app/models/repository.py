@@ -43,6 +43,10 @@ class Repository(Base):
     # Skipped files — tracked but not evaluated (binary, compiled, images, etc.)
     skipped_files: Mapped[list] = mapped_column(JSONB, nullable=True)
 
+    # Language breakdown from pre-analysis scan (populated before LLM analysis runs)
+    # e.g. {"python": 246, "typescript": 105, "markdown": 21}
+    analyze_language_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=True)
+
     # Synthesis (Reduce Phase — combines per-file analyses into System Architecture)
     synthesis_data: Mapped[dict] = mapped_column(JSONB, nullable=True)
     synthesis_status: Mapped[str] = mapped_column(String(50), nullable=True)
