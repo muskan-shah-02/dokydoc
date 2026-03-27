@@ -379,6 +379,118 @@ def trigger_analysis(
 
 
 # ============================================================
+# RESUME ANALYSIS (pick up where it left off)
+# ============================================================
+
+@router.post("/{repo_id}/resume", status_code=status.HTTP_202_ACCEPTED)
+def resume_analysis(
+    repo_id: int,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Resume analysis for a repository by re-queuing only the files that
+    are not yet completed (pending, failed, processing). Already-completed
+    files are automatically skipped by the worker.
+    """
+    from app.models.code_component import CodeComponent
+
+    repo = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    if repo.analysis_status == "analyzing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Repository is already being analyzed."
+        )
+
+    # Find all non-completed file components
+    pending_components = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.component_type == "File",
+        CodeComponent.analysis_status != "completed",
+    ).all()
+
+    if not pending_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pending files to resume — all files are already completed."
+        )
+
+    # Count already-completed so progress bar starts correctly
+    completed_count = db.query(CodeComponent).filter(
+        CodeComponent.repository_id == repo_id,
+        CodeComponent.tenant_id == tenant_id,
+        CodeComponent.component_type == "File",
+        CodeComponent.analysis_status == "completed",
+    ).count()
+
+    # Build file_list from pending components' raw URLs
+    _ext_to_lang = {
+        ".py": "python", ".ts": "typescript", ".tsx": "typescript",
+        ".js": "javascript", ".jsx": "javascript", ".md": "markdown",
+        ".go": "go", ".java": "java", ".rs": "rust", ".css": "css",
+        ".json": "json", ".yaml": "yaml", ".yml": "yaml",
+        ".sh": "shell", ".dockerfile": "dockerfile", ".rb": "ruby",
+        ".php": "php", ".cs": "csharp", ".cpp": "cpp", ".c": "c",
+    }
+    file_list = []
+    for comp in pending_components:
+        location = comp.location or ""
+        path = comp.name  # fallback
+        if "raw.githubusercontent.com/" in location:
+            # URL: https://raw.githubusercontent.com/owner/repo/branch/path/to/file
+            after = location.split("raw.githubusercontent.com/", 1)[1]
+            segments = after.split("/", 3)
+            if len(segments) >= 4:
+                path = segments[3]
+        dot_idx = path.rfind(".")
+        ext = path[dot_idx:].lower() if dot_idx != -1 else ""
+        language = _ext_to_lang.get(ext, "unknown")
+        file_list.append({"path": path, "url": location, "language": language})
+
+    # Reset failed/pending status on those components so they're picked up fresh
+    for comp in pending_components:
+        if comp.analysis_status in ("failed", "processing"):
+            crud.code_component.update(db, db_obj=comp, obj_in={"analysis_status": "pending"})
+    db.commit()
+
+    # Update repo progress: start from already-completed offset
+    crud.repository.update_analysis_progress(
+        db=db, repo_id=repo_id, tenant_id=tenant_id,
+        analyzed_files=completed_count,
+        total_files=completed_count + len(file_list),
+        status="analyzing",
+    )
+
+    # Look up GitHub token
+    from app.crud.crud_integration_config import crud_integration_config
+    gh_config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+    github_token = gh_config.access_token if (gh_config and gh_config.is_active) else None
+
+    # Dispatch with offset so progress tracking is correct
+    from app.tasks.code_analysis_tasks import repo_analysis_task
+    task = repo_analysis_task.delay(repo_id, tenant_id, file_list, github_token, completed_count)
+
+    logger.info(
+        f"Resumed analysis for repo {repo_id}: {len(file_list)} pending files "
+        f"(offset={completed_count}), task={task.id}"
+    )
+
+    return {
+        "message": f"Resuming analysis for {len(file_list)} pending files",
+        "repo_id": repo_id,
+        "task_id": task.id,
+        "pending_files": len(file_list),
+        "already_completed": completed_count,
+    }
+
+
+# ============================================================
 # REPOSITORY COMPONENTS
 # ============================================================
 
