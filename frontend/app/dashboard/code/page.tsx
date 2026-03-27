@@ -800,13 +800,33 @@ function CodePageInner() {
     return () => clearInterval(ticker);
   }, [hasActiveAnalysis]);
 
+  // Auto-load components for all repos when user types a search term
+  // so file-level search works even before expanding a repo
+  useEffect(() => {
+    if (!searchTerm) return;
+    repositories.forEach((repo) => {
+      if (!repoComponents[repo.id] && !loadingRepoComponents.has(repo.id)) {
+        fetchRepoComponents(repo.id);
+      }
+    });
+  }, [searchTerm, repositories]);
+
   // --- Filtering ---
 
   const filteredRepos = repositories.filter((r) => {
+    const term = searchTerm.toLowerCase();
     const matchesSearch =
-      !searchTerm ||
-      r.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      r.url.toLowerCase().includes(searchTerm.toLowerCase());
+      !term ||
+      r.name.toLowerCase().includes(term) ||
+      r.url.toLowerCase().includes(term) ||
+      // Also match if any loaded components in this repo match
+      (repoComponents[r.id] || []).some(
+        (c) =>
+          c.name.toLowerCase().includes(term) ||
+          (c.location || "").toLowerCase().includes(term)
+      ) ||
+      // Show repos still loading their components when search is active
+      loadingRepoComponents.has(r.id);
     const matchesStatus =
       statusFilter === "all" || r.analysis_status === statusFilter;
     return matchesSearch && matchesStatus;
