@@ -338,6 +338,16 @@ def trigger_analysis(
                 detail="Each file must have 'path' and 'url' fields"
             )
 
+    # Build language breakdown from file_list and persist for immediate UI display
+    language_breakdown: dict = {}
+    for f in file_list:
+        lang = f.get("language") or "unknown"
+        language_breakdown[lang] = language_breakdown.get(lang, 0) + 1
+    repo_obj = crud.repository.get(db=db, id=repo_id, tenant_id=tenant_id)
+    if repo_obj:
+        crud.repository.update(db=db, db_obj=repo_obj, obj_in={"analyze_language_breakdown": language_breakdown})
+        db.commit()
+
     # Set total_files upfront so the UI can display the full expected count immediately,
     # before the Celery worker starts processing files.
     crud.repository.update_analysis_progress(
@@ -698,15 +708,21 @@ def get_single_repo_stats(
     skipped_category_breakdown = sorted(skipped_cat_counts.items(), key=lambda x: -x[1])
     skipped_extension_breakdown = sorted(skipped_ext_counts.items(), key=lambda x: -x[1])
 
+    # Language breakdown from pre-analysis scan (populated before LLM runs)
+    analyze_language_breakdown = repo.analyze_language_breakdown or {}
+    scan_analyze_count = sum(analyze_language_breakdown.values()) if analyze_language_breakdown else len(components)
+
     return {
         "repo_id": repo_id,
         "repo_name": repo.name,
         "total_files": len(components),
         "total_repo_files": total_repo_files,
+        "scan_analyze_count": scan_analyze_count,
         "skipped_files_count": skipped_count,
         "skipped_files": skipped_files[:500],
         "skipped_category_breakdown": [{"category": c, "count": n} for c, n in skipped_category_breakdown],
         "skipped_extension_breakdown": [{"ext": e, "count": n} for e, n in skipped_extension_breakdown],
+        "analyze_language_breakdown": analyze_language_breakdown,
         "analysis_status_breakdown": status_counts,
         "extension_breakdown": [{"ext": e, "count": c} for e, c in ext_breakdown],
         "component_type_breakdown": [{"type": t, "count": c} for t, c in type_breakdown],

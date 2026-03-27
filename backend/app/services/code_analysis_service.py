@@ -360,8 +360,16 @@ class CodeAnalysisService(LoggerMixin):
         )
         db.commit()
 
+        # Look up tenant's GitHub integration token so private repos can be scanned
+        try:
+            from app.crud.crud_integration_config import crud_integration_config
+            gh_config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="github")
+            github_token = gh_config.access_token if (gh_config and gh_config.is_active) else None
+        except Exception:
+            github_token = None
+
         # Build file list from GitHub API (now returns dict with to_analyze + skipped)
-        scan_result = await self._get_repo_file_list(owner, repo_name, branch)
+        scan_result = await self._get_repo_file_list(owner, repo_name, branch, github_token=github_token)
         file_list = scan_result.get("to_analyze", [])
         skipped_files = scan_result.get("skipped", [])
 
@@ -375,10 +383,19 @@ class CodeAnalysisService(LoggerMixin):
             db.commit()
             return
 
-        # Store skipped files in repository for UI display
+        # Build language breakdown from file list
+        language_breakdown: dict = {}
+        for f in file_list:
+            lang = f.get("language") or "unknown"
+            language_breakdown[lang] = language_breakdown.get(lang, 0) + 1
+
+        # Store skipped files + language breakdown in repository for immediate UI display
+        repo_update: dict = {}
         if skipped_files:
-            crud.repository.update(db=db, db_obj=repo, obj_in={"skipped_files": skipped_files})
-            db.commit()
+            repo_update["skipped_files"] = skipped_files
+        repo_update["analyze_language_breakdown"] = language_breakdown
+        crud.repository.update(db=db, db_obj=repo, obj_in=repo_update)
+        db.commit()
 
         # Set total_files upfront so the UI shows the full expected count immediately.
         crud.repository.update_analysis_progress(
@@ -387,9 +404,9 @@ class CodeAnalysisService(LoggerMixin):
             status="analyzing"
         )
 
-        # Dispatch repo_analysis_task via Celery
+        # Dispatch repo_analysis_task via Celery — pass github_token so private files can be fetched
         from app.tasks.code_analysis_tasks import repo_analysis_task
-        task = repo_analysis_task.delay(repo.id, tenant_id, file_list)
+        task = repo_analysis_task.delay(repo.id, tenant_id, file_list, github_token)
 
         self.logger.info(
             f"Dispatched repo_analysis_task for {display_name}: "
