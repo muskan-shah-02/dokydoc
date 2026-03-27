@@ -260,22 +260,35 @@ class GeminiService(LoggerMixin):
                 try:
                     analysis_data = json.loads(cleaned)
                 except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to parse enhanced analysis JSON for {file_path}: {e}")
-                    analysis_data = {
-                        "summary": f"Enhanced analysis completed but response parsing failed for {file_path}",
-                        "structured_analysis": {
-                            "language_info": {"primary_language": language or "Unknown", "framework": "Unknown", "file_type": "Unknown"},
-                            "business_rules": [],
-                            "api_contracts": [],
-                            "data_model_relationships": [],
-                            "security_patterns": [],
-                            "components": [],
-                            "dependencies": [],
-                            "exports": [],
-                            "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
-                            "quality_assessment": "Analysis failed due to response parsing error"
+                    # Handle "Extra data" — Gemini appended text after valid JSON
+                    # Find the end of the first complete JSON object
+                    extracted = None
+                    if "Extra data" in str(e) or "extra data" in str(e):
+                        try:
+                            decoder = json.JSONDecoder()
+                            extracted, _ = decoder.raw_decode(cleaned)
+                        except json.JSONDecodeError:
+                            pass
+                    if extracted is not None:
+                        self.logger.warning(f"Extracted first JSON object for {file_path} (extra data trimmed)")
+                        analysis_data = extracted
+                    else:
+                        self.logger.error(f"Failed to parse enhanced analysis JSON for {file_path}: {e}")
+                        analysis_data = {
+                            "summary": f"Enhanced analysis completed but response parsing failed for {file_path}",
+                            "structured_analysis": {
+                                "language_info": {"primary_language": language or "Unknown", "framework": "Unknown", "file_type": "Unknown"},
+                                "business_rules": [],
+                                "api_contracts": [],
+                                "data_model_relationships": [],
+                                "security_patterns": [],
+                                "components": [],
+                                "dependencies": [],
+                                "exports": [],
+                                "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                                "quality_assessment": "Analysis failed due to response parsing error"
+                            }
                         }
-                    }
 
             # Always include token usage for cost tracking (including thinking tokens!)
             analysis_data["_token_usage"] = {
@@ -334,29 +347,40 @@ class GeminiService(LoggerMixin):
                 try:
                     analysis_data = json.loads(cleaned)
                 except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to parse markdown analysis JSON for {file_path}: {e}")
-                    analysis_data = {
-                        "summary": f"Markdown documentation file: {file_path}",
-                        "structured_analysis": {
-                            "language_info": {"primary_language": "Markdown", "file_type": "Documentation", "doc_type": "OTHER"},
-                            "purpose": f"Documentation file at {file_path}",
-                            "topics": [],
-                            "components": [],
-                            "referenced_code_files": [],
-                            "api_contracts": [],
-                            "business_rules": [],
-                            "architecture_decisions": [],
-                            "data_model_relationships": [],
-                            "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
-                            "setup_instructions": None,
-                            "quality_assessment": "Analysis failed due to response parsing error",
-                            "dependencies": [],
-                            "exports": [],
-                            "security_patterns": [],
-                            "component_interactions": [],
-                            "data_flows": [],
+                    extracted = None
+                    if "Extra data" in str(e) or "extra data" in str(e):
+                        try:
+                            decoder = json.JSONDecoder()
+                            extracted, _ = decoder.raw_decode(cleaned)
+                        except json.JSONDecodeError:
+                            pass
+                    if extracted is not None:
+                        self.logger.warning(f"Extracted first JSON object for markdown {file_path}")
+                        analysis_data = extracted
+                    else:
+                        self.logger.error(f"Failed to parse markdown analysis JSON for {file_path}: {e}")
+                        analysis_data = {
+                            "summary": f"Markdown documentation file: {file_path}",
+                            "structured_analysis": {
+                                "language_info": {"primary_language": "Markdown", "file_type": "Documentation", "doc_type": "OTHER"},
+                                "purpose": f"Documentation file at {file_path}",
+                                "topics": [],
+                                "components": [],
+                                "referenced_code_files": [],
+                                "api_contracts": [],
+                                "business_rules": [],
+                                "architecture_decisions": [],
+                                "data_model_relationships": [],
+                                "patterns_and_architecture": {"design_patterns": [], "architectural_style": "Unknown", "key_concepts": []},
+                                "setup_instructions": None,
+                                "quality_assessment": "Analysis failed due to response parsing error",
+                                "dependencies": [],
+                                "exports": [],
+                                "security_patterns": [],
+                                "component_interactions": [],
+                                "data_flows": [],
+                            }
                         }
-                    }
 
             analysis_data["_token_usage"] = {
                 "input_tokens": tokens["input_tokens"],
