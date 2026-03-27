@@ -1053,7 +1053,7 @@ function CodePageInner() {
     if (!token) return;
     setResumingRepo(repoId);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/repositories/${repoId}/resume`, {
+      const res = await fetch(`${API_BASE_URL}/repositories/${repoId}/resume`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
