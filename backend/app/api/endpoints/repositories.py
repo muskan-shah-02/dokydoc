@@ -402,10 +402,9 @@ def resume_analysis(
         raise HTTPException(status_code=404, detail="Repository not found")
 
     if repo.analysis_status == "analyzing":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Repository is already being analyzed."
-        )
+        # Allow resume even if status is "analyzing" — the worker may have died.
+        # Resume will reset the status and re-queue pending files.
+        pass
 
     # Find all non-completed file components
     pending_components = db.query(CodeComponent).filter(
