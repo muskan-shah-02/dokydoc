@@ -61,6 +61,17 @@ interface CodeComponent {
   name: string;
   component_type: string;
   version: string;
+  location?: string;
+  repository_id?: number | null;
+  repository_name?: string;
+}
+
+interface LinkableItem {
+  kind: "code" | "document";
+  id: number;
+  name: string;
+  subtitle: string;
+  componentId?: number; // for code kind — the code_component_id
 }
 
 // --- Helper: Format Status Text ---
@@ -292,14 +303,11 @@ const ManageLinksDialog = ({
   onLinksChanged: () => void;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [allCodeComponents, setAllCodeComponents] = useState<CodeComponent[]>(
-    []
-  );
-  const [linkedComponentIds, setLinkedComponentIds] = useState<Set<number>>(
-    new Set()
-  );
+  const [allItems, setAllItems] = useState<LinkableItem[]>([]);
+  const [linkedComponentIds, setLinkedComponentIds] = useState<Set<number>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const token = localStorage.getItem("accessToken");
 
   const fetchAllData = useCallback(async () => {
@@ -307,26 +315,47 @@ const ManageLinksDialog = ({
     setIsLoading(true);
     setError(null);
     try {
-      const componentsRes = await fetch(
-        `${API_BASE_URL}/code-components/`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      if (!componentsRes.ok)
-        throw new Error("Failed to fetch code components.");
-      const allComps: CodeComponent[] = await componentsRes.json();
-      setAllCodeComponents(allComps);
+      // Fetch code components (repo files)
+      const [compsRes, linkedRes, docsRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/code-components/`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_BASE_URL}/links/document/${document.id}`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_BASE_URL}/documents/`, { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
 
-      const linkedRes = await fetch(
-        `${API_BASE_URL}/links/document/${document.id}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
+      if (!compsRes.ok) throw new Error("Failed to fetch code components.");
       if (!linkedRes.ok) throw new Error("Failed to fetch existing links.");
+
+      const allComps: CodeComponent[] = await compsRes.json();
       const linkedComps: CodeComponent[] = await linkedRes.json();
       setLinkedComponentIds(new Set(linkedComps.map((c) => c.id)));
+
+      // Build linkable items from code components
+      const codeItems: LinkableItem[] = allComps.map((c) => ({
+        kind: "code",
+        id: c.id,
+        componentId: c.id,
+        name: c.name,
+        subtitle: c.location
+          ? c.location.replace(/^https?:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, "")
+          : `${c.component_type} · v${c.version}`,
+      }));
+
+      // Build linkable items from uploaded documents (exclude self)
+      let docItems: LinkableItem[] = [];
+      if (docsRes.ok) {
+        const docsData = await docsRes.json();
+        const docs: Document[] = docsData.items || docsData;
+        docItems = docs
+          .filter((d) => d.id !== document.id && d.status === "completed")
+          .map((d) => ({
+            kind: "document",
+            id: d.id,
+            name: d.filename,
+            subtitle: `${d.document_type} · v${d.version} · Uploaded doc`,
+          }));
+      }
+
+      setAllItems([...codeItems, ...docItems]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -338,27 +367,20 @@ const ManageLinksDialog = ({
     fetchAllData();
   }, [fetchAllData]);
 
-  const handleLinkToggle = async (component: CodeComponent) => {
-    const isCurrentlyLinked = linkedComponentIds.has(component.id);
-    const endpoint = `${API_BASE_URL}/links/`;
-    const method = isCurrentlyLinked ? "DELETE" : "POST";
+  const handleLinkToggle = async (item: LinkableItem) => {
+    if (item.kind !== "code") return; // only code links supported via /links/
+    const compId = item.componentId!;
+    const isLinked = linkedComponentIds.has(compId);
+    const method = isLinked ? "DELETE" : "POST";
     try {
-      const response = await fetch(endpoint, {
+      const res = await fetch(`${API_BASE_URL}/links/`, {
         method,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          document_id: document.id,
-          code_component_id: component.id,
-        }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ document_id: document.id, code_component_id: compId }),
       });
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(
-          errData.detail || `Failed to ${isCurrentlyLinked ? "unlink" : "link"}`
-        );
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || `Failed to ${isLinked ? "unlink" : "link"}`);
       }
       await fetchAllData();
       onLinksChanged();
@@ -367,55 +389,111 @@ const ManageLinksDialog = ({
     }
   };
 
+  const term = search.toLowerCase();
+  const filtered = allItems.filter(
+    (item) =>
+      item.name.toLowerCase().includes(term) ||
+      item.subtitle.toLowerCase().includes(term)
+  );
+
+  // Group: linked first, then code files, then documents
+  const linked = filtered.filter((i) => i.kind === "code" && linkedComponentIds.has(i.id));
+  const unlinkedCode = filtered.filter((i) => i.kind === "code" && !linkedComponentIds.has(i.id));
+  const uploadedDocs = filtered.filter((i) => i.kind === "document");
+
+  const renderItem = (item: LinkableItem) => {
+    const isLinked = item.kind === "code" && linkedComponentIds.has(item.componentId!);
+    return (
+      <li
+        key={`${item.kind}-${item.id}`}
+        className={`flex items-center justify-between p-2 rounded-md hover:bg-gray-50 ${isLinked ? "bg-blue-50" : ""}`}
+      >
+        <div className="min-w-0 flex-1 mr-3">
+          <p className="font-medium text-sm truncate">{item.name}</p>
+          <p className="text-xs text-gray-400 truncate">{item.subtitle}</p>
+        </div>
+        {item.kind === "code" ? (
+          <Button
+            variant={isLinked ? "destructive" : "default"}
+            size="sm"
+            className="shrink-0"
+            onClick={() => handleLinkToggle(item)}
+          >
+            {isLinked ? <Unlink className="h-4 w-4" /> : <LinkIcon className="h-4 w-4" />}
+          </Button>
+        ) : (
+          <span className="text-xs text-gray-400 shrink-0">Doc</span>
+        )}
+      </li>
+    );
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm">
-          <LinkIcon className="mr-2 h-4 w-4" /> Link Code (
-          {document.link_count || 0})
+          <LinkIcon className="mr-2 h-4 w-4" /> Link Code ({document.link_count || 0})
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Link Code to: {document.filename}</DialogTitle>
+          <DialogTitle>Link to: {document.filename}</DialogTitle>
           <DialogDescription>
-            Select code components to associate with this document.
+            Link repo files or uploaded documents to this document.
           </DialogDescription>
         </DialogHeader>
-        {isLoading && <p>Loading...</p>}
+
+        {/* Search */}
+        <div className="relative">
+          <Input
+            placeholder="Search files, paths, documents..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full"
+          />
+        </div>
+
+        {isLoading && <p className="text-sm text-gray-500 py-2">Loading...</p>}
         {error && <p className="text-sm text-red-500">{error}</p>}
+
         {!isLoading && !error && (
-          <div className="max-h-80 overflow-y-auto p-1">
-            <ul className="space-y-2">
-              {allCodeComponents.map((comp) => (
-                <li
-                  key={comp.id}
-                  className="flex items-center justify-between p-2 rounded-md hover:bg-gray-100"
-                >
-                  <div>
-                    <p className="font-semibold">{comp.name}</p>
-                    <p className="text-sm text-gray-500">
-                      {comp.component_type} - v{comp.version}
-                    </p>
-                  </div>
-                  <Button
-                    variant={
-                      linkedComponentIds.has(comp.id)
-                        ? "destructive"
-                        : "default"
-                    }
-                    size="sm"
-                    onClick={() => handleLinkToggle(comp)}
-                  >
-                    {linkedComponentIds.has(comp.id) ? (
-                      <Unlink className="h-4 w-4" />
-                    ) : (
-                      <LinkIcon className="h-4 w-4" />
-                    )}
-                  </Button>
-                </li>
-              ))}
-            </ul>
+          <div className="max-h-96 overflow-y-auto space-y-3 pr-1">
+
+            {/* Linked */}
+            {linked.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-1 px-1">
+                  Linked ({linked.length})
+                </p>
+                <ul className="space-y-1">{linked.map(renderItem)}</ul>
+              </div>
+            )}
+
+            {/* Repo Files */}
+            {unlinkedCode.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 px-1">
+                  Repo Files ({unlinkedCode.length})
+                </p>
+                <ul className="space-y-1">{unlinkedCode.map(renderItem)}</ul>
+              </div>
+            )}
+
+            {/* Uploaded Documents */}
+            {uploadedDocs.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 px-1">
+                  Uploaded Documents ({uploadedDocs.length})
+                </p>
+                <ul className="space-y-1">{uploadedDocs.map(renderItem)}</ul>
+              </div>
+            )}
+
+            {filtered.length === 0 && (
+              <p className="text-sm text-gray-400 text-center py-4">
+                No results for &quot;{search}&quot;
+              </p>
+            )}
           </div>
         )}
       </DialogContent>
