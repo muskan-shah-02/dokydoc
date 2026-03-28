@@ -63,15 +63,13 @@ interface CodeComponent {
   version: string;
   location?: string;
   repository_id?: number | null;
-  repository_name?: string;
+  analysis_status?: string; // "completed" | "pending" | "failed" | "processing"
 }
 
-interface LinkableItem {
-  kind: "code" | "document";
+interface Repository {
   id: number;
   name: string;
-  subtitle: string;
-  componentId?: number; // for code kind — the code_component_id
+  analysis_status: string;
 }
 
 // --- Helper: Format Status Text ---
@@ -294,6 +292,33 @@ const UploadDialog = ({ onUploadSuccess }: { onUploadSuccess: () => void }) => {
   );
 };
 
+// --- Helpers for Link Modal ---
+
+/** Extract relative file path from raw.githubusercontent.com URL */
+function extractRelativePath(location?: string): string {
+  if (!location) return "";
+  // https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{...path}
+  const m = location.match(/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\/(.+)/);
+  return m ? m[1] : location;
+}
+
+/** Get top-level folder from a relative path */
+function topFolder(relativePath: string): string {
+  const parts = relativePath.split("/");
+  return parts.length > 1 ? parts[0] : "(root)";
+}
+
+/** Analysis status badge */
+const StatusBadge = ({ status }: { status?: string }) => {
+  if (status === "completed")
+    return <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700">Analyzed ✓</span>;
+  if (status === "failed")
+    return <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-red-100 text-red-600">Failed</span>;
+  if (status === "processing" || status === "pending")
+    return <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-100 text-amber-600">Pending</span>;
+  return null;
+};
+
 // --- Manage Links Dialog Component ---
 const ManageLinksDialog = ({
   document,
@@ -303,11 +328,15 @@ const ManageLinksDialog = ({
   onLinksChanged: () => void;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [allItems, setAllItems] = useState<LinkableItem[]>([]);
-  const [linkedComponentIds, setLinkedComponentIds] = useState<Set<number>>(new Set());
+  const [allComponents, setAllComponents] = useState<CodeComponent[]>([]);
+  const [repos, setRepos] = useState<Repository[]>([]);
+  const [linkedIds, setLinkedIds] = useState<Set<number>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [onlyAnalyzed, setOnlyAnalyzed] = useState(true);
+  const [expandedRepos, setExpandedRepos] = useState<Set<number | string>>(new Set());
+  const [toggling, setToggling] = useState<Set<number>>(new Set());
   const token = localStorage.getItem("accessToken");
 
   const fetchAllData = useCallback(async () => {
@@ -315,47 +344,30 @@ const ManageLinksDialog = ({
     setIsLoading(true);
     setError(null);
     try {
-      // Fetch code components (repo files)
-      const [compsRes, linkedRes, docsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/code-components/`, { headers: { Authorization: `Bearer ${token}` } }),
+      const [compsRes, linkedRes, reposRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/code-components/?limit=1000`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_BASE_URL}/links/document/${document.id}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_BASE_URL}/documents/`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_BASE_URL}/repositories/`, { headers: { Authorization: `Bearer ${token}` } }),
       ]);
-
       if (!compsRes.ok) throw new Error("Failed to fetch code components.");
       if (!linkedRes.ok) throw new Error("Failed to fetch existing links.");
 
-      const allComps: CodeComponent[] = await compsRes.json();
-      const linkedComps: CodeComponent[] = await linkedRes.json();
-      setLinkedComponentIds(new Set(linkedComps.map((c) => c.id)));
+      const comps: CodeComponent[] = await compsRes.json();
+      const linked: CodeComponent[] = await linkedRes.json();
+      setAllComponents(comps);
+      setLinkedIds(new Set(linked.map((c) => c.id)));
 
-      // Build linkable items from code components
-      const codeItems: LinkableItem[] = allComps.map((c) => ({
-        kind: "code",
-        id: c.id,
-        componentId: c.id,
-        name: c.name,
-        subtitle: c.location
-          ? c.location.replace(/^https?:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+\//, "")
-          : `${c.component_type} · v${c.version}`,
-      }));
-
-      // Build linkable items from uploaded documents (exclude self)
-      let docItems: LinkableItem[] = [];
-      if (docsRes.ok) {
-        const docsData = await docsRes.json();
-        const docs: Document[] = docsData.items || docsData;
-        docItems = docs
-          .filter((d) => d.id !== document.id && d.status === "completed")
-          .map((d) => ({
-            kind: "document",
-            id: d.id,
-            name: d.filename,
-            subtitle: `${d.document_type} · v${d.version} · Uploaded doc`,
-          }));
+      if (reposRes.ok) {
+        const reposData = await reposRes.json();
+        setRepos(Array.isArray(reposData) ? reposData : reposData.items || []);
       }
 
-      setAllItems([...codeItems, ...docItems]);
+      // Auto-expand repos that have linked files
+      const linkedRepoIds = new Set(linked.map((c) => {
+        const full = comps.find((x) => x.id === c.id);
+        return full?.repository_id ?? "standalone";
+      }));
+      setExpandedRepos(linkedRepoIds as Set<number | string>);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -363,137 +375,230 @@ const ManageLinksDialog = ({
     }
   }, [isOpen, document.id, token]);
 
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
+  useEffect(() => { fetchAllData(); }, [fetchAllData]);
 
-  const handleLinkToggle = async (item: LinkableItem) => {
-    if (item.kind !== "code") return; // only code links supported via /links/
-    const compId = item.componentId!;
-    const isLinked = linkedComponentIds.has(compId);
-    const method = isLinked ? "DELETE" : "POST";
+  const handleLinkToggle = async (comp: CodeComponent) => {
+    const isLinked = linkedIds.has(comp.id);
+    setToggling((prev) => new Set(prev).add(comp.id));
     try {
       const res = await fetch(`${API_BASE_URL}/links/`, {
-        method,
+        method: isLinked ? "DELETE" : "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ document_id: document.id, code_component_id: compId }),
+        body: JSON.stringify({ document_id: document.id, code_component_id: comp.id }),
       });
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.detail || `Failed to ${isLinked ? "unlink" : "link"}`);
       }
-      await fetchAllData();
+      // Optimistic update — avoid full refetch for snappy UX
+      setLinkedIds((prev) => {
+        const next = new Set(prev);
+        isLinked ? next.delete(comp.id) : next.add(comp.id);
+        return next;
+      });
       onLinksChanged();
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setToggling((prev) => { const next = new Set(prev); next.delete(comp.id); return next; });
     }
   };
 
+  // Build repo map for names
+  const repoMap = new Map(repos.map((r) => [r.id, r.name]));
+
+  // Filter logic
   const term = search.toLowerCase();
-  const filtered = allItems.filter(
-    (item) =>
-      item.name.toLowerCase().includes(term) ||
-      item.subtitle.toLowerCase().includes(term)
-  );
+  const visible = allComponents.filter((c) => {
+    if (onlyAnalyzed && c.analysis_status !== "completed") return false;
+    if (!term) return true;
+    const rel = extractRelativePath(c.location);
+    return c.name.toLowerCase().includes(term) || rel.toLowerCase().includes(term);
+  });
 
-  // Group: linked first, then code files, then documents
-  const linked = filtered.filter((i) => i.kind === "code" && linkedComponentIds.has(i.id));
-  const unlinkedCode = filtered.filter((i) => i.kind === "code" && !linkedComponentIds.has(i.id));
-  const uploadedDocs = filtered.filter((i) => i.kind === "document");
+  // Group by repo → folder
+  type FolderMap = Map<string, CodeComponent[]>;
+  type RepoGroup = { repoId: number | string; repoName: string; folders: FolderMap; linkedCount: number };
+  const repoGroups = new Map<number | string, RepoGroup>();
 
-  const renderItem = (item: LinkableItem) => {
-    const isLinked = item.kind === "code" && linkedComponentIds.has(item.componentId!);
-    return (
-      <li
-        key={`${item.kind}-${item.id}`}
-        className={`flex items-center justify-between p-2 rounded-md hover:bg-gray-50 ${isLinked ? "bg-blue-50" : ""}`}
-      >
-        <div className="min-w-0 flex-1 mr-3">
-          <p className="font-medium text-sm truncate">{item.name}</p>
-          <p className="text-xs text-gray-400 truncate">{item.subtitle}</p>
-        </div>
-        {item.kind === "code" ? (
-          <Button
-            variant={isLinked ? "destructive" : "default"}
-            size="sm"
-            className="shrink-0"
-            onClick={() => handleLinkToggle(item)}
-          >
-            {isLinked ? <Unlink className="h-4 w-4" /> : <LinkIcon className="h-4 w-4" />}
-          </Button>
-        ) : (
-          <span className="text-xs text-gray-400 shrink-0">Doc</span>
-        )}
-      </li>
-    );
+  for (const comp of visible) {
+    const repoId = comp.repository_id ?? "standalone";
+    const repoName = comp.repository_id ? (repoMap.get(comp.repository_id) ?? `Repo #${comp.repository_id}`) : "Standalone Files";
+    if (!repoGroups.has(repoId)) {
+      repoGroups.set(repoId, { repoId, repoName, folders: new Map(), linkedCount: 0 });
+    }
+    const group = repoGroups.get(repoId)!;
+    if (linkedIds.has(comp.id)) group.linkedCount++;
+    const rel = extractRelativePath(comp.location);
+    const folder = topFolder(rel);
+    if (!group.folders.has(folder)) group.folders.set(folder, []);
+    group.folders.get(folder)!.push(comp);
+  }
+
+  // Linked first, then alphabetical
+  const sortedGroups = [...repoGroups.values()].sort((a, b) => b.linkedCount - a.linkedCount);
+
+  const totalLinked = linkedIds.size;
+  const totalVisible = visible.length;
+
+  const toggleRepo = (id: number | string) => {
+    setExpandedRepos((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+    <Dialog open={isOpen} onOpenChange={(o) => { setIsOpen(o); if (!o) setSearch(""); }}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm">
-          <LinkIcon className="mr-2 h-4 w-4" /> Link Code ({document.link_count || 0})
+          <LinkIcon className="mr-2 h-4 w-4" />
+          Link Code ({document.link_count || 0})
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Link to: {document.filename}</DialogTitle>
+          <DialogTitle>Link Code Files — {document.filename}</DialogTitle>
           <DialogDescription>
-            Link repo files or uploaded documents to this document.
+            Linked files are used by the validation engine to detect mismatches between this document and the actual code.
           </DialogDescription>
         </DialogHeader>
 
-        {/* Search */}
-        <div className="relative">
+        {/* Controls */}
+        <div className="flex gap-2 items-center">
           <Input
-            placeholder="Search files, paths, documents..."
+            placeholder="Search by filename or path..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full"
+            className="flex-1 h-8 text-sm"
           />
+          <label className="flex items-center gap-1.5 text-xs text-gray-600 whitespace-nowrap cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={onlyAnalyzed}
+              onChange={(e) => setOnlyAnalyzed(e.target.checked)}
+              className="rounded"
+            />
+            Analyzed only
+          </label>
         </div>
 
-        {isLoading && <p className="text-sm text-gray-500 py-2">Loading...</p>}
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {/* Summary bar */}
+        <div className="flex items-center gap-3 text-xs text-gray-500 border-b pb-2">
+          <span><span className="font-semibold text-blue-600">{totalLinked}</span> linked</span>
+          <span>·</span>
+          <span>{totalVisible} files shown</span>
+          {!onlyAnalyzed && (
+            <span className="text-amber-600">⚠ Unanalyzed files cannot be validated</span>
+          )}
+        </div>
+
+        {isLoading && <p className="text-sm text-gray-500 py-4 text-center">Loading...</p>}
+        {error && <p className="text-sm text-red-500 px-1">{error}</p>}
 
         {!isLoading && !error && (
-          <div className="max-h-96 overflow-y-auto space-y-3 pr-1">
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
 
-            {/* Linked */}
-            {linked.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-1 px-1">
-                  Linked ({linked.length})
-                </p>
-                <ul className="space-y-1">{linked.map(renderItem)}</ul>
-              </div>
-            )}
-
-            {/* Repo Files */}
-            {unlinkedCode.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 px-1">
-                  Repo Files ({unlinkedCode.length})
-                </p>
-                <ul className="space-y-1">{unlinkedCode.map(renderItem)}</ul>
-              </div>
-            )}
-
-            {/* Uploaded Documents */}
-            {uploadedDocs.length > 0 && (
-              <div>
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1 px-1">
-                  Uploaded Documents ({uploadedDocs.length})
-                </p>
-                <ul className="space-y-1">{uploadedDocs.map(renderItem)}</ul>
-              </div>
-            )}
-
-            {filtered.length === 0 && (
-              <p className="text-sm text-gray-400 text-center py-4">
-                No results for &quot;{search}&quot;
+            {sortedGroups.length === 0 && (
+              <p className="text-sm text-gray-400 text-center py-8">
+                {search ? `No files matching "${search}"` : onlyAnalyzed ? "No analyzed files found. Uncheck 'Analyzed only' to see all files." : "No code files found."}
               </p>
             )}
+
+            {sortedGroups.map(({ repoId, repoName, folders, linkedCount }) => {
+              const isExpanded = expandedRepos.has(repoId);
+              const totalInRepo = [...folders.values()].reduce((s, f) => s + f.length, 0);
+
+              return (
+                <div key={String(repoId)} className="border rounded-lg overflow-hidden">
+                  {/* Repo header */}
+                  <button
+                    onClick={() => toggleRepo(repoId)}
+                    className="w-full flex items-center justify-between px-3 py-2 bg-gray-50 hover:bg-gray-100 text-left"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-800">{repoName}</span>
+                      {linkedCount > 0 && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
+                          {linkedCount} linked
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-gray-400">
+                      <span>{totalInRepo} files</span>
+                      <span>{isExpanded ? "▲" : "▼"}</span>
+                    </div>
+                  </button>
+
+                  {/* Folders + files */}
+                  {isExpanded && (
+                    <div className="divide-y">
+                      {[...folders.entries()].map(([folder, files]) => {
+                        const folderLinked = files.filter((f) => linkedIds.has(f.id)).length;
+                        return (
+                          <div key={folder}>
+                            {/* Folder subheader */}
+                            <div className="px-3 py-1 bg-gray-50/50 flex items-center justify-between">
+                              <span className="text-xs text-gray-500 font-mono">{folder}/</span>
+                              {folderLinked > 0 && (
+                                <span className="text-[10px] text-blue-500">{folderLinked} linked</span>
+                              )}
+                            </div>
+                            {/* Files */}
+                            <ul className="divide-y divide-gray-50">
+                              {files.map((comp) => {
+                                const isLinked = linkedIds.has(comp.id);
+                                const isToggling = toggling.has(comp.id);
+                                const rel = extractRelativePath(comp.location);
+                                // Show path without the top folder (already shown in header)
+                                const displayPath = rel.includes("/") ? rel.split("/").slice(1).join("/") : rel;
+                                const notAnalyzed = comp.analysis_status !== "completed";
+
+                                return (
+                                  <li
+                                    key={comp.id}
+                                    className={`flex items-center justify-between px-3 py-2 hover:bg-gray-50 transition-colors ${isLinked ? "bg-blue-50/60" : ""}`}
+                                  >
+                                    <div className="min-w-0 flex-1 mr-3">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className={`text-sm font-medium truncate ${notAnalyzed ? "text-gray-400" : "text-gray-800"}`}>
+                                          {comp.name}
+                                        </span>
+                                        <StatusBadge status={comp.analysis_status} />
+                                      </div>
+                                      {displayPath && displayPath !== comp.name && (
+                                        <p className="text-xs text-gray-400 font-mono truncate">{displayPath}</p>
+                                      )}
+                                    </div>
+                                    <Button
+                                      variant={isLinked ? "destructive" : "outline"}
+                                      size="sm"
+                                      className={`shrink-0 h-7 px-2 text-xs ${!isLinked ? "hover:border-blue-400 hover:text-blue-600" : ""}`}
+                                      disabled={isToggling || (notAnalyzed && !isLinked)}
+                                      onClick={() => handleLinkToggle(comp)}
+                                      title={notAnalyzed && !isLinked ? "File must be analyzed first for validation to work" : ""}
+                                    >
+                                      {isToggling ? (
+                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                      ) : isLinked ? (
+                                        <><Unlink className="h-3 w-3 mr-1" />Unlink</>
+                                      ) : (
+                                        <><LinkIcon className="h-3 w-3 mr-1" />Link</>
+                                      )}
+                                    </Button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </DialogContent>
