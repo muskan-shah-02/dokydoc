@@ -561,6 +561,9 @@ async def call_gemini_for_code_analysis(code_content: str) -> dict:
 
 # --- FUNCTION 3: SEMANTIC VALIDATION ENGINE (FULLY UPGRADED) ---
 
+import logging as _logging
+logger = _logging.getLogger("app.gemini_validation")
+
 class ValidationType(Enum):
     """
     Defines the specific types of validation checks the engine can perform.
