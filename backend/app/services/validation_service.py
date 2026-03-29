@@ -242,6 +242,115 @@ class ValidationService(LoggerMixin):
                     self.logger.error(f"Error validating link {link.id}: {e}", exc_info=True)
                     raise
 
+    async def generate_coverage_suggestions(
+        self, document_id: int, user_id: int, tenant_id: int
+    ) -> list:
+        """
+        Suggest additional code files to link based on existing mismatch records.
+
+        Strategy:
+        - Reads existing Mismatch records (free — already in DB)
+        - Reads unlinked CodeComponent.structured_analysis summaries (free — already in DB)
+        - One small AI call to score which unlinked files address the most gaps
+        - Returns top 3 relevant files with reasons
+        """
+        import json
+        from app.services.ai.gemini import gemini_service
+
+        async with ValidationService.get_db_session() as db:
+            try:
+                # 1. Load existing mismatches for this document
+                mismatches = db.query(models.Mismatch).filter(
+                    models.Mismatch.document_id == document_id,
+                    models.Mismatch.tenant_id == tenant_id,
+                ).limit(30).all()
+
+                if not mismatches:
+                    return []
+
+                # 2. Get IDs of already-linked code components
+                linked_ids = {
+                    link.code_component_id
+                    for link in db.query(models.DocumentCodeLink).filter(
+                        models.DocumentCodeLink.document_id == document_id,
+                    ).all()
+                }
+
+                # 3. Get analyzed, unlinked code components for this tenant
+                candidates = db.query(models.CodeComponent).filter(
+                    models.CodeComponent.tenant_id == tenant_id,
+                    models.CodeComponent.structured_analysis.isnot(None),
+                    ~models.CodeComponent.id.in_(linked_ids) if linked_ids else True,
+                ).limit(25).all()
+
+                if not candidates:
+                    return []
+
+                # 4. Build gap summary from existing mismatch records
+                gap_descriptions = [
+                    f"[{m.mismatch_type}] {m.description[:200]}"
+                    for m in mismatches
+                ]
+
+                # 5. Build compact candidate summaries (reuse stored structured_analysis)
+                candidate_summaries = []
+                for c in candidates:
+                    analysis = c.structured_analysis or {}
+                    candidate_summaries.append({
+                        "id": c.id,
+                        "name": c.name,
+                        "summary": str(
+                            analysis.get("summary", analysis.get("purpose", analysis.get("description", "")))
+                        )[:300],
+                        "functions": [
+                            str(f)[:80] for f in
+                            (analysis.get("functions", analysis.get("endpoints", analysis.get("methods", []))) or [])[:5]
+                        ],
+                    })
+
+                # 6. Single AI call to score all candidates at once
+                prompt = f"""You are a software validation expert.
+
+A document was validated against linked code files and produced these gaps:
+
+VALIDATION GAPS:
+{chr(10).join(f"- {g}" for g in gap_descriptions[:15])}
+
+CANDIDATE CODE FILES (not yet linked to this document):
+{json.dumps(candidate_summaries, indent=2)}
+
+Identify which candidate files (if any) would address the most validation gaps if linked.
+Only recommend files with genuine relevance (relevance_score >= 0.55).
+Return ONLY a JSON array of up to 3 files. If none are relevant, return [].
+
+Required format:
+[
+  {{
+    "component_id": <integer id>,
+    "component_name": "<file name>",
+    "relevance_score": <float 0.0-1.0>,
+    "reason": "<one sentence: what this file provides that fills the gaps>",
+    "gaps_addressed": ["<short gap label 1>", "<short gap label 2>"]
+  }}
+]"""
+
+                response = await gemini_service.generate_content(
+                    prompt,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    operation="coverage_suggestion",
+                )
+                text = response.text.strip().replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                if isinstance(result, list):
+                    valid_ids = {c.id for c in candidates}
+                    return [r for r in result if r.get("component_id") in valid_ids][:3]
+
+            except Exception as e:
+                self.logger.warning(f"Coverage suggestion for doc {document_id} failed: {e}")
+
+        return []
+
     async def run_jira_validation_scan(
         self,
         *,

@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -323,11 +324,15 @@ const StatusBadge = ({ status }: { status?: string }) => {
 const ManageLinksDialog = ({
   document,
   onLinksChanged,
+  suggestedIds = [],
+  autoOpen = false,
 }: {
   document: Document;
   onLinksChanged: () => void;
+  suggestedIds?: number[];
+  autoOpen?: boolean;
 }) => {
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(autoOpen);
   const [allComponents, setAllComponents] = useState<CodeComponent[]>([]);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [linkedIds, setLinkedIds] = useState<Set<number>>(new Set());
@@ -435,8 +440,22 @@ const ManageLinksDialog = ({
     group.folders.get(folder)!.push(comp);
   }
 
-  // Linked first, then alphabetical
-  const sortedGroups = [...repoGroups.values()].sort((a, b) => b.linkedCount - a.linkedCount);
+  // Within each folder, sort: suggested first, then linked, then rest
+  for (const group of repoGroups.values()) {
+    for (const [folder, files] of group.folders.entries()) {
+      group.folders.set(folder, [
+        ...files.filter((f) => suggestedIds.includes(f.id) && !linkedIds.has(f.id)),
+        ...files.filter((f) => !suggestedIds.includes(f.id) || linkedIds.has(f.id)),
+      ]);
+    }
+  }
+
+  // Repos with linked or suggested files first
+  const sortedGroups = [...repoGroups.values()].sort((a, b) => {
+    const aScore = a.linkedCount * 2 + [...a.folders.values()].flat().filter((f) => suggestedIds.includes(f.id)).length;
+    const bScore = b.linkedCount * 2 + [...b.folders.values()].flat().filter((f) => suggestedIds.includes(f.id)).length;
+    return bScore - aScore;
+  });
 
   const totalLinked = linkedIds.size;
   const totalVisible = visible.length;
@@ -464,6 +483,16 @@ const ManageLinksDialog = ({
             Linked files are used by the validation engine to detect mismatches between this document and the actual code.
           </DialogDescription>
         </DialogHeader>
+
+        {/* Suggestion hint banner */}
+        {suggestedIds.length > 0 && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+            <Sparkles className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+            <span>
+              <strong>{suggestedIds.length} file{suggestedIds.length > 1 ? "s" : ""} recommended</strong> by the validation engine are shown at the top of each folder.
+            </span>
+          </div>
+        )}
 
         {/* Controls */}
         <div className="flex gap-2 items-center">
@@ -566,6 +595,11 @@ const ManageLinksDialog = ({
                                           {comp.name}
                                         </span>
                                         <StatusBadge status={comp.analysis_status} />
+                                        {suggestedIds.includes(comp.id) && !isLinked && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 font-semibold">
+                                            ✦ Suggested
+                                          </span>
+                                        )}
                                       </div>
                                       {displayPath && displayPath !== comp.name && (
                                         <p className="text-xs text-gray-400 font-mono truncate">{displayPath}</p>
@@ -794,8 +828,13 @@ const BalanceDisplay = ({
   );
 };
 
-// --- Main Documents Page Component ---
-export default function DocumentsPage() {
+// --- Main Documents Page Component (inner, reads search params) ---
+function DocumentsPageInner() {
+  const searchParams = useSearchParams();
+  const suggestDocId = searchParams.get("suggest_doc") ? Number(searchParams.get("suggest_doc")) : null;
+  const suggestFiles = searchParams.get("suggest_files")
+    ?.split(",").map(Number).filter((n) => !isNaN(n) && n > 0) ?? [];
+
   const [documents, setDocuments] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1060,6 +1099,8 @@ export default function DocumentsPage() {
                         <ManageLinksDialog
                           document={doc}
                           onLinksChanged={fetchDocuments}
+                          suggestedIds={doc.id === suggestDocId ? suggestFiles : []}
+                          autoOpen={doc.id === suggestDocId}
                         />
 
                         {/* Delete Button */}
@@ -1097,5 +1138,14 @@ export default function DocumentsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// Suspense wrapper required for useSearchParams in Next.js App Router
+export default function DocumentsPage() {
+  return (
+    <Suspense>
+      <DocumentsPageInner />
+    </Suspense>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { API_BASE_URL } from "@/lib/api";
 import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,7 @@ import {
   CircleCheck,
   CircleDot,
   CircleX,
+  Link as LinkIcon,
 } from "lucide-react";
 import {
   Dialog,
@@ -94,7 +96,23 @@ interface Mismatch {
   code_component: { id: number; name: string };
 }
 
+interface CoverageSuggestion {
+  component_id: number;
+  component_name: string;
+  relevance_score: number;
+  reason: string;
+  gaps_addressed: string[];
+}
+
+interface DocSuggestions {
+  doc_id: number;
+  doc_name: string;
+  items: CoverageSuggestion[];
+}
+
 export default function ValidationPanelPage() {
+  const router = useRouter();
+
   // State management
   const [documents, setDocuments] = useState<Document[]>([]);
   const [filteredDocuments, setFilteredDocuments] = useState<Document[]>([]);
@@ -106,6 +124,11 @@ export default function ValidationPanelPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [activeTab, setActiveTab] = useState("select");
+
+  // Coverage suggestion state
+  const [suggestions, setSuggestions] = useState<DocSuggestions[]>([]);
+  const [dismissedDocs, setDismissedDocs] = useState<Set<number>>(new Set());
+  const [expandedMismatchTypes, setExpandedMismatchTypes] = useState<Set<string>>(new Set());
 
   // Fetch documents and mismatches
   const fetchData = useCallback(async () => {
@@ -171,6 +194,32 @@ export default function ValidationPanelPage() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const fetchSuggestions = useCallback(async (docIds: number[], currentDocs: Document[]) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token || docIds.length === 0) return;
+    try {
+      const results = await Promise.all(
+        docIds
+          .filter((id) => !dismissedDocs.has(id))
+          .map(async (docId) => {
+            const res = await fetch(`${API_BASE_URL}/validation/suggest-links`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ document_id: docId }),
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            if (!data.suggestions?.length) return null;
+            const doc = currentDocs.find((d) => d.id === docId);
+            return { doc_id: docId, doc_name: doc?.filename ?? `Doc #${docId}`, items: data.suggestions } as DocSuggestions;
+          })
+      );
+      setSuggestions(results.filter(Boolean) as DocSuggestions[]);
+    } catch {
+      // Non-critical, fail silently
+    }
+  }, [dismissedDocs]);
 
   // Filter documents based on search and status
   useEffect(() => {
@@ -269,6 +318,10 @@ export default function ValidationPanelPage() {
         }
         // Final full refresh to sync documents + mismatches
         await fetchData();
+        // Auto-expand High severity mismatch type groups
+        setExpandedMismatchTypes(new Set(["API Endpoint Missing", "Business Logic Missing", "General Consistency Check"]));
+        // Fetch coverage suggestions for scanned documents
+        await fetchSuggestions(Array.from(selectedDocs), documents);
         setIsScanning(false);
       };
       pollForResults();
@@ -739,12 +792,103 @@ export default function ValidationPanelPage() {
 
         {/* Validation Results Tab */}
         <TabsContent value="results" className="space-y-4">
+
+          {/* Coverage Suggestion Banners */}
+          {suggestions.map((suggestion) => (
+            <div
+              key={suggestion.doc_id}
+              className="border border-amber-200 bg-amber-50 rounded-lg p-4 space-y-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-amber-600 shrink-0" />
+                  <div>
+                    <p className="font-semibold text-amber-900 text-sm">
+                      Coverage Hint — {suggestion.doc_name}
+                    </p>
+                    <p className="text-xs text-amber-700 mt-0.5">
+                      Linking {suggestion.items.length} additional file{suggestion.items.length > 1 ? "s" : ""} could improve validation coverage for this document.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setDismissedDocs((prev) => new Set(prev).add(suggestion.doc_id));
+                    setSuggestions((prev) => prev.filter((s) => s.doc_id !== suggestion.doc_id));
+                  }}
+                  className="text-amber-500 hover:text-amber-700 text-xs shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+
+              {/* Suggested file cards */}
+              <div className="space-y-2">
+                {suggestion.items.map((item) => (
+                  <div
+                    key={item.component_id}
+                    className="bg-white border border-amber-100 rounded-md px-3 py-2 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Code className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                        <span className="text-sm font-medium text-gray-800">{item.component_name}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 font-medium">
+                          {Math.round(item.relevance_score * 100)}% relevant
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">{item.reason}</p>
+                      {item.gaps_addressed?.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {item.gaps_addressed.slice(0, 3).map((gap, i) => (
+                            <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+                              {gap}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Link Files button */}
+              <div className="flex gap-2 pt-1">
+                <Button
+                  size="sm"
+                  className="bg-amber-600 hover:bg-amber-700 text-white h-7 text-xs"
+                  onClick={() => {
+                    const ids = suggestion.items.map((i) => i.component_id).join(",");
+                    router.push(`/dashboard/documents?suggest_doc=${suggestion.doc_id}&suggest_files=${ids}`);
+                  }}
+                >
+                  <LinkIcon className="h-3 w-3 mr-1.5" />
+                  Link Suggested Files
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                  onClick={() => {
+                    setDismissedDocs((prev) => new Set(prev).add(suggestion.doc_id));
+                    setSuggestions((prev) => prev.filter((s) => s.doc_id !== suggestion.doc_id));
+                  }}
+                >
+                  Not now
+                </Button>
+              </div>
+            </div>
+          ))}
+
+          {/* Mismatch Report — Grouped by type */}
           <Card>
             <CardHeader>
               <CardTitle>Mismatch Report</CardTitle>
               <CardDescription>
                 {mismatches.length > 0
-                  ? `Found ${mismatches.length} potential mismatch(es) in the selected documents.`
+                  ? `Found ${mismatches.length} potential mismatch(es) across ${
+                      new Set(mismatches.map((m) => m.mismatch_type)).size
+                    } categories.`
                   : "No mismatches found. Your documents and code appear to be aligned."}
               </CardDescription>
             </CardHeader>
@@ -754,104 +898,170 @@ export default function ValidationPanelPage() {
                   <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
                   <h3 className="text-xl font-semibold">All Clear!</h3>
                   <p className="text-muted-foreground mt-2">
-                    No validation issues found. Select documents and run a new
-                    scan to re-validate.
+                    No validation issues found. Select documents and run a new scan to re-validate.
                   </p>
                 </div>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Severity</TableHead>
-                      <TableHead>Description</TableHead>
-                      <TableHead>Linked Components</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {mismatches.map((mismatch) => (
-                      <TableRow key={mismatch.id}>
-                        <TableCell>
-                          <Badge
-                            variant={getSeverityBadgeVariant(mismatch.severity)}
-                            className="flex items-center gap-1.5"
+              ) : (() => {
+                // Group mismatches by type
+                const grouped = new Map<string, Mismatch[]>();
+                for (const m of mismatches) {
+                  const key = m.mismatch_type;
+                  if (!grouped.has(key)) grouped.set(key, []);
+                  grouped.get(key)!.push(m);
+                }
+                // Sort groups: most high-severity first
+                const sortedGroups = [...grouped.entries()].sort(([, a], [, b]) => {
+                  const highA = a.filter((m) => m.severity === "High").length;
+                  const highB = b.filter((m) => m.severity === "High").length;
+                  return highB - highA;
+                });
+
+                return (
+                  <div className="space-y-3">
+                    {sortedGroups.map(([type, items]) => {
+                      const isExpanded = expandedMismatchTypes.has(type);
+                      const highCount = items.filter((m) => m.severity === "High").length;
+                      const medCount = items.filter((m) => m.severity === "Medium").length;
+                      const lowCount = items.filter((m) => m.severity === "Low").length;
+
+                      return (
+                        <div key={type} className="border rounded-lg overflow-hidden">
+                          {/* Group header */}
+                          <button
+                            className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 text-left"
+                            onClick={() => {
+                              setExpandedMismatchTypes((prev) => {
+                                const next = new Set(prev);
+                                next.has(type) ? next.delete(type) : next.add(type);
+                                return next;
+                              });
+                            }}
                           >
-                            <SeverityIcon severity={mismatch.severity} />
-                            {mismatch.severity}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <p className="font-medium">
-                            {mismatch.mismatch_type.replace(/_/g, " ")}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            {mismatch.description}
-                          </p>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center text-sm text-muted-foreground gap-2">
-                            <FileText className="w-4 h-4" />
-                            <span>{mismatch.document.name}</span>
-                          </div>
-                          <div className="flex items-center text-sm text-muted-foreground gap-2 mt-1">
-                            <Code className="w-4 h-4" />
-                            <span>{mismatch.code_component.name}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Dialog>
-                            <DialogTrigger asChild>
-                              <Button variant="outline" size="sm">
-                                <Eye className="h-3 w-3 mr-1" />
-                                View Details
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="sm:max-w-2xl">
-                              <DialogHeader>
-                                <DialogTitle>
-                                  {mismatch.mismatch_type.replace(/_/g, " ")}
-                                </DialogTitle>
-                              </DialogHeader>
-                              <div className="space-y-4 py-4 text-sm">
-                                <p>
-                                  <strong>Description:</strong>{" "}
-                                  {mismatch.description}
-                                </p>
-                                <div className="p-4 bg-muted rounded-lg space-y-3">
-                                  <div>
-                                    <h4 className="font-semibold">
-                                      Expected (from Document)
-                                    </h4>
-                                    <p className="text-muted-foreground italic">
-                                      "{mismatch.details.expected}"
-                                    </p>
-                                  </div>
-                                  <div>
-                                    <h4 className="font-semibold">
-                                      Actual (in Code)
-                                    </h4>
-                                    <p className="text-muted-foreground italic">
-                                      "{mismatch.details.actual}"
-                                    </p>
-                                  </div>
-                                </div>
-                                <div>
-                                  <h4 className="font-semibold">
-                                    Suggested Action
-                                  </h4>
-                                  <p className="text-muted-foreground">
-                                    {mismatch.details.suggested_action}
-                                  </p>
-                                </div>
+                            <div className="flex items-center gap-3">
+                              <span className="font-medium text-sm text-gray-800">
+                                {type.replace(/_/g, " ")}
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                {highCount > 0 && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">
+                                    {highCount} High
+                                  </span>
+                                )}
+                                {medCount > 0 && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-semibold">
+                                    {medCount} Med
+                                  </span>
+                                )}
+                                {lowCount > 0 && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 font-semibold">
+                                    {lowCount} Low
+                                  </span>
+                                )}
                               </div>
-                            </DialogContent>
-                          </Dialog>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-gray-400">
+                              <span>{items.length} finding{items.length !== 1 ? "s" : ""}</span>
+                              <span>{isExpanded ? "▲" : "▼"}</span>
+                            </div>
+                          </button>
+
+                          {/* Findings list */}
+                          {isExpanded && (
+                            <div className="divide-y">
+                              {items.map((mismatch) => (
+                                <div key={mismatch.id} className="px-4 py-3 hover:bg-gray-50">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                                      <Badge
+                                        variant={getSeverityBadgeVariant(mismatch.severity)}
+                                        className="shrink-0 flex items-center gap-1 mt-0.5"
+                                      >
+                                        <SeverityIcon severity={mismatch.severity} />
+                                        {mismatch.severity}
+                                      </Badge>
+                                      <div className="min-w-0">
+                                        <p className="text-sm text-gray-700 leading-snug">
+                                          {mismatch.description}
+                                        </p>
+                                        <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                                          <span className="flex items-center gap-1 text-[11px] text-gray-400">
+                                            <FileText className="w-3 h-3" />
+                                            {mismatch.document?.name ?? "—"}
+                                          </span>
+                                          <span className="flex items-center gap-1 text-[11px] text-gray-400">
+                                            <Code className="w-3 h-3" />
+                                            {mismatch.code_component?.name ?? "—"}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <Dialog>
+                                      <DialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="shrink-0 h-7 text-xs">
+                                          <Eye className="h-3 w-3 mr-1" />
+                                          Details
+                                        </Button>
+                                      </DialogTrigger>
+                                      <DialogContent className="sm:max-w-2xl">
+                                        <DialogHeader>
+                                          <DialogTitle>
+                                            {mismatch.mismatch_type.replace(/_/g, " ")}
+                                          </DialogTitle>
+                                        </DialogHeader>
+                                        <div className="space-y-4 py-4 text-sm">
+                                          <p><strong>Description:</strong> {mismatch.description}</p>
+                                          <div className="p-4 bg-muted rounded-lg space-y-3">
+                                            <div>
+                                              <h4 className="font-semibold">Expected (from Document)</h4>
+                                              <p className="text-muted-foreground italic mt-1">
+                                                "{mismatch.details?.expected ?? "N/A"}"
+                                              </p>
+                                            </div>
+                                            <div>
+                                              <h4 className="font-semibold">Actual (in Code)</h4>
+                                              <p className="text-muted-foreground italic mt-1">
+                                                "{mismatch.details?.actual ?? "N/A"}"
+                                              </p>
+                                            </div>
+                                          </div>
+                                          {mismatch.details?.evidence_document && (
+                                            <div>
+                                              <h4 className="font-semibold">Evidence from Document</h4>
+                                              <p className="text-muted-foreground text-xs mt-1 bg-blue-50 p-2 rounded">
+                                                {mismatch.details.evidence_document}
+                                              </p>
+                                            </div>
+                                          )}
+                                          {mismatch.details?.evidence_code && (
+                                            <div>
+                                              <h4 className="font-semibold">Evidence from Code</h4>
+                                              <p className="text-muted-foreground text-xs mt-1 bg-green-50 p-2 rounded font-mono">
+                                                {mismatch.details.evidence_code}
+                                              </p>
+                                            </div>
+                                          )}
+                                          {mismatch.details?.suggested_action && (
+                                            <div>
+                                              <h4 className="font-semibold">Suggested Action</h4>
+                                              <p className="text-muted-foreground mt-1">
+                                                {mismatch.details.suggested_action}
+                                              </p>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </DialogContent>
+                                    </Dialog>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </CardContent>
           </Card>
         </TabsContent>

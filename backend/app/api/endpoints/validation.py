@@ -102,6 +102,42 @@ def run_validation_scan(
     }
 
 
+class SuggestLinksRequest(BaseModel):
+    document_id: int
+
+
+@router.post("/suggest-links")
+async def suggest_additional_links(
+    payload: SuggestLinksRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    current_user: models.User = Depends(deps.get_current_user),
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    """
+    Suggest additional code files to link to a document based on existing validation gaps.
+    Reuses stored mismatch records and code component analyses — no re-analysis needed.
+    Returns up to 3 file suggestions with relevance scores and reasons.
+    """
+    logger = validation_endpoints.logger
+
+    # Verify document belongs to this tenant
+    document = crud.document.get(db=db, id=payload.document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    suggestions = await validation_service.generate_coverage_suggestions(
+        document_id=payload.document_id,
+        user_id=current_user.id,
+        tenant_id=tenant_id,
+    )
+
+    logger.info(
+        f"Coverage suggestions for doc {payload.document_id} "
+        f"(tenant={tenant_id}): {len(suggestions)} suggestions returned"
+    )
+    return {"document_id": payload.document_id, "suggestions": suggestions}
+
+
 class JiraValidationRequest(BaseModel):
     repository_id: int
     project_key: Optional[str] = None
