@@ -159,14 +159,13 @@ class ValidationService(LoggerMixin):
                         self.logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")
                         return
 
-                    # --- THE FINAL FIX IS HERE ---
-                    # The column in the AnalysisResult model is named 'result'.
-                    document_analysis_data = [res.result_data for res in doc_analysis_objects]
+                    # structured_data is the correct column name on AnalysisResult
+                    document_analysis_data = [res.structured_data for res in doc_analysis_objects if res.structured_data]
 
                     self.logger.info(f"Processing link {link.id}: Doc '{document.filename}' vs Code '{code_component.name}'")
 
                     
-                    crud.mismatch.remove_by_link(db=db, document_id=document.id, code_component_id=code_component.id)
+                    crud.mismatch.remove_by_link(db=db, document_id=document.id, code_component_id=code_component.id, tenant_id=tenant_id)
 
                     validation_passes_to_run = [
                         ValidationType.API_ENDPOINT_MISSING,
@@ -200,7 +199,8 @@ class ValidationService(LoggerMixin):
                                     db=db,
                                     obj_in=mismatch_data,
                                     link_id=link.id,
-                                    owner_id=user_id
+                                    owner_id=user_id,
+                                    tenant_id=tenant_id
                                 )
                                 self.logger.info(f"Created new mismatch for link {link.id}")
 
