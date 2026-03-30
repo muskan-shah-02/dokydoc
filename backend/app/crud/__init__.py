@@ -42,3 +42,6 @@ from .crud_approval import approval
 
 # Sprint 7: RAG/Chat Assistant
 from .crud_conversation import conversation, chat_message
+
+# Sprint 10: Atomic Validation Engine
+from .crud_requirement_atom import requirement_atom

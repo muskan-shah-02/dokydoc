@@ -19,6 +19,7 @@ from .repository import Repository  # SPRINT 3: Code Analysis Engine
 from .cross_project_mapping import CrossProjectMapping  # SPRINT 4: Cross-Project Mapping
 from .knowledge_graph_version import KnowledgeGraphVersion  # Graph versioning
 from .requirement_trace import RequirementTrace  # BRD-to-Code traceability
+from .requirement_atom import RequirementAtom  # Atomic BRD requirements for 9-pass validation
 from .audit_log import AuditLog  # Sprint 5: Audit Trail
 from .notification import Notification  # Sprint 5: Notifications
 from .approval import Approval  # Sprint 6: Approval Workflow

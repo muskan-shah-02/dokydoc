@@ -138,6 +138,26 @@ async def suggest_additional_links(
     return {"document_id": payload.document_id, "suggestions": suggestions}
 
 
+@router.get("/atom-count/{document_id}")
+def get_atom_count(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Sprint 10: Return the total number of RequirementAtoms extracted from a document.
+    Used by the frontend to compute the coverage score:
+      coverage_pct = (total_atoms - atoms_with_forward_mismatches) / total_atoms * 100
+    """
+    document = crud.document.get(db=db, id=document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    total = crud.requirement_atom.count_by_document(db, document_id=document_id)
+    return {"document_id": document_id, "total_atoms": total}
+
+
 class JiraValidationRequest(BaseModel):
     repository_id: int
     project_key: Optional[str] = None

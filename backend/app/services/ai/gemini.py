@@ -540,6 +540,319 @@ class GeminiService(LoggerMixin):
             self.logger.error(f"Error in code analysis: {e}")
             raise
 
+    async def call_gemini_for_atomization(
+        self,
+        doc_text: str,
+        tenant_id: int = None,
+        user_id: int = None,
+    ) -> list:
+        """
+        Sprint 10: BRD Atomization Pass.
+
+        Decomposes a BRD into discrete, typed requirement atoms. Each atom is exactly
+        one testable requirement. Atoms are cached per document version so this runs
+        only once per document unless the document changes.
+
+        Atom types:
+          API_CONTRACT | BUSINESS_RULE | FUNCTIONAL_REQUIREMENT | DATA_CONSTRAINT |
+          WORKFLOW_STEP | ERROR_SCENARIO | SECURITY_REQUIREMENT | NFR | INTEGRATION_POINT
+
+        Returns list of dicts: [{"atom_id": "REQ-001", "atom_type": "...", "content": "...", "criticality": "..."}]
+        """
+        prompt = f"""You are a requirements engineering expert. Decompose the following Business Requirements Document (BRD) into atomic, typed requirements.
+
+RULES:
+1. Each atom must represent exactly ONE testable requirement — not a paragraph.
+2. Assign an atom_type from this exact list:
+   API_CONTRACT | BUSINESS_RULE | FUNCTIONAL_REQUIREMENT | DATA_CONSTRAINT |
+   WORKFLOW_STEP | ERROR_SCENARIO | SECURITY_REQUIREMENT | NFR | INTEGRATION_POINT
+3. Set criticality: "critical" (must work for launch), "standard" (important), "informational" (nice to have).
+4. Keep content as the verbatim or minimally paraphrased requirement sentence.
+5. Number atoms REQ-001, REQ-002, ... in order.
+6. Extract ALL distinct requirements — aim for completeness. A 5-page BRD typically yields 30-80 atoms.
+
+Return ONLY a valid JSON array. No explanations, no markdown fences.
+
+REQUIRED FORMAT:
+[
+  {{
+    "atom_id": "REQ-001",
+    "atom_type": "API_CONTRACT",
+    "content": "POST /auth/login returns a JWT token containing user_id and role",
+    "criticality": "critical"
+  }}
+]
+
+BRD TEXT:
+{doc_text[:12000]}
+"""
+        try:
+            response = await self.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation="brd_atomization",
+            )
+            text = response.text.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            text = text.strip()
+            result = json.loads(text)
+            if isinstance(result, list):
+                valid_types = {
+                    "API_CONTRACT", "BUSINESS_RULE", "FUNCTIONAL_REQUIREMENT",
+                    "DATA_CONSTRAINT", "WORKFLOW_STEP", "ERROR_SCENARIO",
+                    "SECURITY_REQUIREMENT", "NFR", "INTEGRATION_POINT",
+                }
+                cleaned = []
+                for i, atom in enumerate(result):
+                    if not isinstance(atom, dict) or not atom.get("content"):
+                        continue
+                    atom_type = atom.get("atom_type", "FUNCTIONAL_REQUIREMENT")
+                    if atom_type not in valid_types:
+                        atom_type = "FUNCTIONAL_REQUIREMENT"
+                    cleaned.append({
+                        "atom_id": atom.get("atom_id") or f"REQ-{i+1:03d}",
+                        "atom_type": atom_type,
+                        "content": str(atom["content"])[:1000],
+                        "criticality": atom.get("criticality", "standard"),
+                    })
+                self.logger.info(f"Atomization produced {len(cleaned)} atoms")
+                return cleaned
+            return []
+        except Exception as e:
+            self.logger.error(f"BRD atomization failed: {e}", exc_info=True)
+            return []
+
+    # Atom type → focused validation instructions
+    _ATOM_TYPE_INSTRUCTIONS = {
+        "API_CONTRACT": (
+            "API CONTRACTS: For each atom, check whether the code implements the specified "
+            "HTTP endpoint with the correct method, path, authentication requirement, request "
+            "parameters, and response shape. Flag: missing endpoints, wrong HTTP method, missing "
+            "auth enforcement, wrong response structure, incorrect status codes."
+        ),
+        "BUSINESS_RULE": (
+            "BUSINESS RULES: For each atom, check whether the code implements the stated "
+            "condition, calculation, or eligibility logic. Verify all branches are covered. "
+            "Flag: missing rule, wrong formula, missing edge-case handling, incorrect conditions."
+        ),
+        "FUNCTIONAL_REQUIREMENT": (
+            "FUNCTIONAL REQUIREMENTS: For each atom, check whether the system capability "
+            "described is implemented. Flag: missing features, partial implementation, or "
+            "capabilities that exist in name only without the specified behaviour."
+        ),
+        "DATA_CONSTRAINT": (
+            "DATA CONSTRAINTS: For each atom, check whether the specified field exists with "
+            "the correct type and stated validation enforced (max length, required, regex, range). "
+            "Flag: missing fields, wrong type, absent validation, no uniqueness enforcement."
+        ),
+        "WORKFLOW_STEP": (
+            "WORKFLOW STEPS: For each atom, check whether all steps occur in the correct order "
+            "and compensating actions (rollback, cleanup) exist for failure paths. "
+            "Flag: missing steps, wrong order, no rollback, missing post-step side effects."
+        ),
+        "ERROR_SCENARIO": (
+            "ERROR SCENARIOS: For each atom, check whether the error case is handled, returns "
+            "the specified HTTP status, and produces the correct message. "
+            "Flag: unhandled error, wrong status code, missing/misleading error message."
+        ),
+        "SECURITY_REQUIREMENT": (
+            "SECURITY REQUIREMENTS: For each atom, check whether the stated auth check, RBAC "
+            "enforcement, or encryption is implemented. "
+            "Flag: missing auth decorator, absent permission check, sensitive data not masked."
+        ),
+        "NFR": (
+            "NON-FUNCTIONAL REQUIREMENTS: For each atom, check whether performance/scalability "
+            "constraints are reflected (pagination, caching, async, timeouts, retry). "
+            "Flag: no pagination on list endpoints, no timeout on external calls, blocking ops."
+        ),
+        "INTEGRATION_POINT": (
+            "INTEGRATION POINTS: For each atom, check whether the external service call is "
+            "implemented on the correct trigger and includes failure handling. "
+            "Flag: missing call, wrong trigger, no retry, missing webhook handler."
+        ),
+    }
+
+    async def call_gemini_for_typed_validation(
+        self,
+        atom_type: str,
+        atoms: list,
+        code_analysis: dict,
+        tenant_id: int = None,
+        user_id: int = None,
+    ) -> dict:
+        """
+        Sprint 10: One typed forward-pass validation.
+
+        Checks a group of same-type RequirementAtoms against the code's structured_analysis.
+        Each mismatch includes atom_local_id (REQ-001 string) which the caller resolves
+        to the DB RequirementAtom.id for the requirement_atom_id FK.
+
+        Returns {"mismatches": [...], "_cost": {...}}
+        """
+        instructions = self._ATOM_TYPE_INSTRUCTIONS.get(
+            atom_type,
+            "Check each requirement against the code and report genuine implementation gaps."
+        )
+        atoms_json = json.dumps([
+            {"atom_id": a["atom_id"], "content": a["content"], "criticality": a.get("criticality", "standard")}
+            for a in atoms
+        ], indent=2)
+
+        prompt = f"""You are a senior software architect performing a focused validation check.
+
+TASK: For each requirement atom below, determine whether the code analysis shows it is implemented.
+Flag ONLY genuine, high-confidence gaps. Do not flag things that are clearly implemented.
+
+VALIDATION FOCUS — {atom_type}:
+{instructions}
+
+Return ONLY a valid JSON array. If ALL atoms are satisfied, return [].
+
+RESPONSE FORMAT:
+[
+  {{
+    "atom_local_id": "REQ-003",
+    "mismatch_type": "{atom_type}",
+    "description": "One-sentence summary of the gap.",
+    "severity": "High",
+    "confidence": "High",
+    "details": {{
+      "expected": "What the requirement atom specifies.",
+      "actual": "What the code shows (or 'Not found').",
+      "evidence_document": "Quote from the requirement atom.",
+      "evidence_code": "Quote or reference from the code analysis.",
+      "suggested_action": "What the developer should do to fix this."
+    }}
+  }}
+]
+
+REQUIREMENT ATOMS ({atom_type}):
+{atoms_json}
+
+CODE ANALYSIS:
+{json.dumps(code_analysis, indent=2)[:5000]}
+"""
+        try:
+            response = await self.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation=f"typed_validation:{atom_type}",
+            )
+            tokens = self.extract_token_usage(response)
+            from app.services.cost_service import cost_service
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens["input_tokens"],
+                output_tokens=tokens["output_tokens"],
+                thinking_tokens=tokens["thinking_tokens"],
+            )
+            text = response.text.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            text = text.strip()
+            result = json.loads(text)
+            mismatches = result if isinstance(result, list) else []
+            self.logger.info(f"Typed validation [{atom_type}]: {len(mismatches)} mismatches")
+            return {"mismatches": mismatches, "_cost": cost_data}
+        except Exception as e:
+            self.logger.error(f"Typed validation [{atom_type}] failed: {e}", exc_info=True)
+            return {"mismatches": [], "_cost": None}
+
+    async def call_gemini_for_reverse_validation(
+        self,
+        code_analysis: dict,
+        atoms_summary: str,
+        tenant_id: int = None,
+        user_id: int = None,
+    ) -> dict:
+        """
+        Sprint 10: Reverse pass — code → doc (BA Accountability).
+
+        Finds code capabilities that have NO corresponding BRD requirement.
+        Gives the BA their report: "Your BRD doesn't cover these X capabilities."
+
+        Classifications:
+          SCOPE_CREEP         — feature built but never discussed
+          IMPLICIT_REQUIREMENT — probably intended but not written down
+          UNDOCUMENTED        — unclear origin; needs clarification
+
+        Returns {"mismatches": [...], "_cost": {...}}
+        """
+        prompt = f"""You are a BA accountability auditor reviewing code against a requirements document.
+
+TASK: Identify code capabilities that have NO corresponding BRD requirement.
+This is the REVERSE direction — you look at what was BUILT and ask "was this SPECIFIED?"
+
+BRD REQUIREMENTS SUMMARY (for reference):
+{atoms_summary[:3000]}
+
+CODE ANALYSIS:
+{json.dumps(code_analysis, indent=2)[:5000]}
+
+INSTRUCTIONS:
+- Examine every implemented endpoint, business function, integration call, and data model operation.
+- For each one, check: is there a BRD requirement that justifies this capability?
+- Only flag capabilities that are clearly undocumented — skip obvious infrastructure (logging, DB sessions, config loading, etc.).
+- Classify each finding:
+    SCOPE_CREEP         — feature built but never in the BRD
+    IMPLICIT_REQUIREMENT — probably intended but not written
+    UNDOCUMENTED        — unclear; needs clarification with BA/PM
+
+Return ONLY a valid JSON array. If all code is covered by requirements, return [].
+
+RESPONSE FORMAT:
+[
+  {{
+    "mismatch_type": "Undocumented Capability",
+    "description": "One-sentence description of the undocumented capability.",
+    "severity": "Medium",
+    "confidence": "High",
+    "details": {{
+      "expected": "No BRD requirement found for this capability.",
+      "actual": "Code implements: <what it does>.",
+      "evidence_document": "No matching requirement atom.",
+      "evidence_code": "Function/endpoint name and summary of behaviour.",
+      "suggested_action": "BA should either document this requirement or developer should remove this capability.",
+      "classification": "SCOPE_CREEP"
+    }}
+  }}
+]
+"""
+        try:
+            response = await self.generate_content(
+                prompt,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                operation="reverse_validation",
+            )
+            tokens = self.extract_token_usage(response)
+            from app.services.cost_service import cost_service
+            cost_data = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=tokens["input_tokens"],
+                output_tokens=tokens["output_tokens"],
+                thinking_tokens=tokens["thinking_tokens"],
+            )
+            text = response.text.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            text = text.strip()
+            result = json.loads(text)
+            mismatches = result if isinstance(result, list) else []
+            self.logger.info(f"Reverse validation: {len(mismatches)} undocumented capabilities")
+            return {"mismatches": mismatches, "_cost": None}
+        except Exception as e:
+            self.logger.error(f"Reverse validation failed: {e}", exc_info=True)
+            return {"mismatches": [], "_cost": None}
+
+
 # Legacy compatibility - create a global instance
 try:
     gemini_service = GeminiService()

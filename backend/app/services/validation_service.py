@@ -1,7 +1,9 @@
 # backend/app/services/validation_service.py
 
 import asyncio
+import hashlib
 import httpx
+from collections import defaultdict
 from typing import List, Optional
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
@@ -9,8 +11,10 @@ from sqlalchemy import and_
 
 from app import crud, models, schemas
 from app.db.session import SessionLocal
-# We will upgrade this function in our next step (Task 2.C)
-from app.services.ai.gemini import call_gemini_for_validation, ValidationType, ValidationContext
+from app.services.ai.gemini import (
+    call_gemini_for_validation, ValidationType, ValidationContext,
+    gemini_service,
+)
 from app.models.document_code_link import DocumentCodeLink
 from app.core.logging import LoggerMixin
 from app.core.exceptions import ValidationException, AIAnalysisException
@@ -113,21 +117,112 @@ class ValidationService(LoggerMixin):
             finally:
                 self.logger.info(f"Validation scan finished for user_id: {user_id}")
 
+    async def atomize_document(self, db, document, tenant_id: int, user_id: int) -> list:
+        """
+        Sprint 10: BRD Atomization.
+
+        Decomposes a document's text into typed RequirementAtoms — one-time per document
+        version. Results are stored in the `requirement_atoms` table and returned from
+        cache on subsequent calls (no AI cost when document hasn't changed).
+
+        Cache key: (document_id, document.version)
+        Source text: document.raw_text (capped at 12,000 chars), falls back to
+                     structured_analysis summaries from AnalysisResult rows.
+
+        Returns a list of RequirementAtom ORM objects.
+        """
+        if not gemini_service:
+            self.logger.warning("GeminiService not available — skipping atomization")
+            return []
+
+        doc_version = getattr(document, "version", None) or "1.0"
+
+        # Check cache: atoms already stored for this (document_id, version)?
+        cached = crud.requirement_atom.get_by_document_version(
+            db, document_id=document.id, document_version=doc_version
+        )
+        if cached:
+            self.logger.info(
+                f"Using {len(cached)} cached atoms for doc {document.id} v{doc_version}"
+            )
+            return cached
+
+        # Build source text for atomization
+        doc_text = ""
+        raw = getattr(document, "raw_text", None) or ""
+        if raw and len(raw) >= 200:
+            doc_text = raw[:12000]
+        else:
+            # Fallback: synthesise from AnalysisResult.structured_data fields
+            try:
+                analysis_rows = crud.analysis_result.get_multi_by_document(
+                    db=db, document_id=document.id
+                )
+                parts = []
+                for row in (analysis_rows or []):
+                    sd = row.structured_data or {}
+                    for key in ("summary", "key_requirements", "business_rules",
+                                "api_contracts", "data_models", "purpose"):
+                        val = sd.get(key)
+                        if isinstance(val, list):
+                            parts.extend(str(v)[:300] for v in val[:10])
+                        elif isinstance(val, str) and val:
+                            parts.append(val[:500])
+                doc_text = "\n".join(parts)[:12000]
+            except Exception as e:
+                self.logger.warning(f"Could not build doc text from analysis rows: {e}")
+
+        if not doc_text or len(doc_text) < 50:
+            self.logger.warning(
+                f"Document {document.id} has insufficient text for atomization "
+                f"(raw_text length: {len(raw)}, fallback length: {len(doc_text)})"
+            )
+            return []
+
+        self.logger.info(
+            f"Atomizing document {document.id} '{document.filename}' "
+            f"({len(doc_text)} chars) — version {doc_version}"
+        )
+
+        atoms_data = await gemini_service.call_gemini_for_atomization(
+            doc_text, tenant_id=tenant_id, user_id=user_id
+        )
+
+        if not atoms_data:
+            self.logger.warning(f"Atomization returned 0 atoms for doc {document.id}")
+            return []
+
+        # Delete any stale atoms for this document (different version) then bulk-insert
+        crud.requirement_atom.delete_by_document(db, document_id=document.id)
+        new_atoms = crud.requirement_atom.create_atoms_bulk(
+            db,
+            tenant_id=tenant_id,
+            document_id=document.id,
+            document_version=doc_version,
+            atoms_data=atoms_data,
+        )
+        self.logger.info(
+            f"Stored {len(new_atoms)} RequirementAtoms for doc {document.id}"
+        )
+        return new_atoms
+
     async def validate_single_link(self, link: DocumentCodeLink, user_id: int, tenant_id: int = None):
         """
-        Validate a single document-code link.
+        Sprint 10: Full 9-pass atomic validation engine.
 
-        SPRINT 2 Phase 6: Added tenant_id for multi-tenancy isolation.
+        Pass structure:
+          Forward passes (1–8): One AI call per RequirementAtom type present in the BRD.
+            Each call checks atoms of that specific type against the code's structured_analysis.
+            Mismatches stored with direction="forward" and requirement_atom_id FK.
+          Reverse pass (9): One AI call asking "what did the developer build that the BA never specified?"
+            Mismatches stored with direction="reverse" and details.classification set.
 
-        Args:
-            link: DocumentCodeLink to validate
-            user_id: User ID who owns the link
-            tenant_id: Tenant ID for isolation (SPRINT 2)
+        Falls back to legacy 3-pass engine if atomization yields 0 atoms.
         """
         async with GEMINI_API_SEMAPHORE:
             async with ValidationService.get_db_session() as db:
                 try:
-                    # SPRINT 2 Phase 6: Filter by tenant_id
+                    # ── Load document and code component ──────────────────────────────
                     doc_filters = [models.Document.id == link.document_id]
                     if tenant_id:
                         doc_filters.append(models.Document.tenant_id == tenant_id)
@@ -145,98 +240,211 @@ class ValidationService(LoggerMixin):
                         )
                         return
 
-                    # SPRINT 2 Phase 6: Pass tenant_id to CRUD
-                    if tenant_id:
-                        doc_analysis_objects = crud.analysis_result.get_multi_by_document(
-                            db=db, document_id=document.id, tenant_id=tenant_id
+                    if not code_component.structured_analysis:
+                        self.logger.warning(
+                            f"Skipping link {link.id}: code component not yet analyzed"
                         )
+                        return
+
+                    self.logger.info(
+                        f"[Link {link.id}] Validating: '{document.filename}' vs '{code_component.name}'"
+                    )
+
+                    # ── Step 1: Atomize document (cached or fresh) ────────────────────
+                    atoms = await self.atomize_document(db, document, tenant_id, user_id)
+
+                    # ── Step 2: Clear old mismatches for this link ────────────────────
+                    crud.mismatch.remove_by_link(
+                        db=db,
+                        document_id=document.id,
+                        code_component_id=code_component.id,
+                        tenant_id=tenant_id,
+                    )
+
+                    code_analysis = code_component.structured_analysis
+                    total_cost_inr = 0.0
+                    total_cost_usd = 0.0
+
+                    if atoms:
+                        # ── Step 3: Group atoms by type ───────────────────────────────
+                        # Build atom_id (REQ-001) → DB id map for FK resolution
+                        atom_id_to_db_id = {a.atom_id: a.id for a in atoms}
+                        # Build plain dicts for passing to AI (ORM objects aren't serialisable)
+                        atoms_by_type: dict[str, list] = defaultdict(list)
+                        for atom in atoms:
+                            atoms_by_type[atom.atom_type].append({
+                                "atom_id": atom.atom_id,
+                                "content": atom.content,
+                                "criticality": atom.criticality,
+                            })
+
+                        self.logger.info(
+                            f"[Link {link.id}] {len(atoms)} atoms across "
+                            f"{len(atoms_by_type)} types: {list(atoms_by_type.keys())}"
+                        )
+
+                        # ── Step 4: Run all typed forward passes in parallel ──────────
+                        if gemini_service:
+                            forward_tasks = [
+                                gemini_service.call_gemini_for_typed_validation(
+                                    atom_type=atype,
+                                    atoms=atype_atoms,
+                                    code_analysis=code_analysis,
+                                    tenant_id=tenant_id,
+                                    user_id=user_id,
+                                )
+                                for atype, atype_atoms in atoms_by_type.items()
+                            ]
+                            forward_results = await asyncio.gather(
+                                *forward_tasks, return_exceptions=True
+                            )
+
+                            for result in forward_results:
+                                if isinstance(result, Exception):
+                                    self.logger.error(
+                                        f"[Link {link.id}] Forward pass error: {result}"
+                                    )
+                                    continue
+
+                                mismatches = result.get("mismatches", [])
+                                for m in mismatches:
+                                    # Resolve atom_local_id → DB id
+                                    local_id = m.pop("atom_local_id", None)
+                                    db_atom_id = atom_id_to_db_id.get(local_id) if local_id else None
+
+                                    try:
+                                        crud.mismatch.create_with_link(
+                                            db=db,
+                                            obj_in={
+                                                **m,
+                                                "direction": "forward",
+                                                "requirement_atom_id": db_atom_id,
+                                            },
+                                            link_id=link.id,
+                                            owner_id=user_id,
+                                            tenant_id=tenant_id,
+                                        )
+                                    except Exception as store_err:
+                                        self.logger.warning(
+                                            f"[Link {link.id}] Could not store forward mismatch: {store_err}"
+                                        )
+
+                                cost_info = result.get("_cost") or {}
+                                total_cost_inr += cost_info.get("cost_inr", 0)
+                                total_cost_usd += cost_info.get("cost_usd", 0)
+
+                        # ── Step 5: Build atoms summary for reverse pass ──────────────
+                        atoms_summary_lines = [
+                            f"[{a.atom_type}] {a.atom_id}: {a.content[:150]}"
+                            for a in atoms
+                        ]
+                        atoms_summary = "\n".join(atoms_summary_lines)
+
+                        # ── Step 6: Run reverse pass ──────────────────────────────────
+                        if gemini_service:
+                            reverse_result = await gemini_service.call_gemini_for_reverse_validation(
+                                code_analysis=code_analysis,
+                                atoms_summary=atoms_summary,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                            )
+                            for m in reverse_result.get("mismatches", []):
+                                try:
+                                    crud.mismatch.create_with_link(
+                                        db=db,
+                                        obj_in={**m, "direction": "reverse"},
+                                        link_id=link.id,
+                                        owner_id=user_id,
+                                        tenant_id=tenant_id,
+                                    )
+                                except Exception as store_err:
+                                    self.logger.warning(
+                                        f"[Link {link.id}] Could not store reverse mismatch: {store_err}"
+                                    )
+
+                            rev_cost = (reverse_result.get("_cost") or {})
+                            total_cost_inr += rev_cost.get("cost_inr", 0)
+                            total_cost_usd += rev_cost.get("cost_usd", 0)
+
                     else:
+                        # ── Fallback: legacy 3-pass engine when atomization yields 0 atoms ──
+                        self.logger.warning(
+                            f"[Link {link.id}] Atomization yielded 0 atoms — "
+                            "falling back to legacy 3-pass engine"
+                        )
                         doc_analysis_objects = crud.analysis_result.get_multi_by_document(
                             db=db, document_id=document.id
                         )
+                        document_analysis_data = [
+                            res.structured_data for res in (doc_analysis_objects or [])
+                            if res.structured_data
+                        ]
 
-                    if not doc_analysis_objects or not code_component.structured_analysis:
-                        self.logger.warning(f"Skipping link {link.id}: Document or Code Component has not been fully analyzed yet.")
-                        return
-
-                    # structured_data is the correct column name on AnalysisResult
-                    document_analysis_data = [res.structured_data for res in doc_analysis_objects if res.structured_data]
-
-                    self.logger.info(f"Processing link {link.id}: Doc '{document.filename}' vs Code '{code_component.name}'")
-
-                    
-                    crud.mismatch.remove_by_link(db=db, document_id=document.id, code_component_id=code_component.id, tenant_id=tenant_id)
-
-                    validation_passes_to_run = [
-                        ValidationType.API_ENDPOINT_MISSING,
-                        ValidationType.BUSINESS_LOGIC_MISSING,
-                        ValidationType.GENERAL_CONSISTENCY,
-                    ]
-
-                    ai_tasks = []
-                    for check_type in validation_passes_to_run:
-                        context = ValidationContext(
-                            focus_area=check_type,
-                            document_analysis=document_analysis_data,
-                            code_analysis=code_component.structured_analysis,
-                        )
-                        ai_tasks.append(call_gemini_for_validation(context))
-
-                    validation_results = await asyncio.gather(*ai_tasks)
-
-                    # Aggregate validation costs for billing
-                    total_val_cost_inr = 0
-                    total_val_cost_usd = 0
-                    total_val_input_tokens = 0
-                    total_val_output_tokens = 0
-
-                    for result in validation_results:
-                        # call_gemini_for_validation returns dict with "mismatches" and "_cost"
-                        mismatches = result.get("mismatches", []) if isinstance(result, dict) else (result or [])
-                        if mismatches:
-                            for mismatch_data in mismatches:
-                                crud.mismatch.create_with_link(
-                                    db=db,
-                                    obj_in=mismatch_data,
-                                    link_id=link.id,
-                                    owner_id=user_id,
-                                    tenant_id=tenant_id
+                        if document_analysis_data:
+                            legacy_tasks = [
+                                call_gemini_for_validation(
+                                    ValidationContext(
+                                        focus_area=vtype,
+                                        document_analysis=document_analysis_data,
+                                        code_analysis=code_analysis,
+                                    )
                                 )
-                                self.logger.info(f"Created new mismatch for link {link.id}")
+                                for vtype in [
+                                    ValidationType.API_ENDPOINT_MISSING,
+                                    ValidationType.BUSINESS_LOGIC_MISSING,
+                                    ValidationType.GENERAL_CONSISTENCY,
+                                ]
+                            ]
+                            legacy_results = await asyncio.gather(
+                                *legacy_tasks, return_exceptions=True
+                            )
+                            for result in legacy_results:
+                                if isinstance(result, Exception):
+                                    continue
+                                for m in result.get("mismatches", []):
+                                    try:
+                                        crud.mismatch.create_with_link(
+                                            db=db,
+                                            obj_in={**m, "direction": "forward"},
+                                            link_id=link.id,
+                                            owner_id=user_id,
+                                            tenant_id=tenant_id,
+                                        )
+                                    except Exception:
+                                        pass
+                                cost_info = result.get("_cost") or {}
+                                total_cost_inr += cost_info.get("cost_inr", 0)
+                                total_cost_usd += cost_info.get("cost_usd", 0)
 
-                        # Accumulate cost from each validation pass
-                        if isinstance(result, dict):
-                            cost_info = result.get("_cost")
-                            if cost_info:
-                                total_val_cost_inr += cost_info.get("cost_inr", 0)
-                                total_val_cost_usd += cost_info.get("cost_usd", 0)
-                                total_val_input_tokens += cost_info.get("input_tokens", 0)
-                                total_val_output_tokens += cost_info.get("output_tokens", 0) + cost_info.get("thinking_tokens", 0)
-
-                    # Deduct and log validation costs
-                    if total_val_cost_inr > 0:
+                    # ── Step 7: Log billing ───────────────────────────────────────────
+                    if total_cost_inr > 0:
                         try:
                             from app.services.billing_enforcement_service import billing_enforcement_service
                             billing_enforcement_service.deduct_cost(
-                                db=db, tenant_id=tenant_id, cost_inr=total_val_cost_inr,
-                                description=f"Validation: {document.filename if document else 'unknown'}"
+                                db=db, tenant_id=tenant_id, cost_inr=total_cost_inr,
+                                description=f"Validation: {document.filename}",
                             )
                         except Exception as billing_err:
-                            self.logger.warning(f"Validation billing deduction failed (non-critical): {billing_err}")
+                            self.logger.warning(f"Billing deduction failed (non-critical): {billing_err}")
 
                         try:
                             crud.usage_log.log_usage(
                                 db=db, tenant_id=tenant_id, user_id=user_id,
                                 feature_type="validation",
-                                operation="semantic_validation",
+                                operation="atomic_validation",
                                 model_used="gemini-2.5-flash",
-                                input_tokens=total_val_input_tokens,
-                                output_tokens=total_val_output_tokens,
-                                cost_usd=total_val_cost_usd,
-                                cost_inr=total_val_cost_inr,
+                                input_tokens=0,
+                                output_tokens=0,
+                                cost_usd=total_cost_usd,
+                                cost_inr=total_cost_inr,
                             )
                         except Exception as log_err:
-                            self.logger.warning(f"Validation usage logging failed (non-critical): {log_err}")
+                            self.logger.warning(f"Usage logging failed (non-critical): {log_err}")
+
+                    self.logger.info(
+                        f"[Link {link.id}] Validation complete. "
+                        f"Atoms: {len(atoms)}, Cost: ₹{total_cost_inr:.4f}"
+                    )
 
                 except Exception as e:
                     self.logger.error(f"Error validating link {link.id}: {e}", exc_info=True)

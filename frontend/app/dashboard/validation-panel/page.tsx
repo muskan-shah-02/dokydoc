@@ -82,6 +82,7 @@ interface MismatchDetails {
   evidence_document: string;
   evidence_code: string;
   suggested_action: string;
+  classification?: "SCOPE_CREEP" | "IMPLICIT_REQUIREMENT" | "UNDOCUMENTED";
 }
 
 interface Mismatch {
@@ -92,6 +93,8 @@ interface Mismatch {
   confidence: "High" | "Medium" | "Low";
   status: string;
   details: MismatchDetails;
+  direction?: "forward" | "reverse";
+  requirement_atom_id?: number | null;
   document: { id: number; name: string };
   code_component: { id: number; name: string };
 }
@@ -129,6 +132,12 @@ export default function ValidationPanelPage() {
   const [suggestions, setSuggestions] = useState<DocSuggestions[]>([]);
   const [dismissedDocs, setDismissedDocs] = useState<Set<number>>(new Set());
   const [expandedMismatchTypes, setExpandedMismatchTypes] = useState<Set<string>>(new Set());
+
+  // Two-sided report: "developer" (forward mismatches) or "ba" (reverse mismatches)
+  const [reportSide, setReportSide] = useState<"developer" | "ba">("developer");
+
+  // Atom counts per document for coverage score (document_id → total_atoms)
+  const [atomCounts, setAtomCounts] = useState<Record<number, number>>({});
 
   // Fetch documents and mismatches
   const fetchData = useCallback(async () => {
@@ -220,6 +229,30 @@ export default function ValidationPanelPage() {
       // Non-critical, fail silently
     }
   }, [dismissedDocs]);
+
+  const fetchAtomCounts = useCallback(async (docIds: number[]) => {
+    const token = localStorage.getItem("accessToken");
+    if (!token || docIds.length === 0) return;
+    try {
+      const results = await Promise.all(
+        docIds.map(async (docId) => {
+          const res = await fetch(`${API_BASE_URL}/validation/atom-count/${docId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) return null;
+          const data = await res.json();
+          return { docId, total: data.total_atoms ?? 0 };
+        })
+      );
+      const counts: Record<number, number> = {};
+      for (const r of results) {
+        if (r) counts[r.docId] = r.total;
+      }
+      setAtomCounts((prev) => ({ ...prev, ...counts }));
+    } catch {
+      // Non-critical
+    }
+  }, []);
 
   // Filter documents based on search and status
   useEffect(() => {
@@ -320,8 +353,9 @@ export default function ValidationPanelPage() {
         await fetchData();
         // Auto-expand High severity mismatch type groups
         setExpandedMismatchTypes(new Set(["API Endpoint Missing", "Business Logic Missing", "General Consistency Check"]));
-        // Fetch coverage suggestions for scanned documents
+        // Fetch coverage suggestions and atom counts for scanned documents
         await fetchSuggestions(Array.from(selectedDocs), documents);
+        await fetchAtomCounts(Array.from(selectedDocs));
         setIsScanning(false);
       };
       pollForResults();
@@ -880,31 +914,134 @@ export default function ValidationPanelPage() {
             </div>
           ))}
 
+          {/* Two-sided Report Card */}
+          {mismatches.length > 0 && (() => {
+            const forwardMismatches = mismatches.filter((m) => m.direction !== "reverse");
+            const reverseMismatches = mismatches.filter((m) => m.direction === "reverse");
+            // Coverage score: how many documents have atomisation data?
+            const totalAtoms = Object.values(atomCounts).reduce((s, n) => s + n, 0);
+            const atomsWithGaps = new Set(
+              forwardMismatches.filter((m) => m.requirement_atom_id).map((m) => m.requirement_atom_id)
+            ).size;
+            const coveragePct = totalAtoms > 0
+              ? Math.round(((totalAtoms - atomsWithGaps) / totalAtoms) * 100)
+              : null;
+
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-2">
+                {/* Developer Accountability score */}
+                <div className="border border-red-200 bg-red-50 rounded-lg px-4 py-3 flex items-center gap-3">
+                  <XCircle className="h-8 w-8 text-red-500 shrink-0" />
+                  <div>
+                    <p className="text-xs text-red-700 font-medium">Developer Gaps</p>
+                    <p className="text-2xl font-bold text-red-900">{forwardMismatches.length}</p>
+                    <p className="text-[10px] text-red-600">requirements not implemented</p>
+                  </div>
+                </div>
+                {/* Coverage score */}
+                {coveragePct !== null && (
+                  <div className="border border-green-200 bg-green-50 rounded-lg px-4 py-3 flex items-center gap-3">
+                    <CircleCheck className="h-8 w-8 text-green-500 shrink-0" />
+                    <div>
+                      <p className="text-xs text-green-700 font-medium">BRD Coverage</p>
+                      <p className="text-2xl font-bold text-green-900">{coveragePct}%</p>
+                      <p className="text-[10px] text-green-600">{totalAtoms - atomsWithGaps}/{totalAtoms} atoms satisfied</p>
+                    </div>
+                  </div>
+                )}
+                {/* BA Accountability score */}
+                <div className="border border-amber-200 bg-amber-50 rounded-lg px-4 py-3 flex items-center gap-3">
+                  <AlertTriangle className="h-8 w-8 text-amber-500 shrink-0" />
+                  <div>
+                    <p className="text-xs text-amber-700 font-medium">BRD Gaps (BA)</p>
+                    <p className="text-2xl font-bold text-amber-900">{reverseMismatches.length}</p>
+                    <p className="text-[10px] text-amber-600">undocumented capabilities</p>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Report side selector */}
+          {mismatches.length > 0 && (
+            <div className="flex gap-2 mb-2">
+              <button
+                onClick={() => setReportSide("developer")}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                  reportSide === "developer"
+                    ? "bg-red-100 text-red-800 border border-red-300"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                Developer Accountability
+                <span className="ml-2 text-xs font-bold">
+                  ({mismatches.filter((m) => m.direction !== "reverse").length})
+                </span>
+              </button>
+              <button
+                onClick={() => setReportSide("ba")}
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                  reportSide === "ba"
+                    ? "bg-amber-100 text-amber-800 border border-amber-300"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                BA Accountability
+                <span className="ml-2 text-xs font-bold">
+                  ({mismatches.filter((m) => m.direction === "reverse").length})
+                </span>
+              </button>
+            </div>
+          )}
+
           {/* Mismatch Report — Grouped by type */}
           <Card>
             <CardHeader>
-              <CardTitle>Mismatch Report</CardTitle>
+              <CardTitle>
+                {reportSide === "developer" ? "Developer Accountability — Requirement Gaps" : "BA Accountability — Undocumented Capabilities"}
+              </CardTitle>
               <CardDescription>
-                {mismatches.length > 0
-                  ? `Found ${mismatches.length} potential mismatch(es) across ${
-                      new Set(mismatches.map((m) => m.mismatch_type)).size
-                    } categories.`
-                  : "No mismatches found. Your documents and code appear to be aligned."}
+                {reportSide === "developer"
+                  ? (() => {
+                      const fwd = mismatches.filter((m) => m.direction !== "reverse");
+                      return fwd.length > 0
+                        ? `${fwd.length} BRD requirement(s) not fully implemented across ${new Set(fwd.map((m) => m.mismatch_type)).size} categories.`
+                        : "All documented requirements appear to be implemented.";
+                    })()
+                  : (() => {
+                      const rev = mismatches.filter((m) => m.direction === "reverse");
+                      return rev.length > 0
+                        ? `${rev.length} code capability/capabilities have no corresponding BRD requirement. BA should review.`
+                        : "All code capabilities have corresponding BRD requirements.";
+                    })()
+                }
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {mismatches.length === 0 ? (
+              {(() => {
+                const visible = reportSide === "developer"
+                  ? mismatches.filter((m) => m.direction !== "reverse")
+                  : mismatches.filter((m) => m.direction === "reverse");
+                return visible.length === 0;
+              })() ? (
                 <div className="text-center py-12">
                   <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
                   <h3 className="text-xl font-semibold">All Clear!</h3>
                   <p className="text-muted-foreground mt-2">
-                    No validation issues found. Select documents and run a new scan to re-validate.
+                    {reportSide === "developer"
+                      ? "No validation issues found. Select documents and run a new scan to re-validate."
+                      : "No undocumented capabilities found. Your BRD covers all implemented code."}
                   </p>
                 </div>
               ) : (() => {
+                // Filter by active report side
+                const visibleMismatches = reportSide === "developer"
+                  ? mismatches.filter((m) => m.direction !== "reverse")
+                  : mismatches.filter((m) => m.direction === "reverse");
+
                 // Group mismatches by type
                 const grouped = new Map<string, Mismatch[]>();
-                for (const m of mismatches) {
+                for (const m of visibleMismatches) {
                   const key = m.mismatch_type;
                   if (!grouped.has(key)) grouped.set(key, []);
                   grouped.get(key)!.push(m);
@@ -992,6 +1129,22 @@ export default function ValidationPanelPage() {
                                             <Code className="w-3 h-3" />
                                             {mismatch.code_component?.name ?? "—"}
                                           </span>
+                                          {mismatch.direction === "reverse" && mismatch.details?.classification && (
+                                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+                                              mismatch.details.classification === "SCOPE_CREEP"
+                                                ? "bg-red-100 text-red-700"
+                                                : mismatch.details.classification === "IMPLICIT_REQUIREMENT"
+                                                ? "bg-blue-100 text-blue-700"
+                                                : "bg-gray-100 text-gray-600"
+                                            }`}>
+                                              {mismatch.details.classification.replace(/_/g, " ")}
+                                            </span>
+                                          )}
+                                          {mismatch.requirement_atom_id && (
+                                            <span className="text-[10px] text-purple-600 font-mono">
+                                              atom #{mismatch.requirement_atom_id}
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
