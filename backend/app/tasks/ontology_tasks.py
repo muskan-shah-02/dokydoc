@@ -81,11 +81,17 @@ def extract_ontology_entities(self, document_id: int, tenant_id: int):
 @celery_app.task(name="extract_code_ontology_entities", bind=True, max_retries=2)
 def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
     """
-    Celery task: Trigger cross-graph mapping after code analysis completes.
+    Celery task: Build cross-file import/call graph + trigger cross-graph mapping.
 
-    Code knowledge graphs are now built DURING analysis (in code_analysis_service
-    _extract_ontology_from_analysis) so this task only needs to trigger the
-    algorithmic mapping between document and code graphs. Zero AI cost.
+    Phase 1 (per-component concept extraction) already runs DURING analysis in
+    code_analysis_service._extract_ontology_from_analysis with source_component_id set.
+
+    Phase 2 (THIS TASK): Build cross-file IMPORTS/CALLS relationships between component
+    concepts using the internal_imports field from structured_analysis. This is what
+    powers the bidirectional egocentric graph navigation — "what does this file import?"
+    and "what imports this file?" become traversable graph edges.
+
+    Phase 3: Trigger algorithmic cross-graph mapping (document↔code). Zero AI cost.
     """
     logger.info(f"CODE_ONTOLOGY_TASK started for repo_id: {repo_id}, tenant_id: {tenant_id}")
 
@@ -103,13 +109,43 @@ def extract_code_ontology_entities(self, repo_id: int, tenant_id: int):
             )
             return
 
-        # Graphs are already built during code analysis.
-        # Just trigger cross-graph mapping (algorithmic, not AI).
+        # Phase 2: Build cross-file import/call relationships for each component
+        # This enriches concepts already created during per-file analysis with
+        # IMPORTS edges that link file concepts to the files they import.
+        try:
+            from app.models.code_component import CodeComponent
+            components = db.query(CodeComponent).filter(
+                CodeComponent.repository_id == repo_id,
+                CodeComponent.tenant_id == tenant_id,
+                CodeComponent.analysis_status == "completed",
+                CodeComponent.structured_analysis.isnot(None),
+            ).all()
+
+            total_entities = 0
+            total_rels = 0
+            for comp in components:
+                try:
+                    result = business_ontology_service.build_graph_from_code_component(
+                        db=db, component_id=comp.id, tenant_id=tenant_id
+                    )
+                    total_entities += result.get("entities_created", 0)
+                    total_rels += result.get("relationships_created", 0)
+                except Exception as comp_err:
+                    logger.warning(f"Cross-file graph build failed for component {comp.id}: {comp_err}")
+
+            logger.info(
+                f"CODE_ONTOLOGY_TASK: Built cross-file graph for repo {repo_id}: "
+                f"{total_entities} new concepts + {total_rels} import/call edges across "
+                f"{len(components)} components"
+            )
+        except Exception as phase2_err:
+            logger.warning(f"Cross-file graph phase 2 failed (non-critical): {phase2_err}")
+
+        # Phase 3: Trigger cross-graph mapping (algorithmic, not AI).
         try:
             run_cross_graph_mapping.delay(tenant_id)
             logger.info(
-                f"CODE_ONTOLOGY_TASK: Dispatched cross-graph mapping for tenant {tenant_id} "
-                f"(code graphs already built during analysis)"
+                f"CODE_ONTOLOGY_TASK: Dispatched cross-graph mapping for tenant {tenant_id}"
             )
         except Exception as map_err:
             logger.warning(f"Failed to dispatch mapping task (non-critical): {map_err}")

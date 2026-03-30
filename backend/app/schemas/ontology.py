@@ -82,6 +82,12 @@ class OntologyGraphNode(BaseModel):
     source_type: str = "document"
     initiative_id: Optional[int] = None
     confidence_score: Optional[float] = None
+    # Artifact navigation fields — populated by subgraph endpoints
+    source_component_id: Optional[int] = None      # FK to code_components.id
+    source_document_id: Optional[int] = None       # FK to documents.id
+    source_artifact_name: Optional[str] = None     # Human-readable name (filename/doc title)
+    source_artifact_location: Optional[str] = None # File path for code components
+    is_home: Optional[bool] = None                 # True = from the focal artifact; False = neighbor
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,6 +98,7 @@ class OntologyGraphEdge(BaseModel):
     target_concept_id: int
     relationship_type: str
     confidence_score: Optional[float] = None
+    description: Optional[str] = None             # Edge label / reasoning
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -101,6 +108,21 @@ class OntologyGraphResponse(BaseModel):
     edges: List[OntologyGraphEdge]
     total_nodes: int
     total_edges: int
+
+
+class EgocentricGraphResponse(OntologyGraphResponse):
+    """
+    Egocentric (ego-network) graph centered on a single artifact.
+    Home nodes = concepts extracted FROM the focal artifact.
+    Neighbor nodes = concepts from OTHER artifacts that home concepts link to/from.
+    """
+    focal_component_id: Optional[int] = None
+    focal_document_id: Optional[int] = None
+    focal_artifact_name: Optional[str] = None
+    home_node_count: int = 0
+    neighbor_node_count: int = 0
+    # List of distinct artifact summaries that connect to this one
+    connected_artifacts: List[dict] = []
 
 
 # --- Branch Preview Schemas (Sprint 4 Phase 4) ---

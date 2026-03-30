@@ -843,6 +843,229 @@ class BusinessOntologyService(LoggerMixin):
             "thinking_tokens": tokens['thinking_tokens'],
         }
 
+    def build_graph_from_code_component(
+        self, db: Session, *, component_id: int, tenant_id: int
+    ) -> Dict:
+        """
+        Programmatic graph builder for a SINGLE code component — NO AI call.
+
+        Reads CodeComponent.structured_analysis and creates:
+        1. A root concept for the component file itself
+        2. Concepts for each public API element (functions, classes, endpoints)
+        3. Concepts for domain terms found in the code
+        4. IMPORTS/CALLS relationships to OTHER components in the same repository
+           (matched by location path against internal_imports list)
+
+        This is the key method that enables the bidirectional navigation graph:
+        when component A imports component B, an IMPORTS edge is created between
+        their concepts. The egocentric graph endpoint then surfaces both directions.
+
+        Sets source_component_id on ALL concepts created from this component.
+        """
+        from app.models.code_component import CodeComponent
+
+        component = db.query(CodeComponent).filter(
+            CodeComponent.id == component_id,
+            CodeComponent.tenant_id == tenant_id,
+        ).first()
+
+        if not component or not component.structured_analysis:
+            return {"entities_created": 0, "relationships_created": 0}
+
+        sa = component.structured_analysis
+        if not isinstance(sa, dict):
+            return {"entities_created": 0, "relationships_created": 0}
+
+        initiative_id = self._resolve_initiative_for_repository(
+            db=db, repo_id=component.repository_id, tenant_id=tenant_id
+        )
+
+        entities_created = 0
+        relationships_created = 0
+        concept_map: Dict = {}  # name.lower() -> OntologyConcept
+
+        def _ensure_comp_concept(name: str, concept_type: str, description: str = None,
+                                 confidence: float = 0.8):
+            nonlocal entities_created
+            name = (name or "").strip()
+            if not name or len(name) < 2:
+                return None
+            key = name.lower()
+            if key in concept_map:
+                return concept_map[key]
+            concept = crud.ontology_concept.get_or_create(
+                db=db, name=name, concept_type=concept_type,
+                tenant_id=tenant_id,
+                description=description[:500] if description else None,
+                confidence_score=confidence,
+                source_type="code",
+                initiative_id=initiative_id,
+                source_component_id=component_id,
+            )
+            concept_map[key] = concept
+            entities_created += 1
+            return concept
+
+        def _ensure_comp_rel(src_concept, tgt_concept, rel_type: str,
+                             description: str = None, confidence: float = 0.8):
+            nonlocal relationships_created
+            if not src_concept or not tgt_concept or src_concept.id == tgt_concept.id:
+                return
+            link = self.link_concepts(
+                db=db,
+                source_id=src_concept.id,
+                target_id=tgt_concept.id,
+                relationship_type=rel_type,
+                tenant_id=tenant_id,
+                description=description[:300] if description else None,
+                confidence_score=confidence,
+            )
+            if link:
+                relationships_created += 1
+
+        # Root concept: the file itself
+        file_concept_name = component.name or f"component_{component_id}"
+        file_concept = _ensure_comp_concept(
+            file_concept_name,
+            "Service",
+            description=component.summary or f"Code file: {component.location}",
+            confidence=0.9,
+        )
+
+        # Public API elements (functions, classes, endpoints)
+        for api_elem in sa.get("public_api", []):
+            if not isinstance(api_elem, dict):
+                continue
+            elem_name = api_elem.get("name", "")
+            elem_type = api_elem.get("type", "Function")
+            elem_purpose = api_elem.get("purpose", "")
+            if not elem_name:
+                continue
+            concept_type = "Service" if elem_type in ("Endpoint", "Class") else "Process"
+            elem_concept = _ensure_comp_concept(
+                elem_name, concept_type,
+                description=elem_purpose, confidence=0.85,
+            )
+            if elem_concept and file_concept:
+                _ensure_comp_rel(file_concept, elem_concept, "contains",
+                                 description=f"{elem_type}: {elem_purpose[:200]}")
+
+        # Components / methods
+        for comp_elem in sa.get("components", []):
+            if not isinstance(comp_elem, dict):
+                continue
+            elem_name = comp_elem.get("name", "")
+            elem_type = comp_elem.get("type", "Function")
+            elem_purpose = comp_elem.get("purpose", "")
+            if not elem_name:
+                continue
+            if elem_name.lower() in concept_map:
+                continue  # Already created via public_api
+            concept_type = "Service" if elem_type in ("Class", "Component", "Route") else "Process"
+            elem_concept = _ensure_comp_concept(
+                elem_name, concept_type,
+                description=elem_purpose, confidence=0.75,
+            )
+            if elem_concept and file_concept:
+                _ensure_comp_rel(file_concept, elem_concept, "contains")
+
+        # Domain concepts (business terms found in code)
+        for domain_item in sa.get("domain_concepts", []):
+            if isinstance(domain_item, dict):
+                term = domain_item.get("term", "")
+                context = domain_item.get("context", "")
+            elif isinstance(domain_item, str):
+                term = domain_item
+                context = ""
+            else:
+                continue
+            if not term or len(term) < 2:
+                continue
+            dc_concept = _ensure_comp_concept(
+                term, "Entity",
+                description=f"Domain concept: {context}"[:300], confidence=0.7,
+            )
+            if dc_concept and file_concept:
+                _ensure_comp_rel(file_concept, dc_concept, "references")
+
+        # Cross-file IMPORTS relationships
+        # internal_imports contains relative paths like ["../utils/helpers", "./models/user"]
+        # We match against other CodeComponents in the same repository by location
+        internal_imports = sa.get("internal_imports", [])
+        if internal_imports and file_concept:
+            # Build a location → component map for this repo (lazy, only when needed)
+            repo_components = db.query(CodeComponent).filter(
+                CodeComponent.repository_id == component.repository_id,
+                CodeComponent.tenant_id == tenant_id,
+                CodeComponent.id != component_id,
+            ).all()
+            # Index by normalized location and name for fuzzy path matching
+            comp_by_location: Dict[str, CodeComponent] = {}
+            comp_by_name: Dict[str, CodeComponent] = {}
+            for rc in repo_components:
+                if rc.location:
+                    # Normalize: strip leading ./ and ../
+                    norm = rc.location.replace("\\", "/").lstrip("./")
+                    comp_by_location[norm.lower()] = rc
+                    # Also index by basename without extension
+                    parts = norm.split("/")
+                    basename = parts[-1].split(".")[0].lower()
+                    comp_by_name[basename] = rc
+                if rc.name:
+                    comp_by_name[rc.name.lower().split(".")[0]] = rc
+
+            for imp_path in internal_imports:
+                if not isinstance(imp_path, str):
+                    continue
+                imp_norm = imp_path.replace("\\", "/").lstrip("./")
+                imp_basename = imp_norm.split("/")[-1].split(".")[0].lower()
+
+                # Try to find the target component
+                target_comp: Optional[CodeComponent] = None
+                for key in (imp_norm.lower(), imp_norm.lower() + ".py",
+                            imp_norm.lower() + ".ts", imp_norm.lower() + ".js"):
+                    target_comp = comp_by_location.get(key)
+                    if target_comp:
+                        break
+                if not target_comp:
+                    target_comp = comp_by_name.get(imp_basename)
+
+                if target_comp:
+                    # Create a concept for the target file (with its own source_component_id)
+                    target_name = target_comp.name or f"component_{target_comp.id}"
+                    # Get or create using the target's component_id as source
+                    target_concept = crud.ontology_concept.get_or_create(
+                        db=db, name=target_name, concept_type="Service",
+                        tenant_id=tenant_id,
+                        description=target_comp.summary or f"Code file: {target_comp.location}",
+                        confidence_score=0.85,
+                        source_type="code",
+                        initiative_id=initiative_id,
+                        source_component_id=target_comp.id,
+                    )
+                    # Create IMPORTS edge: this file → imports → target file
+                    _ensure_comp_rel(
+                        file_concept, target_concept, "imports",
+                        description=f"{file_concept_name} imports {target_name}",
+                        confidence=0.9,
+                    )
+                else:
+                    # Target not yet analyzed — create a stub concept without source_component_id
+                    stub_name = imp_basename or imp_norm.split("/")[-1]
+                    if stub_name and len(stub_name) >= 2:
+                        stub = _ensure_comp_concept(
+                            stub_name, "Service",
+                            description=f"Imported module: {imp_path}", confidence=0.6,
+                        )
+                        if stub:
+                            _ensure_comp_rel(file_concept, stub, "imports", confidence=0.6)
+
+        self.logger.info(
+            f"Code component graph built for component {component_id}: "
+            f"{entities_created} concepts, {relationships_created} relationships (no AI cost)"
+        )
+        return {"entities_created": entities_created, "relationships_created": relationships_created}
+
     def _resolve_initiative_for_document(
         self, db: Session, *, document_id: int, tenant_id: int
     ) -> Optional[int]:

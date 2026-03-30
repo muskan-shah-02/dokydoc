@@ -278,7 +278,9 @@ def get_graph(
         OntologyGraphNode(
             id=c.id, name=c.name, concept_type=c.concept_type,
             source_type=c.source_type, initiative_id=c.initiative_id,
-            confidence_score=c.confidence_score
+            confidence_score=c.confidence_score,
+            source_component_id=c.source_component_id,
+            source_document_id=c.source_document_id,
         ) for c in concepts
     ]
     edges = [
@@ -286,7 +288,8 @@ def get_graph(
             id=r.id, source_concept_id=r.source_concept_id,
             target_concept_id=r.target_concept_id,
             relationship_type=r.relationship_type,
-            confidence_score=r.confidence_score
+            confidence_score=r.confidence_score,
+            description=r.description,
         ) for r in filtered_rels
     ]
 
@@ -500,7 +503,17 @@ def get_component_subgraph(
     """
     Get the subgraph for a specific code component (file).
     Returns concepts created from this file and their inter-relationships.
+    Each node includes source_component_id for clickable artifact navigation.
     """
+    from app.models.code_component import CodeComponent
+    from app.models.ontology_relationship import OntologyRelationship
+    from sqlalchemy import or_
+
+    focal = db.query(CodeComponent).filter(
+        CodeComponent.id == component_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).first()
+
     concepts = crud.ontology_concept.get_by_component(
         db=db, component_id=component_id, tenant_id=tenant_id
     )
@@ -515,13 +528,15 @@ def get_component_subgraph(
             "concept_type": c.concept_type,
             "source_type": c.source_type,
             "confidence_score": c.confidence_score or 0,
+            "source_component_id": c.source_component_id,
+            "source_document_id": c.source_document_id,
+            "source_artifact_name": focal.name if focal else None,
+            "source_artifact_location": focal.location if focal else None,
+            "is_home": True,
         }
         for c in concepts
     ]
 
-    # Get relationships between these concepts
-    from app.models.ontology_relationship import OntologyRelationship
-    from sqlalchemy import or_
     rels = db.query(OntologyRelationship).filter(
         OntologyRelationship.tenant_id == tenant_id,
         or_(
@@ -537,6 +552,7 @@ def get_component_subgraph(
             "target_concept_id": r.target_concept_id,
             "relationship_type": r.relationship_type,
             "confidence_score": r.confidence_score or 0,
+            "description": r.description,
         }
         for r in rels
         if r.source_concept_id in concept_ids or r.target_concept_id in concept_ids
@@ -548,6 +564,412 @@ def get_component_subgraph(
         "total_nodes": len(nodes),
         "total_edges": len(edges),
         "component_id": component_id,
+    }
+
+
+# ============================================================
+# EGOCENTRIC (BIDIRECTIONAL) GRAPH ENDPOINT
+# ============================================================
+
+@router.get("/graph/egocentric/component/{component_id}")
+def get_egocentric_component_graph(
+    component_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    depth: int = Query(1, ge=1, le=2, description="Hop depth: 1=direct neighbors, 2=neighbors-of-neighbors"),
+) -> Any:
+    """
+    Egocentric (ego-network) graph centered on a code component.
+
+    Returns:
+    - HOME nodes: concepts extracted from this component (is_home=True)
+    - NEIGHBOR nodes: concepts from OTHER components/documents that home concepts link to/from
+    - ALL edges connecting home ↔ home and home ↔ neighbor
+    - Per-node: source artifact name + location for clickable navigation
+    - connected_artifacts: list of distinct artifacts this one connects to
+
+    Use this to power the interactive "click a concept → open its source file's graph" feature.
+    """
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.ontology_relationship import OntologyRelationship
+    from app.models.code_component import CodeComponent
+    from app.models.document import Document
+    from sqlalchemy import or_
+
+    # Look up focal component
+    focal_component = db.query(CodeComponent).filter(
+        CodeComponent.id == component_id,
+        CodeComponent.tenant_id == tenant_id,
+    ).first()
+    if not focal_component:
+        raise HTTPException(status_code=404, detail="Code component not found")
+
+    # Step 1: Get home concepts (concepts whose source is this component)
+    home_concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_component_id == component_id,
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+
+    home_ids = {c.id for c in home_concepts}
+
+    # Step 2: Get all relationships touching home concepts
+    if home_ids:
+        all_rels = db.query(OntologyRelationship).filter(
+            OntologyRelationship.tenant_id == tenant_id,
+            or_(
+                OntologyRelationship.source_concept_id.in_(home_ids),
+                OntologyRelationship.target_concept_id.in_(home_ids),
+            ),
+        ).all()
+    else:
+        all_rels = []
+
+    # Step 3: Collect neighbor concept IDs (concepts from other artifacts)
+    neighbor_ids = set()
+    for r in all_rels:
+        if r.source_concept_id not in home_ids:
+            neighbor_ids.add(r.source_concept_id)
+        if r.target_concept_id not in home_ids:
+            neighbor_ids.add(r.target_concept_id)
+
+    # If depth=2, also fetch relationships from neighbors and collect their neighbors
+    depth2_rels = []
+    depth2_neighbor_ids = set()
+    if depth >= 2 and neighbor_ids:
+        depth2_rels = db.query(OntologyRelationship).filter(
+            OntologyRelationship.tenant_id == tenant_id,
+            or_(
+                OntologyRelationship.source_concept_id.in_(neighbor_ids),
+                OntologyRelationship.target_concept_id.in_(neighbor_ids),
+            ),
+        ).all()
+        for r in depth2_rels:
+            if r.source_concept_id not in home_ids and r.source_concept_id not in neighbor_ids:
+                depth2_neighbor_ids.add(r.source_concept_id)
+            if r.target_concept_id not in home_ids and r.target_concept_id not in neighbor_ids:
+                depth2_neighbor_ids.add(r.target_concept_id)
+
+    all_rels = all_rels + depth2_rels
+    neighbor_ids = neighbor_ids | depth2_neighbor_ids
+
+    # Step 4: Fetch neighbor concept objects
+    neighbor_concepts = []
+    if neighbor_ids:
+        neighbor_concepts = db.query(OntologyConcept).filter(
+            OntologyConcept.id.in_(neighbor_ids),
+            OntologyConcept.tenant_id == tenant_id,
+        ).all()
+
+    # Step 5: Build artifact lookup caches (component_id → component, document_id → document)
+    # Gather all unique source_component_ids and source_document_ids we need
+    all_concepts = list(home_concepts) + list(neighbor_concepts)
+    needed_comp_ids = {c.source_component_id for c in all_concepts if c.source_component_id and c.source_component_id != component_id}
+    needed_doc_ids = {c.source_document_id for c in all_concepts if c.source_document_id}
+
+    comp_cache: dict = {}
+    doc_cache: dict = {}
+
+    if needed_comp_ids:
+        comps = db.query(CodeComponent).filter(
+            CodeComponent.id.in_(needed_comp_ids),
+            CodeComponent.tenant_id == tenant_id,
+        ).all()
+        comp_cache = {c.id: c for c in comps}
+
+    if needed_doc_ids:
+        docs = db.query(Document).filter(
+            Document.id.in_(needed_doc_ids),
+            Document.tenant_id == tenant_id,
+        ).all()
+        doc_cache = {d.id: d for d in docs}
+
+    def _build_node(concept, is_home: bool) -> dict:
+        src_comp_id = concept.source_component_id
+        src_doc_id = concept.source_document_id
+
+        artifact_name = None
+        artifact_location = None
+
+        if src_comp_id:
+            if src_comp_id == component_id:
+                artifact_name = focal_component.name
+                artifact_location = focal_component.location
+            else:
+                comp = comp_cache.get(src_comp_id)
+                if comp:
+                    artifact_name = comp.name
+                    artifact_location = comp.location
+        elif src_doc_id:
+            doc = doc_cache.get(src_doc_id)
+            if doc:
+                artifact_name = doc.filename
+                artifact_location = None
+
+        return {
+            "id": concept.id,
+            "name": concept.name,
+            "concept_type": concept.concept_type,
+            "source_type": concept.source_type,
+            "confidence_score": concept.confidence_score or 0,
+            "source_component_id": src_comp_id,
+            "source_document_id": src_doc_id,
+            "source_artifact_name": artifact_name,
+            "source_artifact_location": artifact_location,
+            "is_home": is_home,
+        }
+
+    nodes = (
+        [_build_node(c, is_home=True) for c in home_concepts]
+        + [_build_node(c, is_home=False) for c in neighbor_concepts]
+    )
+
+    # Deduplicate edges (depth=2 may yield duplicates)
+    seen_edge_ids = set()
+    edges = []
+    for r in all_rels:
+        if r.id not in seen_edge_ids:
+            seen_edge_ids.add(r.id)
+            edges.append({
+                "id": r.id,
+                "source_concept_id": r.source_concept_id,
+                "target_concept_id": r.target_concept_id,
+                "relationship_type": r.relationship_type,
+                "confidence_score": r.confidence_score or 0,
+                "description": r.description,
+            })
+
+    # Build connected_artifacts summary — distinct artifacts that home concepts link to
+    connected_artifacts_map: dict = {}
+    for concept in neighbor_concepts:
+        src_comp_id = concept.source_component_id
+        src_doc_id = concept.source_document_id
+
+        if src_comp_id and src_comp_id != component_id:
+            if src_comp_id not in connected_artifacts_map:
+                comp = comp_cache.get(src_comp_id)
+                connected_artifacts_map[f"comp:{src_comp_id}"] = {
+                    "type": "code_component",
+                    "id": src_comp_id,
+                    "name": comp.name if comp else f"Component {src_comp_id}",
+                    "location": comp.location if comp else None,
+                    "concept_count": 0,
+                }
+            connected_artifacts_map[f"comp:{src_comp_id}"]["concept_count"] += 1
+        elif src_doc_id:
+            if f"doc:{src_doc_id}" not in connected_artifacts_map:
+                doc = doc_cache.get(src_doc_id)
+                connected_artifacts_map[f"doc:{src_doc_id}"] = {
+                    "type": "document",
+                    "id": src_doc_id,
+                    "name": doc.filename if doc else f"Document {src_doc_id}",
+                    "location": None,
+                    "concept_count": 0,
+                }
+            connected_artifacts_map[f"doc:{src_doc_id}"]["concept_count"] += 1
+
+    connected_artifacts = sorted(
+        connected_artifacts_map.values(),
+        key=lambda x: x["concept_count"],
+        reverse=True,
+    )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "focal_component_id": component_id,
+        "focal_artifact_name": focal_component.name,
+        "home_node_count": len(home_concepts),
+        "neighbor_node_count": len(neighbor_concepts),
+        "connected_artifacts": connected_artifacts,
+    }
+
+
+@router.get("/graph/egocentric/document/{document_id}")
+def get_egocentric_document_graph(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Egocentric graph centered on a document.
+    Returns home concepts from this document + neighbor concepts from code components
+    that implement or relate to those document concepts — with full artifact metadata
+    for bidirectional navigation.
+    """
+    from app.models.ontology_concept import OntologyConcept
+    from app.models.ontology_relationship import OntologyRelationship
+    from app.models.code_component import CodeComponent
+    from app.models.document import Document
+    from sqlalchemy import or_
+
+    focal_document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.tenant_id == tenant_id,
+    ).first()
+    if not focal_document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Home concepts from this document
+    home_concepts = db.query(OntologyConcept).filter(
+        OntologyConcept.source_document_id == document_id,
+        OntologyConcept.tenant_id == tenant_id,
+        OntologyConcept.is_active == True,
+    ).all()
+    home_ids = {c.id for c in home_concepts}
+
+    if not home_ids:
+        return {
+            "nodes": [],
+            "edges": [],
+            "total_nodes": 0,
+            "total_edges": 0,
+            "focal_document_id": document_id,
+            "focal_artifact_name": focal_document.filename,
+            "home_node_count": 0,
+            "neighbor_node_count": 0,
+            "connected_artifacts": [],
+        }
+
+    # Relationships touching home concepts
+    all_rels = db.query(OntologyRelationship).filter(
+        OntologyRelationship.tenant_id == tenant_id,
+        or_(
+            OntologyRelationship.source_concept_id.in_(home_ids),
+            OntologyRelationship.target_concept_id.in_(home_ids),
+        ),
+    ).all()
+
+    neighbor_ids = set()
+    for r in all_rels:
+        if r.source_concept_id not in home_ids:
+            neighbor_ids.add(r.source_concept_id)
+        if r.target_concept_id not in home_ids:
+            neighbor_ids.add(r.target_concept_id)
+
+    neighbor_concepts = []
+    if neighbor_ids:
+        neighbor_concepts = db.query(OntologyConcept).filter(
+            OntologyConcept.id.in_(neighbor_ids),
+            OntologyConcept.tenant_id == tenant_id,
+        ).all()
+
+    all_concepts = list(home_concepts) + list(neighbor_concepts)
+    needed_comp_ids = {c.source_component_id for c in all_concepts if c.source_component_id}
+    needed_doc_ids = {c.source_document_id for c in all_concepts if c.source_document_id and c.source_document_id != document_id}
+
+    comp_cache: dict = {}
+    doc_cache: dict = {}
+
+    if needed_comp_ids:
+        comps = db.query(CodeComponent).filter(
+            CodeComponent.id.in_(needed_comp_ids),
+            CodeComponent.tenant_id == tenant_id,
+        ).all()
+        comp_cache = {c.id: c for c in comps}
+
+    if needed_doc_ids:
+        docs = db.query(Document).filter(
+            Document.id.in_(needed_doc_ids),
+            Document.tenant_id == tenant_id,
+        ).all()
+        doc_cache = {d.id: d for d in docs}
+
+    def _build_node(concept, is_home: bool) -> dict:
+        src_comp_id = concept.source_component_id
+        src_doc_id = concept.source_document_id
+        artifact_name = None
+        artifact_location = None
+        if src_comp_id:
+            comp = comp_cache.get(src_comp_id)
+            if comp:
+                artifact_name = comp.name
+                artifact_location = comp.location
+        elif src_doc_id:
+            if src_doc_id == document_id:
+                artifact_name = focal_document.filename
+            else:
+                doc = doc_cache.get(src_doc_id)
+                if doc:
+                    artifact_name = doc.filename
+        return {
+            "id": concept.id,
+            "name": concept.name,
+            "concept_type": concept.concept_type,
+            "source_type": concept.source_type,
+            "confidence_score": concept.confidence_score or 0,
+            "source_component_id": src_comp_id,
+            "source_document_id": src_doc_id,
+            "source_artifact_name": artifact_name,
+            "source_artifact_location": artifact_location,
+            "is_home": is_home,
+        }
+
+    nodes = (
+        [_build_node(c, is_home=True) for c in home_concepts]
+        + [_build_node(c, is_home=False) for c in neighbor_concepts]
+    )
+    edges = [
+        {
+            "id": r.id,
+            "source_concept_id": r.source_concept_id,
+            "target_concept_id": r.target_concept_id,
+            "relationship_type": r.relationship_type,
+            "confidence_score": r.confidence_score or 0,
+            "description": r.description,
+        }
+        for r in all_rels
+    ]
+
+    connected_artifacts_map: dict = {}
+    for concept in neighbor_concepts:
+        src_comp_id = concept.source_component_id
+        src_doc_id = concept.source_document_id
+        if src_comp_id:
+            key = f"comp:{src_comp_id}"
+            if key not in connected_artifacts_map:
+                comp = comp_cache.get(src_comp_id)
+                connected_artifacts_map[key] = {
+                    "type": "code_component",
+                    "id": src_comp_id,
+                    "name": comp.name if comp else f"Component {src_comp_id}",
+                    "location": comp.location if comp else None,
+                    "concept_count": 0,
+                }
+            connected_artifacts_map[key]["concept_count"] += 1
+        elif src_doc_id and src_doc_id != document_id:
+            key = f"doc:{src_doc_id}"
+            if key not in connected_artifacts_map:
+                doc = doc_cache.get(src_doc_id)
+                connected_artifacts_map[key] = {
+                    "type": "document",
+                    "id": src_doc_id,
+                    "name": doc.filename if doc else f"Document {src_doc_id}",
+                    "location": None,
+                    "concept_count": 0,
+                }
+            connected_artifacts_map[key]["concept_count"] += 1
+
+    connected_artifacts = sorted(
+        connected_artifacts_map.values(),
+        key=lambda x: x["concept_count"],
+        reverse=True,
+    )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "focal_document_id": document_id,
+        "focal_artifact_name": focal_document.filename,
+        "home_node_count": len(home_concepts),
+        "neighbor_node_count": len(neighbor_concepts),
+        "connected_artifacts": connected_artifacts,
     }
 
 
