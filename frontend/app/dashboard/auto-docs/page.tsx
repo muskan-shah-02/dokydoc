@@ -42,6 +42,7 @@ import { Badge } from "@/components/ui/badge";
 import { api, API_BASE_URL } from "@/lib/api";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 
 // ----- Types -----
 
@@ -1399,11 +1400,13 @@ export default function AutoDocsPage() {
                 <div className={`flex-1 overflow-y-auto p-6 ${showRefinePanel ? "max-h-[calc(100vh-480px)]" : "max-h-[calc(100vh-280px)]"}`}>
                   {viewingDoc.content ? (
                     hasMermaid && diagramView === "diagram" ? (
-                      <MermaidDiagram
-                        syntax={mermaidSyntax!}
-                        title={viewingDoc.title}
-                        className="w-full"
-                      />
+                      <ErrorBoundary>
+                        <MermaidDiagram
+                          syntax={mermaidSyntax!}
+                          title={viewingDoc.title}
+                          className="w-full"
+                        />
+                      </ErrorBoundary>
                     ) : (
                       <MarkdownRenderer content={viewingDoc.content} />
                     )

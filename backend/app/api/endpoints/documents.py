@@ -324,10 +324,27 @@ async def upload_document(
         try:
             with storage_path.open("wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
-            file_size_kb = round(os.path.getsize(storage_path) / 1024)
+            file_size_bytes = os.path.getsize(storage_path)
+            file_size_kb = round(file_size_bytes / 1024)
             logger.info(f"File saved to {storage_path}, size: {file_size_kb} KB")
+
+            # Hard block only if above the configured maximum (default 2GB)
+            if file_size_bytes > settings.MAX_FILE_SIZE:
+                storage_path.unlink(missing_ok=True)
+                raise ValidationException(
+                    f"File size {file_size_kb} KB exceeds maximum allowed "
+                    f"{settings.MAX_FILE_SIZE // (1024 * 1024)} MB"
+                )
         finally:
             file.file.close()
+
+        # Soft warning for large files (default >100MB) — logged but not blocked
+        file_size_warning = None
+        if file_size_bytes > settings.FILE_SIZE_WARN_BYTES:
+            file_size_warning = (
+                f"Large file ({file_size_kb // 1024} MB) — processing may take longer than usual"
+            )
+            logger.warning(f"Large file upload: {file.filename}, {file_size_kb} KB, tenant {tenant_id}")
 
         # The user's model (from last step) has raw_text as nullable=False.
         # We must provide a non-null value. An empty string is the most
@@ -371,6 +388,9 @@ async def upload_document(
                 logger.warning(f"Failed to auto-link document {document.id} to initiative {initiative_id}: {e}")
 
         logger.info(f"Document {document.id} uploaded successfully to tenant {tenant_id}. Ready for analysis.")
+        if file_size_warning:
+            # Attach warning as a response header so clients can surface it
+            response.headers["X-File-Size-Warning"] = file_size_warning
         return document
 
     except ValidationException:

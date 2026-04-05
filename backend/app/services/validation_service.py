@@ -16,6 +16,8 @@ from app.services.ai.gemini import (
     gemini_service,
 )
 from app.models.document_code_link import DocumentCodeLink
+# Phase 1: Data Flywheel — capture AI judgments for training
+from app.services.flywheel import capture_mismatch_judgment
 from app.core.logging import LoggerMixin
 from app.core.exceptions import ValidationException, AIAnalysisException
 
@@ -313,7 +315,7 @@ class ValidationService(LoggerMixin):
                                     db_atom_id = atom_id_to_db_id.get(local_id) if local_id else None
 
                                     try:
-                                        crud.mismatch.create_with_link(
+                                        new_mismatch = crud.mismatch.create_with_link(
                                             db=db,
                                             obj_in={
                                                 **m,
@@ -324,6 +326,15 @@ class ValidationService(LoggerMixin):
                                             owner_id=user_id,
                                             tenant_id=tenant_id,
                                         )
+                                        # Phase 1: Capture AI judgment for data flywheel
+                                        try:
+                                            capture_mismatch_judgment(
+                                                db=db,
+                                                mismatch=new_mismatch,
+                                                tenant_id=tenant_id,
+                                            )
+                                        except Exception:
+                                            pass  # Never block validation for flywheel failure
                                     except Exception as store_err:
                                         self.logger.warning(
                                             f"[Link {link.id}] Could not store forward mismatch: {store_err}"

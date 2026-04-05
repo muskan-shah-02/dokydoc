@@ -64,6 +64,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+import { MismatchFeedback } from "@/components/feedback/MismatchFeedback";
+
 // --- Data Structures ---
 interface Document {
   id: number;
@@ -95,6 +97,7 @@ interface Mismatch {
   details: MismatchDetails;
   direction?: "forward" | "reverse";
   requirement_atom_id?: number | null;
+  training_example_id?: number | null;  // Phase 1: Data Flywheel
   document: { id: number; name: string };
   code_component: { id: number; name: string };
 }
@@ -1148,6 +1151,7 @@ export default function ValidationPanelPage() {
                                         </div>
                                       </div>
                                     </div>
+                                    <div className="flex flex-col items-end gap-1.5 shrink-0">
                                     <Dialog>
                                       <DialogTrigger asChild>
                                         <Button variant="outline" size="sm" className="shrink-0 h-7 text-xs">
@@ -1204,6 +1208,12 @@ export default function ValidationPanelPage() {
                                         </div>
                                       </DialogContent>
                                     </Dialog>
+                                    {/* Phase 1: Data Flywheel feedback buttons */}
+                                    <MismatchFeedback
+                                      mismatchId={mismatch.id}
+                                      trainingExampleId={mismatch.training_example_id}
+                                    />
+                                    </div>
                                   </div>
                                 </div>
                               ))}

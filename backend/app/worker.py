@@ -12,6 +12,7 @@ celery_app = Celery(
         "app.tasks",
         "app.tasks.ontology_tasks",
         "app.tasks.code_analysis_tasks",  # SPRINT 3: Repo Agent + static analysis workers
+        "app.tasks.embedding_tasks",      # Phase 2: Embedding backfill + concept embeddings
     ]
 )
 

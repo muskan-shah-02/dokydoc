@@ -45,3 +45,6 @@ from .crud_conversation import conversation, chat_message
 
 # Sprint 10: Atomic Validation Engine
 from .crud_requirement_atom import requirement_atom
+
+# Phase 1: Data Flywheel
+from .crud_training_example import training_example

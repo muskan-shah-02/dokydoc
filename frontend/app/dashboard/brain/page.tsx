@@ -26,6 +26,7 @@ import { SystemArchitectureView } from "@/components/ontology/SystemArchitecture
 import { CrossProjectMappingPanel } from "@/components/ontology/CrossProjectMappingPanel";
 import SemanticSearch from "@/components/ontology/SemanticSearch";
 import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 
 // --- Types ---
 
@@ -864,11 +865,13 @@ export default function BrainDashboardPage() {
                           </div>
                         ) : null
                       ) : (
-                        <MermaidDiagram
-                          syntax={mermaidData.mermaid_syntax}
-                          title={`${drill.projectName} — ${l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
-                          height="600px"
-                        />
+                        <ErrorBoundary>
+                          <MermaidDiagram
+                            syntax={mermaidData.mermaid_syntax}
+                            title={`${drill.projectName} — ${l3View === "dataflow" ? "Data Flow" : "ER"} Diagram`}
+                            height="600px"
+                          />
+                        </ErrorBoundary>
                       )
                     ) : (
                       <div className="flex h-48 items-center justify-center text-gray-400 text-sm">
@@ -926,12 +929,14 @@ export default function BrainDashboardPage() {
               return (
                 <div className="p-4">
                   <p className="mb-2 text-xs text-indigo-600 font-medium">{depthLabel}</p>
-                  <MermaidDiagram
-                    syntax={exploreData.mermaid_syntax}
-                    title={explorePath.length === 0 ? `${drill.projectName} — Architecture` : explorePath.join(" / ")}
-                    height="600px"
-                    onNodeClick={handleNodeClick}
-                  />
+                  <ErrorBoundary>
+                    <MermaidDiagram
+                      syntax={exploreData.mermaid_syntax}
+                      title={explorePath.length === 0 ? `${drill.projectName} — Architecture` : explorePath.join(" / ")}
+                      height="600px"
+                      onNodeClick={handleNodeClick}
+                    />
+                  </ErrorBoundary>
                   {/* Node summary cards below diagram */}
                   {exploreData.nodes.length > 0 && (
                     <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
@@ -1086,20 +1091,22 @@ export default function BrainDashboardPage() {
                         <p className="mb-2 text-xs text-green-700 font-medium">
                           Click any file node to open its full analysis (L1).
                         </p>
-                        <MermaidDiagram
-                          syntax={domainFlowData.mermaid_syntax}
-                          title={`${drill.domainName} — File Flow`}
-                          height="520px"
-                          onNodeClick={(nodeId) => {
-                            // nodeId is "component:{id}" for file nodes
-                            if (nodeId.startsWith("component:")) {
-                              const compId = parseInt(nodeId.replace("component:", ""), 10);
-                              if (!isNaN(compId)) {
-                                router.push(`/dashboard/code/${compId}`);
+                        <ErrorBoundary>
+                          <MermaidDiagram
+                            syntax={domainFlowData.mermaid_syntax}
+                            title={`${drill.domainName} — File Flow`}
+                            height="520px"
+                            onNodeClick={(nodeId) => {
+                              // nodeId is "component:{id}" for file nodes
+                              if (nodeId.startsWith("component:")) {
+                                const compId = parseInt(nodeId.replace("component:", ""), 10);
+                                if (!isNaN(compId)) {
+                                  router.push(`/dashboard/code/${compId}`);
+                                }
                               }
-                            }
-                          }}
-                        />
+                            }}
+                          />
+                        </ErrorBoundary>
                         {domainFlowData.components.length > 0 && (
                           <div className="mt-3 flex flex-wrap gap-1.5">
                             {domainFlowData.components.map((c) => (

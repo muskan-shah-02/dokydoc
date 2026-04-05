@@ -26,6 +26,7 @@ from app.api.endpoints import (
     auto_docs,  # SPRINT 8: Auto Docs (Module 12)
     integrations,  # SPRINT 8: Documentation Integrations (Module 11)
     analytics,  # SPRINT 8: Analytics Dashboard
+    training_examples,  # Phase 1: Data Flywheel
 )
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
@@ -446,6 +447,13 @@ app.include_router(
     analytics.router,
     prefix=f"/api/{settings.API_VERSION}/analytics",
     tags=["Analytics"]
+)
+
+# Phase 1: Data Flywheel
+app.include_router(
+    training_examples.router,
+    prefix=f"/api/{settings.API_VERSION}/training-examples",
+    tags=["Training Examples"]
 )
 
 # --- Startup Event (Legacy support) ---

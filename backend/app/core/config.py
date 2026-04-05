@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # --- Security Settings ---
     SECRET_KEY: str = Field(..., env="SECRET_KEY")
     ALGORITHM: str = Field(default="HS256", env="ALGORITHM")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=480, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 8 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 1 hour (production .env should override to 30)
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7, env="REFRESH_TOKEN_EXPIRE_DAYS")
     
     # --- CORS Settings ---
@@ -87,7 +87,8 @@ class Settings(BaseSettings):
     CONFLUENCE_CLIENT_SECRET: Optional[str] = Field(default=None, env="CONFLUENCE_CLIENT_SECRET")
     
     # --- File Upload Settings ---
-    MAX_FILE_SIZE: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
+    MAX_FILE_SIZE: int = Field(default=2 * 1024 * 1024 * 1024, env="MAX_FILE_SIZE")  # 2GB default; set lower via .env if needed
+    FILE_SIZE_WARN_BYTES: int = Field(default=100 * 1024 * 1024, env="FILE_SIZE_WARN_BYTES")  # Warn (not block) above 100MB
     UPLOAD_DIR: str = Field(default="/app/uploads", env="UPLOAD_DIR")
     ALLOWED_EXTENSIONS: List[str] = Field(default=[".pdf", ".docx", ".doc", ".txt"], env="ALLOWED_EXTENSIONS")
 
@@ -117,15 +118,29 @@ class Settings(BaseSettings):
     
     @validator("CORS_ORIGINS", pre=True)
     def parse_cors_origins(cls, v):
+        import json as _json
         if isinstance(v, str):
-            # Handle comma-separated string from environment variable
-            if "," in v:
-                return [origin.strip() for origin in v.split(",")]
-            # Handle single value
-            return [v.strip()]
+            # Handle JSON array from env: '["https://a.com","https://b.com"]'
+            stripped = v.strip()
+            if stripped.startswith("["):
+                try:
+                    return _json.loads(stripped)
+                except ValueError:
+                    pass
+            # Handle comma-separated string
+            if "," in stripped:
+                return [origin.strip() for origin in stripped.split(",")]
+            return [stripped]
         elif isinstance(v, list):
             return v
         return ["http://localhost:3000"]
+
+    @validator("CORS_ORIGINS")
+    def no_wildcard_in_production(cls, v, values):
+        env = values.get("ENVIRONMENT", "development")
+        if env == "production" and "*" in v:
+            raise ValueError("CORS_ORIGINS cannot contain '*' in production environment")
+        return v
         
     # --- NEW: Validator for ALLOWED_HOSTS ---
     @validator("ALLOWED_HOSTS", pre=True)
@@ -176,10 +191,11 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Environment-specific overrides
+# NOTE: CORS_ORIGINS is NOT overridden here — it is read from the CORS_ORIGINS env var.
+# The wildcard validator above will reject '*' in production at startup.
 if settings.ENVIRONMENT == "production":
     settings.DEBUG = False
     settings.LOG_LEVEL = "WARNING"
-    settings.CORS_ORIGINS = ["https://yourdomain.com"]  # Update with actual domain
 elif settings.ENVIRONMENT == "staging":
     settings.DEBUG = False
     settings.LOG_LEVEL = "INFO"

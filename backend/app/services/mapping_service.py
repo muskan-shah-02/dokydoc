@@ -75,6 +75,24 @@ def _levenshtein_similarity(s1: str, s2: str) -> float:
     return 1.0 - (_levenshtein_distance(s1, s2) / max_len)
 
 
+def _cosine_similarity(vec_a: list, vec_b: list) -> float:
+    """
+    Cosine similarity between two embedding vectors (0.0 to 1.0).
+    Returns 0.0 if either vector is None or empty.
+    Embeddings are 768-dim floats stored on OntologyConcept.embedding_vector.
+    """
+    if not vec_a or not vec_b:
+        return 0.0
+    if len(vec_a) != len(vec_b):
+        return 0.0
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = sum(a * a for a in vec_a) ** 0.5
+    norm_b = sum(b * b for b in vec_b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 class MappingService(LoggerMixin):
     """
     Cost-optimized cross-graph mapping between document and code concepts.
@@ -252,8 +270,19 @@ class MappingService(LoggerMixin):
                 # Levenshtein similarity
                 lev_score = _levenshtein_similarity(dc_norm, cc_norm)
 
-                # Combined score (weighted)
-                combined = max(token_score, lev_score)
+                # Cosine similarity on pre-computed embeddings (Phase 2 — P2-01)
+                # embedding_vector is a list of 768 floats; None if not yet embedded
+                dc_vec = getattr(dc, "embedding_vector", None)
+                cc_vec = getattr(cc, "embedding_vector", None)
+                cosine_score = _cosine_similarity(dc_vec, cc_vec)
+
+                # Composite score: prefer cosine when embeddings available,
+                # otherwise fall back to token/Levenshtein max
+                if cosine_score > 0.0:
+                    # Weight: 50% cosine, 30% token, 20% Levenshtein
+                    combined = (0.50 * cosine_score) + (0.30 * token_score) + (0.20 * lev_score)
+                else:
+                    combined = max(token_score, lev_score)
 
                 if combined > best_score:
                     best_score = combined
