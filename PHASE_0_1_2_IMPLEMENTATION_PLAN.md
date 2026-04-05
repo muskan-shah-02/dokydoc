@@ -97,6 +97,26 @@ curl -X POST http://localhost:8000/api/v1/documents/ \
 
 ### Risk: LOW — only removes a restriction, adds nothing new.
 
+### Manual .env change required (production server):
+The `.env` file is not committed to git. After deploying the code change, a developer
+must manually update the production `.env`:
+
+```bash
+# On the production server, edit /home/user/dokydoc/backend/.env
+# Change this line:
+MAX_FILE_SIZE=52428800
+
+# To this:
+MAX_FILE_SIZE=2147483648
+
+# Then restart the backend container to pick up the new value:
+docker-compose restart backend
+```
+
+> **Current production state:** The production `.env` already has `MAX_FILE_SIZE=52428800`
+> (50MB). Without this manual .env change, the code change alone will have no effect
+> because `config.py` reads the env var at startup.
+
 ---
 
 ## P0-02 — Fix CORS Wildcard in Production
@@ -172,6 +192,32 @@ ENVIRONMENT=production CORS_ORIGINS=* python -c "from app.core.config import set
 
 ### Risk: LOW — only adds validation. If CORS_ORIGINS env var is already correct, zero impact.
 
+### Manual .env changes required (production server):
+The `.env` file is not committed to git. Two manual changes are needed:
+
+**Change 1 — Add www subdomain to CORS (currently missing):**
+```bash
+# Current value in production .env:
+CORS_ORIGINS='["https://dokydoc.com"]'
+
+# Change to (adds www subdomain):
+CORS_ORIGINS='["https://dokydoc.com","https://www.dokydoc.com"]'
+```
+
+**Change 2 — Add ALLOWED_HOSTS (currently missing entirely from .env):**
+```bash
+# Add this new line to production .env:
+ALLOWED_HOSTS=dokydoc.com,www.dokydoc.com,localhost
+```
+
+After both changes, restart the backend:
+```bash
+docker-compose restart backend
+```
+
+> **Note:** The `config.py` code change in this task adds the *validation* logic.
+> The .env change provides the *values* that validation checks. Both are required.
+
 ---
 
 ## P0-03 — Fix ACCESS_TOKEN_EXPIRE_MINUTES (8 hours is too long)
@@ -186,7 +232,14 @@ ENVIRONMENT=production CORS_ORIGINS=* python -c "from app.core.config import set
 ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=480, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 8 hours
 ```
 
-### Why this is wrong:
+### Current production state:
+> The production `.env` already has `ACCESS_TOKEN_EXPIRE_MINUTES=30` which correctly
+> overrides the 480-minute default. **Production is already safe.** This task fixes
+> the dangerous `default=480` in `config.py` so that staging, local dev, and any
+> environment *without* the `.env` override also gets a safe default (60 min).
+> Priority is MEDIUM — not urgent for production, but a trap for other environments.
+
+### Why the default is wrong:
 8-hour tokens mean a stolen token gives an attacker 8 hours of access. Industry
 standard is 15–60 minutes for access tokens. We already have refresh token support
 (`REFRESH_TOKEN_EXPIRE_DAYS = 7`).
@@ -573,17 +626,65 @@ function sanitizeMermaidLabel(label: string): string {
 
 ---
 
+## P0-07 — Fix Duplicate REDIS_URL in .env
+
+**Ticket:** P0-07
+**Priority:** P0 (silent connection bug — may cause intermittent auth failures)
+**Type:** Manual .env fix only — no code change required
+**Estimated time:** 5 minutes
+
+### Problem:
+The production `.env` file defines `REDIS_URL` **twice**:
+- First definition (line ~43): `REDIS_URL=redis://redis:6379` — **no password, wrong**
+- Second definition (line ~55): `REDIS_URL=redis://:2ffdf08ed9b64853578245256adbda20@redis:6379` — **with password, correct**
+
+Python's `python-dotenv` and most env parsers use the **last** definition when a key appears twice. This means the correct (password) value is currently winning — but this is fragile and confusing. If anyone reorders the file, the broken value silently takes over and Redis connections fail (Celery tasks stop, rate limiting breaks, session caching fails).
+
+### Fix (manual, on production server):
+```bash
+# Edit /home/user/dokydoc/backend/.env
+# DELETE the first REDIS_URL line (the one WITHOUT the password):
+# REDIS_URL=redis://redis:6379   ← DELETE THIS LINE
+
+# Keep only the correct line:
+REDIS_URL=redis://:2ffdf08ed9b64853578245256adbda20@redis:6379
+
+# Restart affected services:
+docker-compose restart backend celery
+```
+
+### Verify:
+```bash
+# After restart, verify Redis is reachable from backend:
+docker-compose exec backend python -c "
+from app.core.config import settings
+print('REDIS_URL:', settings.REDIS_URL)
+import redis
+r = redis.from_url(settings.REDIS_URL)
+print('PING:', r.ping())  # Should print: PING: True
+"
+```
+
+### Risk: ZERO — removing a duplicate wrong value, keeping the correct one.
+
+---
+
 ## P0 COMPLETION CHECKLIST
 
 Before marking Phase 0 done, verify:
 
 ```
 [ ] P0-01: Upload a 100MB file — no 413 error, file_size_warning in response
+[ ] P0-01: .env updated: MAX_FILE_SIZE=2147483648 on production server
 [ ] P0-02: Start server with ENVIRONMENT=production CORS_ORIGINS=* — server refuses to start
-[ ] P0-03: JWT token expiry is 3600 seconds (1 hour), not 28800 (8 hours)
+[ ] P0-02: .env updated: www.dokydoc.com added to CORS_ORIGINS on production server
+[ ] P0-02: .env updated: ALLOWED_HOSTS line added to production .env
+[ ] P0-03: config.py default is now 60 min (staging/dev environments use safe default)
+[ ] P0-03: (Production already correct via .env — no .env change needed for P0-03)
 [ ] P0-04: Run "SELECT indexname FROM pg_indexes WHERE tablename='mismatches'" — 9 new indexes present
 [ ] P0-05: Run ontology extraction twice — zero duplicate concepts in DB
 [ ] P0-06: Render a Mermaid diagram with a broken concept name — no page crash
+[ ] P0-07: Only ONE REDIS_URL line in production .env — the one with the password
 [ ] All existing tests still pass: cd backend && python -m pytest tests/ -v
 ```
 
