@@ -3439,3 +3439,4540 @@ a static library file, not deployment-specific configuration).
 - `frontend/app/dashboard/documents/[id]/page.tsx` — amber glossary banner
 - `frontend/app/dashboard/admin/page.tsx` — industry profile card
 
+
+---
+
+# PHASE 5B — Validation Accuracy, Transparency & Enterprise Workflow
+**Priority: HIGH — directly determines product value proposition**
+**Branch: claude/autodocs-multiple-sources-MbvDe**
+**Depends on: Phase 4 (BOE-Aware Validation), Phase 5 (Dynamic Prompting)**
+**Migration chain: s12a1 → s16a1 → s16b1 → s16c1 → s16d1 → s16e1**
+
+## Strategic Context
+
+Phase 4 makes validation faster. Phase 5 makes prompts smarter. Phase 5B makes the **output trustworthy**:
+
+A CTO evaluating DokyDoc will ask:
+1. "Can I trust these mismatch results?" → P5B-04 (False Positive Workflow) + P5B-05 (Evidence Transparency)
+2. "What happens when we re-upload a changed BRD?" → P5B-01 (BRD Delta Diffing)
+3. "Can I get a single compliance score?" → P5B-02 (Compliance Score)
+4. "Does this push to Jira?" → P5B-03 (1-Click Jira)
+5. "What happens when developers push new code?" → P5B-06 (Auto Re-validation)
+6. "Which files cover which requirements?" → P5B-07 (Coverage Matrix)
+7. "Are our regulatory requirements flagged separately?" → P5B-08 (Regulatory Tagging)
+8. "How accurate is the AI per requirement type?" → P5B-09 (Prompt Strengthening)
+9. "What states can a mismatch be in?" → P5B-10 (Status Lifecycle)
+10. "Which BRD version caused this mismatch?" → P5B-11 (Version-Linked Mismatches)
+11. "Can my BA sign off before we ship?" → P5B-12 (BA Sign-Off + Certificate)
+
+Each task below is independently deployable and non-breaking. All changes are wrapped in try/except or additive-only.
+
+
+---
+
+## P5B-01 — BRD Delta Diffing (Atom-Level Version Comparison)
+
+**Ticket ID:** P5B-01
+**Priority:** P0 — Critical. Without this, re-uploading a BRD nukes all mismatches and starts from scratch. Teams lose their triage history.
+**Complexity:** Medium
+**Risk:** MEDIUM — touches atomization + mismatch CRUD + document pipeline
+
+### Why This Exists
+
+Current behavior when a user re-uploads a BRD (v2 after v1):
+```
+1. New DocumentVersion created (content_hash changes)
+2. atomize_document() called — ALL atoms replaced (delete_by_document then bulk insert)
+3. validate_single_link() called — crud.mismatch.remove_by_link() deletes ALL mismatches
+4. Fresh validation runs on all atoms
+5. Result: ALL triage history gone. Mismatches marked "won't fix" are resurrected.
+```
+
+What should happen:
+```
+1. New DocumentVersion created
+2. Atom-level diff computed: ADDED / MODIFIED / UNCHANGED / DELETED
+3. UNCHANGED atoms → skip re-validation (no Gemini cost)
+4. DELETED atoms → auto-close their mismatches (requirement was removed from BRD)
+5. ADDED atoms → run fresh validation (new requirement)
+6. MODIFIED atoms → re-run validation only for those atoms (requirement changed)
+7. Result: triage history preserved, cost reduced ~40-60%
+```
+
+### Current State
+
+**File: `backend/app/models/requirement_atom.py` (line 34-55)**
+`document_version` field stores the version string but there is NO field to link atoms from different versions of the same logical requirement. When v2 is uploaded, all v1 atoms are overwritten — there is no `previous_atom_id` or `content_hash` to detect "same requirement, minor wording change" vs "completely new requirement."
+
+**File: `backend/app/crud/crud_requirement_atom.py` (line 51-57)**
+`delete_by_document` deletes ALL atoms indiscriminately on re-atomization:
+```python
+# CURRENT — no diff awareness
+def delete_by_document(self, db: Session, *, document_id: int) -> int:
+    n = db.query(self.model).filter(
+        self.model.document_id == document_id
+    ).delete()
+    db.commit()
+    return n
+```
+
+**File: `backend/app/crud/crud_mismatch.py` (line 63-80)**
+`remove_by_link` deletes ALL mismatches for a document-component pair:
+```python
+# CURRENT — no selective closure
+def remove_by_link(self, db, *, document_id, code_component_id, tenant_id) -> int:
+    num_deleted = db.query(self.model).filter(
+        self.model.document_id == document_id,
+        self.model.code_component_id == code_component_id,
+        self.model.tenant_id == tenant_id
+    ).delete()
+    db.commit()
+    return num_deleted
+```
+
+**File: `backend/app/services/validation_service.py` (line 252-260 approx)**
+`run_validation` calls `remove_by_link` BEFORE `validate_single_link` — no way to recover history.
+
+### What to Change
+
+#### Step 1: Add `content_hash` + `previous_atom_id` to RequirementAtom model
+
+**File: `backend/app/models/requirement_atom.py`**
+
+```python
+# BEFORE (line 54-55):
+    document_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    document: Mapped["Document"] = relationship("Document")
+
+# AFTER:
+    document_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # P5B-01: content_hash enables change detection between versions
+    # SHA-256 of normalized content (stripped whitespace, lowercase)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    # P5B-01: links this atom to the equivalent atom in the previous version
+    # NULL = new atom (no prior version), set = UNCHANGED or MODIFIED
+    previous_atom_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("requirement_atoms.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # P5B-01: change classification vs previous version
+    # "new" = ADDED, "modified" = MODIFIED, "unchanged" = UNCHANGED
+    # NULL = first version (no diff computed)
+    delta_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+
+    document: Mapped["Document"] = relationship("Document")
+```
+
+#### Step 2: New Alembic migration
+
+**New file: `backend/alembic/versions/s16a1_atom_delta_fields.py`**
+
+```python
+"""
+P5B-01: Add content_hash, previous_atom_id, delta_status to requirement_atoms.
+
+Revision ID: s16a1
+Revises: s12a1
+Create Date: 2026-04-06
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's16a1'
+down_revision = 's12a1'
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.add_column('requirement_atoms',
+        sa.Column('content_hash', sa.String(64), nullable=True))
+    op.add_column('requirement_atoms',
+        sa.Column('previous_atom_id', sa.Integer,
+                  sa.ForeignKey('requirement_atoms.id', ondelete='SET NULL'), nullable=True))
+    op.add_column('requirement_atoms',
+        sa.Column('delta_status', sa.String(20), nullable=True))
+
+    # Index for fast lookup by hash (used in diff computation)
+    op.create_index(
+        'ix_requirement_atoms_content_hash',
+        'requirement_atoms', ['content_hash'],
+        postgresql_concurrently=True
+    )
+    # Index for delta queries (find all ADDED atoms for a re-run)
+    op.create_index(
+        'ix_requirement_atoms_delta_status',
+        'requirement_atoms', ['document_id', 'delta_status'],
+        postgresql_concurrently=True
+    )
+
+def downgrade():
+    op.drop_index('ix_requirement_atoms_delta_status')
+    op.drop_index('ix_requirement_atoms_content_hash')
+    op.drop_column('requirement_atoms', 'delta_status')
+    op.drop_column('requirement_atoms', 'previous_atom_id')
+    op.drop_column('requirement_atoms', 'content_hash')
+```
+
+#### Step 3: New service — `AtomDiffService`
+
+**New file: `backend/app/services/atom_diff_service.py`**
+
+```python
+"""
+P5B-01: BRD Delta Diffing — atom-level comparison between document versions.
+
+Computes ADDED / MODIFIED / UNCHANGED / DELETED for requirement atoms
+when a document is re-uploaded. Enables:
+  - Skipping re-validation for UNCHANGED atoms (cost savings)
+  - Auto-closing mismatches for DELETED atoms (history preservation)
+  - Targeted re-validation for ADDED + MODIFIED atoms only
+"""
+import hashlib
+from dataclasses import dataclass, field
+from typing import Optional
+from sqlalchemy.orm import Session
+
+from app.models.requirement_atom import RequirementAtom
+
+
+def _normalize_content(text: str) -> str:
+    """Normalize atom content for stable hashing. Strip whitespace, lowercase."""
+    return " ".join(text.lower().strip().split())
+
+
+def _hash_content(text: str) -> str:
+    """SHA-256 of normalized content."""
+    return hashlib.sha256(_normalize_content(text).encode()).hexdigest()
+
+
+@dataclass
+class AtomDelta:
+    """Result of comparing one new atom against prior version atoms."""
+    new_atom_content: str
+    new_atom_type: str
+    status: str  # "added" | "modified" | "unchanged"
+    previous_atom_id: Optional[int] = None
+    previous_content: Optional[str] = None
+    content_hash: str = ""
+
+    def __post_init__(self):
+        self.content_hash = _hash_content(self.new_atom_content)
+
+
+@dataclass
+class DocumentAtomDiff:
+    """Full diff result for a document re-atomization."""
+    document_id: int
+    previous_version: Optional[str]
+    new_version: str
+    added: list = field(default_factory=list)       # new atoms with no prior match
+    modified: list = field(default_factory=list)     # atoms that changed content
+    unchanged: list = field(default_factory=list)    # atoms with identical content hash
+    deleted_atom_ids: list = field(default_factory=list)  # prior atom IDs not present in new version
+
+    @property
+    def needs_validation(self) -> list:
+        """Atoms that require a Gemini validation pass."""
+        return self.added + self.modified
+
+    @property
+    def total_prior_atoms(self) -> int:
+        return len(self.modified) + len(self.unchanged) + len(self.deleted_atom_ids)
+
+
+class AtomDiffService:
+    """
+    Computes atom-level diffs between document versions.
+    Called by validation_service.py INSTEAD of delete_by_document when re-atomizing.
+    """
+
+    def compute_diff(
+        self,
+        db: Session,
+        document_id: int,
+        new_atoms_data: list[dict],
+        new_version: str,
+        tenant_id: int,
+    ) -> DocumentAtomDiff:
+        """
+        Compare new atoms (from fresh Gemini atomization) against prior atoms in DB.
+
+        Algorithm:
+        1. Load all prior atoms for this document from DB
+        2. Build hash → atom_id lookup for prior atoms
+        3. For each new atom:
+           a. Compute content hash
+           b. If hash matches prior → UNCHANGED (carry forward previous_atom_id)
+           c. If atom_type matches prior but content differs → MODIFIED
+           d. If no match → ADDED
+        4. Prior atoms not matched by any new atom → DELETED
+
+        Matching strategy:
+        - Primary: exact content hash match (hash equality)
+        - Secondary: same atom_type + Levenshtein similarity > 0.75 (handles minor wording edits)
+        """
+        from app.crud.crud_requirement_atom import requirement_atom as crud_atom
+
+        prior_atoms = crud_atom.get_by_document(db, document_id=document_id)
+        prior_version = prior_atoms[0].document_version if prior_atoms else None
+
+        diff = DocumentAtomDiff(
+            document_id=document_id,
+            previous_version=prior_version,
+            new_version=new_version,
+        )
+
+        if not prior_atoms:
+            # First upload — everything is ADDED
+            for atom_data in new_atoms_data:
+                diff.added.append(AtomDelta(
+                    new_atom_content=atom_data["content"],
+                    new_atom_type=atom_data.get("atom_type", "FUNCTIONAL_REQUIREMENT"),
+                    status="added",
+                ))
+            return diff
+
+        # Build lookup: hash → prior RequirementAtom
+        prior_by_hash: dict[str, RequirementAtom] = {}
+        prior_by_type: dict[str, list[RequirementAtom]] = {}
+        for atom in prior_atoms:
+            h = _hash_content(atom.content)
+            prior_by_hash[h] = atom
+            prior_by_type.setdefault(atom.atom_type, []).append(atom)
+
+        matched_prior_ids: set[int] = set()
+
+        for atom_data in new_atoms_data:
+            content = atom_data["content"]
+            atom_type = atom_data.get("atom_type", "FUNCTIONAL_REQUIREMENT")
+            new_hash = _hash_content(content)
+
+            # Try exact hash match first
+            if new_hash in prior_by_hash:
+                prior = prior_by_hash[new_hash]
+                matched_prior_ids.add(prior.id)
+                diff.unchanged.append(AtomDelta(
+                    new_atom_content=content,
+                    new_atom_type=atom_type,
+                    status="unchanged",
+                    previous_atom_id=prior.id,
+                    previous_content=prior.content,
+                    content_hash=new_hash,
+                ))
+                continue
+
+            # Try fuzzy match: same type, high similarity
+            best_match = None
+            best_score = 0.0
+            for candidate in prior_by_type.get(atom_type, []):
+                if candidate.id in matched_prior_ids:
+                    continue
+                score = _levenshtein_similarity(
+                    _normalize_content(content),
+                    _normalize_content(candidate.content)
+                )
+                if score > best_score:
+                    best_score = score
+                    best_match = candidate
+
+            if best_match and best_score >= 0.75:
+                matched_prior_ids.add(best_match.id)
+                diff.modified.append(AtomDelta(
+                    new_atom_content=content,
+                    new_atom_type=atom_type,
+                    status="modified",
+                    previous_atom_id=best_match.id,
+                    previous_content=best_match.content,
+                    content_hash=new_hash,
+                ))
+            else:
+                diff.added.append(AtomDelta(
+                    new_atom_content=content,
+                    new_atom_type=atom_type,
+                    status="added",
+                    content_hash=new_hash,
+                ))
+
+        # Prior atoms not matched → DELETED
+        for atom in prior_atoms:
+            if atom.id not in matched_prior_ids:
+                diff.deleted_atom_ids.append(atom.id)
+
+        return diff
+
+
+def _levenshtein_similarity(s1: str, s2: str) -> float:
+    """Normalized Levenshtein similarity (0.0-1.0). Uses SequenceMatcher for speed."""
+    import difflib
+    return difflib.SequenceMatcher(None, s1, s2).ratio()
+
+
+# Singleton
+atom_diff_service = AtomDiffService()
+```
+
+#### Step 4: Update `CRUDMismatch` — add `close_for_deleted_atoms`
+
+**File: `backend/app/crud/crud_mismatch.py`**
+
+Add this new method AFTER `remove_by_link` (after line 80):
+
+```python
+# AFTER — add after remove_by_link:
+def close_for_deleted_atoms(
+    self,
+    db: Session,
+    *,
+    deleted_atom_ids: list[int],
+    tenant_id: int,
+    auto_close_reason: str = "requirement_deleted_from_brd"
+) -> int:
+    """
+    P5B-01: Auto-close mismatches whose requirement atom was deleted from the BRD.
+    Sets status to 'auto_closed' instead of deleting — preserves audit history.
+    Returns count of mismatches closed.
+    """
+    if not deleted_atom_ids:
+        return 0
+
+    from datetime import datetime
+    num_closed = db.query(self.model).filter(
+        self.model.requirement_atom_id.in_(deleted_atom_ids),
+        self.model.tenant_id == tenant_id,
+        self.model.status.in_(["open", "in_progress"])  # P5B-10 statuses
+    ).update(
+        {
+            "status": "auto_closed",
+            "resolution_note": auto_close_reason,
+            "updated_at": datetime.now(),
+        },
+        synchronize_session="fetch"
+    )
+    db.commit()
+    return num_closed
+```
+
+#### Step 5: Update `ValidationService.atomize_document` to use diff
+
+**File: `backend/app/services/validation_service.py`**
+
+Find `atomize_document` method (line ~122) and update the atom storage section:
+
+```python
+# BEFORE (around line 185-210):
+        # Wipe old atoms and replace with new ones
+        crud.requirement_atom.delete_by_document(db, document_id=document.id)
+        created_atoms = crud.requirement_atom.create_atoms_bulk(
+            db,
+            tenant_id=tenant_id,
+            document_id=document.id,
+            document_version=doc_version,
+            atoms_data=raw_atoms,
+        )
+        logger.info(f"Stored {len(created_atoms)} RequirementAtoms for doc {document.id}")
+        return created_atoms
+
+# AFTER — diff-aware storage:
+        # P5B-01: Compute atom-level diff instead of delete-all
+        try:
+            from app.services.atom_diff_service import atom_diff_service
+            diff = atom_diff_service.compute_diff(
+                db=db,
+                document_id=document.id,
+                new_atoms_data=raw_atoms,
+                new_version=doc_version,
+                tenant_id=tenant_id,
+            )
+
+            # Auto-close mismatches for deleted atoms (preserves history)
+            if diff.deleted_atom_ids:
+                n_closed = crud.mismatch.close_for_deleted_atoms(
+                    db=db,
+                    deleted_atom_ids=diff.deleted_atom_ids,
+                    tenant_id=tenant_id,
+                )
+                logger.info(
+                    f"Auto-closed {n_closed} mismatches for {len(diff.deleted_atom_ids)} "
+                    f"deleted atoms in doc {document.id}"
+                )
+
+            # Delete old atoms (they will be replaced with diff-annotated versions)
+            crud.requirement_atom.delete_by_document(db, document_id=document.id)
+
+            # Rebuild atoms_data with delta annotations
+            annotated_atoms = []
+            for delta in diff.added + diff.modified + diff.unchanged:
+                atom_data = next(
+                    (a for a in raw_atoms if _normalize_content(a["content"]) ==
+                     _normalize_content(delta.new_atom_content)),
+                    None
+                )
+                if atom_data:
+                    atom_data["_content_hash"] = delta.content_hash
+                    atom_data["_previous_atom_id"] = delta.previous_atom_id
+                    atom_data["_delta_status"] = delta.status
+                    annotated_atoms.append(atom_data)
+
+            created_atoms = crud.requirement_atom.create_atoms_bulk(
+                db,
+                tenant_id=tenant_id,
+                document_id=document.id,
+                document_version=doc_version,
+                atoms_data=annotated_atoms,
+            )
+
+            logger.info(
+                f"Doc {document.id} atom diff: {len(diff.added)} added, "
+                f"{len(diff.modified)} modified, {len(diff.unchanged)} unchanged, "
+                f"{len(diff.deleted_atom_ids)} deleted"
+            )
+
+            # Store diff summary on document for frontend display
+            document.last_atom_diff = {
+                "added": len(diff.added),
+                "modified": len(diff.modified),
+                "unchanged": len(diff.unchanged),
+                "deleted": len(diff.deleted_atom_ids),
+                "previous_version": diff.previous_version,
+                "new_version": diff.new_version,
+            }
+            db.commit()
+
+            return created_atoms
+
+        except Exception as e:
+            logger.warning(f"Atom diff failed (non-fatal), falling back to full re-atomize: {e}")
+            # Fallback: original behavior
+            crud.requirement_atom.delete_by_document(db, document_id=document.id)
+            created_atoms = crud.requirement_atom.create_atoms_bulk(
+                db, tenant_id=tenant_id, document_id=document.id,
+                document_version=doc_version, atoms_data=raw_atoms,
+            )
+            return created_atoms
+```
+
+Also update `create_atoms_bulk` in `crud_requirement_atom.py` to accept and store the new fields:
+
+**File: `backend/app/crud/crud_requirement_atom.py` (line 78-88)**
+
+```python
+# BEFORE:
+            db_obj = RequirementAtom(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                document_version=document_version,
+                atom_id=atom.get("atom_id") or f"REQ-{i+1:03d}",
+                atom_type=atom.get("atom_type", "FUNCTIONAL_REQUIREMENT"),
+                content=atom.get("content", ""),
+                criticality=atom.get("criticality", "standard"),
+                created_at=now,
+                updated_at=now,
+            )
+
+# AFTER (accepts P5B-01 delta fields via underscore-prefixed keys):
+            db_obj = RequirementAtom(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                document_version=document_version,
+                atom_id=atom.get("atom_id") or f"REQ-{i+1:03d}",
+                atom_type=atom.get("atom_type", "FUNCTIONAL_REQUIREMENT"),
+                content=atom.get("content", ""),
+                criticality=atom.get("criticality", "standard"),
+                # P5B-01: delta annotation fields (present only after diff computation)
+                content_hash=atom.get("_content_hash"),
+                previous_atom_id=atom.get("_previous_atom_id"),
+                delta_status=atom.get("_delta_status"),
+                created_at=now,
+                updated_at=now,
+            )
+```
+
+#### Step 6: Update `validate_single_link` to skip UNCHANGED atoms
+
+**File: `backend/app/services/validation_service.py`**
+
+In `validate_single_link`, when loading atoms for validation, filter to only non-UNCHANGED atoms for re-runs:
+
+```python
+# In validate_single_link, after atoms = await self.atomize_document(...)
+# Add this filter for re-validation runs (not first-time):
+
+is_revalidation = (
+    crud.mismatch.count_by_document_component(db, document_id, component_id, tenant_id) > 0
+    or diff is not None
+)
+
+if is_revalidation:
+    # Skip UNCHANGED atoms — their mismatches are still valid
+    atoms_to_validate = [
+        a for a in atoms
+        if a.delta_status in (None, "added", "modified")
+    ]
+    logger.info(
+        f"Re-validation: skipping {len(atoms) - len(atoms_to_validate)} unchanged atoms"
+    )
+else:
+    atoms_to_validate = atoms
+```
+
+#### Step 7: Add `last_atom_diff` JSON column to documents
+
+**File: `backend/app/models/document.py`**
+
+Add after the existing `settings` or `status` field:
+```python
+# P5B-01: stores result of last atom diff computation for frontend display
+from sqlalchemy.dialects.postgresql import JSONB
+last_atom_diff: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+```
+
+**New migration addition** — add to `s16a1` upgrade():
+```python
+op.add_column('documents',
+    sa.Column('last_atom_diff', sa.dialects.postgresql.JSONB(), nullable=True))
+```
+
+#### Step 8: New API endpoint — `GET /documents/{id}/atom-diff`
+
+**File: `backend/app/api/endpoints/documents.py`**
+
+```python
+@router.get("/{document_id}/atom-diff")
+def get_atom_diff(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-01: Returns the last atom-level diff result for a document.
+    Used by frontend to show "BRD Changed: 3 new requirements, 2 deleted" banner.
+    """
+    document = crud.document.get(db, id=document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "document_id": document_id,
+        "last_atom_diff": document.last_atom_diff or {
+            "message": "No diff available — document uploaded before P5B-01"
+        }
+    }
+```
+
+#### Frontend: Show diff banner on validation panel
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add after the document title header:
+```tsx
+{atomDiff && (atomDiff.added > 0 || atomDiff.modified > 0 || atomDiff.deleted > 0) && (
+  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 flex items-center gap-3">
+    <AlertTriangle className="h-4 w-4 text-amber-600 flex-shrink-0" />
+    <div className="text-sm text-amber-800">
+      <span className="font-medium">BRD updated:</span>{' '}
+      {atomDiff.added > 0 && <span className="text-green-700">{atomDiff.added} new requirements</span>}
+      {atomDiff.added > 0 && atomDiff.modified > 0 && ', '}
+      {atomDiff.modified > 0 && <span className="text-yellow-700">{atomDiff.modified} changed</span>}
+      {(atomDiff.added > 0 || atomDiff.modified > 0) && atomDiff.deleted > 0 && ', '}
+      {atomDiff.deleted > 0 && <span className="text-red-700">{atomDiff.deleted} removed</span>}
+      {atomDiff.deleted > 0 && (
+        <span className="text-gray-500 ml-1">
+          (mismatches for removed requirements auto-closed)
+        </span>
+      )}
+    </div>
+  </div>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16a1
+
+# 2. Verify columns exist
+psql -c "\d requirement_atoms" | grep "content_hash\|previous_atom_id\|delta_status"
+
+# 3. Upload a BRD, note atom count
+curl -X POST /api/v1/documents/ -F "file=@brd_v1.pdf"
+# Note: document_id = X
+
+# 4. Re-upload modified BRD
+curl -X POST /api/v1/documents/{X}/re-upload -F "file=@brd_v2.pdf"
+
+# 5. Check atom diff
+curl /api/v1/documents/{X}/atom-diff
+# Expect: { added: N, modified: M, unchanged: K, deleted: D }
+
+# 6. Verify auto-closed mismatches
+psql -c "SELECT status, resolution_note FROM mismatches WHERE status = 'auto_closed'"
+# Expect: rows with resolution_note = 'requirement_deleted_from_brd'
+
+# 7. Verify UNCHANGED atoms skipped in re-validation (check logs)
+# Expect: "Re-validation: skipping N unchanged atoms"
+```
+
+### Risk Assessment
+- **Fallback on error:** try/except wraps the entire diff computation — falls back to original behavior on any exception
+- **Non-breaking for existing data:** `content_hash`, `previous_atom_id`, `delta_status` are all nullable — existing atoms unaffected
+- **`auto_closed` status:** added to P5B-10 lifecycle; the `close_for_deleted_atoms` method only closes "open" or "in_progress" statuses — won't touch already-resolved or verified mismatches
+
+
+---
+
+## P5B-02 — Compliance Score (Single Weighted Percentage Per Project)
+
+**Ticket ID:** P5B-02
+**Priority:** P0 — The #1 metric a manager asks for. Without a single score, they can't track progress.
+**Complexity:** Low-Medium
+**Risk:** LOW — read-only computation, no side effects
+
+### Why This Exists
+
+A BA or CTO opening DokyDoc today sees a list of mismatches. There is no single answer to "how compliant are we?" — they have to count mismatches mentally. The product needs one headline number per document-repository combination:
+
+```
+Payment Service BRD vs payment_service repo
+Documentation Compliance: 84%
+  API Contracts:        91%  (10/11 covered)
+  Business Rules:       78%  (7/9 covered)
+  Data Constraints:     100% (5/5 covered)
+  Security Reqs:        60%  (3/5 covered)  ← attention needed
+  NFRs:                 80%  (4/5 covered)
+```
+
+The formula: `score = (atoms_without_critical_mismatch / total_atoms) × 100`
+With weightings: SECURITY_REQUIREMENT atoms count 3×, BUSINESS_RULE 2×, others 1×.
+
+### Current State
+
+No compliance score endpoint exists. The validation panel shows raw mismatch lists.
+`GET /api/v1/validation/{document_id}/summary` does not exist.
+
+### What to Change
+
+#### Step 1: New CRUD method on CRUDMismatch
+
+**File: `backend/app/crud/crud_mismatch.py`**
+
+Add after the last method (after line 116):
+
+```python
+def get_compliance_breakdown(
+    self,
+    db: Session,
+    *,
+    document_id: int,
+    tenant_id: int,
+    code_component_id: Optional[int] = None,
+) -> dict:
+    """
+    P5B-02: Returns atom coverage breakdown by atom_type.
+    Joins mismatches → requirement_atoms to compute per-type coverage.
+
+    Returns dict:
+    {
+      "overall_score": 0.84,
+      "weighted_score": 0.81,
+      "by_type": {
+        "API_CONTRACT": {"total": 11, "covered": 10, "score": 0.91},
+        ...
+      },
+      "total_atoms": 35,
+      "covered_atoms": 29,
+      "open_critical_count": 2,
+      "false_positive_excluded": 3,
+    }
+    """
+    from app.models.requirement_atom import RequirementAtom
+    from sqlalchemy import func, case
+
+    # Atom type weights for weighted compliance score
+    ATOM_WEIGHTS = {
+        "SECURITY_REQUIREMENT": 3,
+        "BUSINESS_RULE": 2,
+        "API_CONTRACT": 2,
+        "DATA_CONSTRAINT": 1,
+        "FUNCTIONAL_REQUIREMENT": 1,
+        "WORKFLOW_STEP": 1,
+        "ERROR_SCENARIO": 1,
+        "NFR": 1,
+        "INTEGRATION_POINT": 1,
+    }
+
+    # Get all atoms for this document
+    atoms_query = db.query(RequirementAtom).filter(
+        RequirementAtom.document_id == document_id,
+        RequirementAtom.tenant_id == tenant_id,
+    )
+    all_atoms = atoms_query.all()
+
+    if not all_atoms:
+        return {"overall_score": None, "message": "No atoms found — run validation first"}
+
+    # Get open mismatches for this document (exclude false positives)
+    mismatch_filter = [
+        self.model.document_id == document_id,
+        self.model.tenant_id == tenant_id,
+        self.model.status.in_(["open", "in_progress"]),  # P5B-10 statuses
+        self.model.status != "false_positive",             # P5B-04 exclusion
+    ]
+    if code_component_id:
+        mismatch_filter.append(self.model.code_component_id == code_component_id)
+
+    open_mismatches = db.query(self.model).filter(*mismatch_filter).all()
+
+    # Map atom_id → has_critical_mismatch
+    atoms_with_mismatch: set[int] = set()
+    open_critical_count = 0
+    for m in open_mismatches:
+        if m.requirement_atom_id:
+            atoms_with_mismatch.add(m.requirement_atom_id)
+        if m.severity == "critical":
+            open_critical_count += 1
+
+    # Count false positives excluded
+    fp_count = db.query(self.model).filter(
+        self.model.document_id == document_id,
+        self.model.tenant_id == tenant_id,
+        self.model.status == "false_positive",
+    ).count()
+
+    # Compute per-type breakdown
+    by_type = {}
+    total_atoms = 0
+    covered_atoms = 0
+    weighted_total = 0
+    weighted_covered = 0
+
+    for atom_type, atoms_of_type in _group_by_type(all_atoms):
+        type_total = len(atoms_of_type)
+        type_covered = sum(1 for a in atoms_of_type if a.id not in atoms_with_mismatch)
+        weight = ATOM_WEIGHTS.get(atom_type, 1)
+
+        by_type[atom_type] = {
+            "total": type_total,
+            "covered": type_covered,
+            "score": round(type_covered / type_total, 4) if type_total else 1.0,
+            "weight": weight,
+        }
+        total_atoms += type_total
+        covered_atoms += type_covered
+        weighted_total += type_total * weight
+        weighted_covered += type_covered * weight
+
+    overall_score = round(covered_atoms / total_atoms, 4) if total_atoms else 1.0
+    weighted_score = round(weighted_covered / weighted_total, 4) if weighted_total else 1.0
+
+    return {
+        "overall_score": overall_score,
+        "weighted_score": weighted_score,
+        "by_type": by_type,
+        "total_atoms": total_atoms,
+        "covered_atoms": covered_atoms,
+        "open_critical_count": open_critical_count,
+        "false_positive_excluded": fp_count,
+    }
+
+
+def _group_by_type(atoms) -> list:
+    """Group RequirementAtom list by atom_type, returns [(type, [atoms])] sorted."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for a in atoms:
+        groups[a.atom_type].append(a)
+    return sorted(groups.items())
+```
+
+#### Step 2: New endpoint `GET /validation/{document_id}/compliance-score`
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+Add after existing GET endpoints:
+
+```python
+@router.get("/{document_id}/compliance-score")
+def get_compliance_score(
+    document_id: int,
+    code_component_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-02: Returns single compliance score for a document.
+    Optional: filter to a specific code component for link-level score.
+
+    Response:
+    {
+      "document_id": 42,
+      "overall_score": 0.84,
+      "weighted_score": 0.81,
+      "percentage": 84,
+      "grade": "B",
+      "by_type": { "API_CONTRACT": { "total": 11, "covered": 10, "score": 0.91 } },
+      "open_critical_count": 2,
+      "false_positive_excluded": 3,
+    }
+    """
+    document = crud.document.get(db, id=document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    breakdown = crud.mismatch.get_compliance_breakdown(
+        db=db,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        code_component_id=code_component_id,
+    )
+
+    if breakdown.get("overall_score") is None:
+        raise HTTPException(status_code=404, detail=breakdown.get("message"))
+
+    score = breakdown["overall_score"]
+    percentage = round(score * 100)
+
+    # Letter grade
+    if percentage >= 95: grade = "A"
+    elif percentage >= 85: grade = "B"
+    elif percentage >= 75: grade = "C"
+    elif percentage >= 60: grade = "D"
+    else: grade = "F"
+
+    return {
+        "document_id": document_id,
+        **breakdown,
+        "percentage": percentage,
+        "grade": grade,
+    }
+```
+
+#### Step 3: Frontend — Compliance Score Card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add compliance score card at the top of the validation panel, above the mismatch list:
+
+```tsx
+{complianceScore && (
+  <div className="bg-white border rounded-xl p-5 mb-6 shadow-sm">
+    <div className="flex items-center justify-between mb-4">
+      <h3 className="font-semibold text-gray-700">Documentation Compliance</h3>
+      <div className={`text-3xl font-bold ${
+        complianceScore.percentage >= 85 ? 'text-green-600' :
+        complianceScore.percentage >= 70 ? 'text-amber-500' : 'text-red-500'
+      }`}>
+        {complianceScore.percentage}%
+        <span className="text-sm ml-1 font-normal text-gray-400">
+          Grade {complianceScore.grade}
+        </span>
+      </div>
+    </div>
+
+    {/* Per-type breakdown */}
+    <div className="space-y-2">
+      {Object.entries(complianceScore.by_type).map(([type, data]) => (
+        <div key={type} className="flex items-center gap-3">
+          <span className="text-xs font-mono text-gray-500 w-40 flex-shrink-0">
+            {type.replace(/_/g, ' ')}
+          </span>
+          <div className="flex-1 bg-gray-100 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full ${
+                data.score >= 0.9 ? 'bg-green-500' :
+                data.score >= 0.7 ? 'bg-amber-400' : 'bg-red-400'
+              }`}
+              style={{ width: `${data.score * 100}%` }}
+            />
+          </div>
+          <span className="text-xs text-gray-600 w-16 text-right">
+            {data.covered}/{data.total}
+          </span>
+        </div>
+      ))}
+    </div>
+
+    {complianceScore.open_critical_count > 0 && (
+      <p className="text-xs text-red-600 mt-3">
+        ⚠ {complianceScore.open_critical_count} critical issue{complianceScore.open_critical_count > 1 ? 's' : ''} require immediate attention
+      </p>
+    )}
+  </div>
+)}
+```
+
+Fetch in `useEffect`:
+```tsx
+const fetchComplianceScore = async () => {
+  const res = await fetch(`/api/v1/validation/${documentId}/compliance-score`, { headers: authHeaders })
+  if (res.ok) setComplianceScore(await res.json())
+}
+```
+
+### Test Commands
+
+```bash
+# 1. Run validation on a document first, then:
+curl -H "Authorization: Bearer $TOKEN" \
+  "/api/v1/validation/{document_id}/compliance-score"
+
+# Expected response:
+# { "percentage": 84, "grade": "B", "by_type": { "API_CONTRACT": { "score": 0.91 ... } } }
+
+# 2. Verify weighted score differs from overall score
+# weighted_score should be lower when SECURITY_REQUIREMENT atoms have mismatches
+# (they have weight 3×)
+
+# 3. Verify false positives are excluded from compliance denominator
+# Mark a mismatch as false_positive, re-run score — false_positive_excluded should increment
+```
+
+### Risk Assessment
+- **Pure read:** No writes — cannot corrupt data
+- **No Gemini calls:** Purely DB query computation
+- **Backward compatible:** endpoint is new, no existing endpoint modified
+- **Performance:** Single complex query per request — add index on `(document_id, tenant_id, status)` in mismatches table (already exists from Phase 0)
+
+
+---
+
+## P5B-03 — 1-Click Jira Ticket From Mismatch
+
+**Ticket ID:** P5B-03
+**Priority:** P1 — Required for enterprise workflow adoption. Developers live in Jira, not DokyDoc.
+**Complexity:** Low-Medium
+**Risk:** LOW — new endpoint only; Jira API call is outbound only; no DB schema changes needed
+
+### Why This Exists
+
+A developer sees a mismatch: "PaymentService.refund() not implemented per BRD §4.2". They need to create a Jira ticket. Current workflow: copy mismatch title, switch to Jira, create ticket manually, paste description, set priority, link Epic, come back to DokyDoc and note the Jira key. That's 8 manual steps.
+
+Target workflow: Click "Create Ticket" → Jira ticket created in 1 second → Jira key shown on mismatch card → Done.
+
+### Current State
+
+**Existing:**
+- `GET /integrations/jira/projects` — lists Jira projects (uses `jira_sync_service.fetch_projects`)
+- `JiraItem` model — stores synced items from Jira
+- `IntegrationConfig` model — stores `access_token` + `base_url` per tenant
+- `jira_sync_service` — has `fetch_projects`, `fetch_epics`, `fetch_sprints`
+
+**Missing:**
+- `POST /integrations/jira/create-issue` endpoint
+- `create_issue` method on `jira_sync_service`
+- Mismatch → Jira issue link tracking (which Jira key was created from which mismatch)
+
+### What to Change
+
+#### Step 1: Add `create_issue` to `JiraSyncService`
+
+**File: `backend/app/services/jira_sync_service.py`**
+
+Add after `fetch_sprints` method:
+
+```python
+async def create_issue(
+    self,
+    *,
+    token: str,
+    base_url: str,
+    project_key: str,
+    summary: str,
+    description: str,
+    issue_type: str = "Task",      # Task | Bug | Story
+    priority: str = "Medium",      # Highest | High | Medium | Low | Lowest
+    labels: list[str] | None = None,
+    epic_key: str | None = None,
+    assignee_account_id: str | None = None,
+) -> dict:
+    """
+    P5B-03: Creates a single Jira issue and returns the created issue dict.
+    Returns: { "key": "PROJ-123", "id": "10001", "url": "https://..." }
+    """
+    import httpx
+
+    payload = {
+        "fields": {
+            "project": {"key": project_key},
+            "summary": summary,
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": description}]
+                    }
+                ]
+            },
+            "issuetype": {"name": issue_type},
+            "priority": {"name": priority},
+            "labels": labels or ["dokydoc"],
+        }
+    }
+
+    if epic_key:
+        payload["fields"]["parent"] = {"key": epic_key}
+    if assignee_account_id:
+        payload["fields"]["assignee"] = {"accountId": assignee_account_id}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{base_url}/rest/api/3/issue",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return {
+        "key": data["key"],
+        "id": data["id"],
+        "url": f"{base_url.replace('https://api.atlassian.com/ex/jira/', 'https://')}/browse/{data['key']}"
+    }
+```
+
+#### Step 2: Add `jira_issue_key` field to Mismatch model
+
+**File: `backend/app/models/mismatch.py`**
+
+Add after `user_notes` field (line 33):
+
+```python
+    # P5B-03: Jira issue key created from this mismatch (e.g. "PROJ-123")
+    jira_issue_key: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    jira_issue_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+```
+
+**New migration: `backend/alembic/versions/s16b1_mismatch_jira_fields.py`**
+
+```python
+"""
+P5B-03: Add jira_issue_key and jira_issue_url to mismatches.
+
+Revision ID: s16b1
+Revises: s16a1
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's16b1'
+down_revision = 's16a1'
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.add_column('mismatches',
+        sa.Column('jira_issue_key', sa.String(50), nullable=True))
+    op.add_column('mismatches',
+        sa.Column('jira_issue_url', sa.String(500), nullable=True))
+    op.create_index(
+        'ix_mismatches_jira_issue_key',
+        'mismatches', ['jira_issue_key'],
+        postgresql_concurrently=True
+    )
+
+def downgrade():
+    op.drop_index('ix_mismatches_jira_issue_key')
+    op.drop_column('mismatches', 'jira_issue_url')
+    op.drop_column('mismatches', 'jira_issue_key')
+```
+
+#### Step 3: New endpoint `POST /integrations/jira/create-issue`
+
+**File: `backend/app/api/endpoints/integrations.py`**
+
+Add after `trigger_jira_sync` endpoint (after line 516):
+
+```python
+@router.post("/jira/create-issue")
+async def create_jira_issue_from_mismatch(
+    mismatch_id: int = Body(...),
+    project_key: str = Body(...),
+    issue_type: str = Body("Task"),
+    priority: str = Body("Medium"),
+    epic_key: Optional[str] = Body(None),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5B-03: Creates a Jira issue from a mismatch in one click.
+
+    Auto-populates:
+    - Summary: "[DokyDoc] {mismatch_type}: {mismatch description truncated}"
+    - Description: Full mismatch details (severity, atom content, code file)
+    - Labels: ["dokydoc", mismatch_type.lower(), "validation"]
+    - Priority: mapped from severity (critical→Highest, high→High, medium→Medium)
+
+    Stores Jira key on mismatch record so duplicate prevention works.
+    """
+    config = crud_integration_config.get_by_provider(
+        db, tenant_id=tenant_id, provider="jira"
+    )
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    mismatch = crud.mismatch.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Mismatch not found.")
+
+    if mismatch.jira_issue_key:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Jira issue already exists: {mismatch.jira_issue_key}"
+        )
+
+    # Map severity to Jira priority
+    priority_map = {
+        "critical": "Highest",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "info": "Lowest",
+    }
+    jira_priority = priority_map.get(mismatch.severity.lower(), priority)
+
+    # Build summary (max 255 chars for Jira)
+    summary = f"[DokyDoc] {mismatch.mismatch_type}: {mismatch.description[:180]}"
+
+    # Build description with mismatch details
+    description = (
+        f"Detected by DokyDoc Validation Engine\n\n"
+        f"Severity: {mismatch.severity.upper()}\n"
+        f"Type: {mismatch.mismatch_type}\n"
+        f"Direction: {'BRD requirement not in code' if mismatch.direction == 'forward' else 'Code not in BRD'}\n\n"
+        f"Details:\n{mismatch.description}\n\n"
+    )
+    if mismatch.details:
+        description += f"Technical details: {str(mismatch.details)[:500]}\n\n"
+    description += f"View in DokyDoc: /dashboard/validation-panel?mismatch={mismatch.id}"
+
+    from app.services.jira_sync_service import jira_sync_service
+    try:
+        result = await jira_sync_service.create_issue(
+            token=config.access_token,
+            base_url=config.base_url or "",
+            project_key=project_key,
+            summary=summary,
+            description=description,
+            issue_type=issue_type,
+            priority=jira_priority,
+            labels=["dokydoc", mismatch.mismatch_type.lower().replace("_", "-"), "validation"],
+            epic_key=epic_key,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Jira API error: {str(e)}")
+
+    # Store Jira key on mismatch
+    from datetime import datetime
+    db.query(models.Mismatch).filter(models.Mismatch.id == mismatch_id).update({
+        "jira_issue_key": result["key"],
+        "jira_issue_url": result["url"],
+        "updated_at": datetime.now(),
+    })
+    db.commit()
+
+    return {
+        "jira_key": result["key"],
+        "jira_url": result["url"],
+        "mismatch_id": mismatch_id,
+    }
+```
+
+#### Step 4: Frontend — "Create Ticket" button on mismatch card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Inside the mismatch card actions row (near the existing "Accept/Reject" buttons from Phase 1):
+
+```tsx
+{/* Jira integration button */}
+{jiraConnected && (
+  mismatch.jira_issue_key ? (
+    <a
+      href={mismatch.jira_issue_url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-xs px-2 py-1 bg-blue-50 text-blue-700 rounded border border-blue-200 flex items-center gap-1"
+    >
+      <JiraIcon className="h-3 w-3" />
+      {mismatch.jira_issue_key}
+    </a>
+  ) : (
+    <button
+      onClick={() => handleCreateJiraTicket(mismatch.id)}
+      disabled={creatingJira === mismatch.id}
+      className="text-xs px-2 py-1 bg-gray-100 hover:bg-blue-50 hover:text-blue-700 text-gray-600 rounded border border-gray-200 flex items-center gap-1"
+    >
+      {creatingJira === mismatch.id ? (
+        <Loader2 className="h-3 w-3 animate-spin" />
+      ) : (
+        <Plus className="h-3 w-3" />
+      )}
+      Create Ticket
+    </button>
+  )
+)}
+```
+
+Handler:
+```typescript
+const handleCreateJiraTicket = async (mismatchId: number) => {
+  setCreatingJira(mismatchId)
+  try {
+    const res = await fetch('/api/v1/integrations/jira/create-issue', {
+      method: 'POST',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mismatch_id: mismatchId,
+        project_key: selectedJiraProject,  // from user's saved preference
+        issue_type: 'Task',
+      })
+    })
+    const data = await res.json()
+    if (res.ok) {
+      // Update mismatch in local state
+      setMismatches(prev => prev.map(m =>
+        m.id === mismatchId
+          ? { ...m, jira_issue_key: data.jira_key, jira_issue_url: data.jira_url }
+          : m
+      ))
+      toast.success(`Created ${data.jira_key}`)
+    } else if (res.status === 409) {
+      toast.info(`Jira ticket already exists: ${data.detail}`)
+    } else {
+      toast.error('Failed to create Jira ticket')
+    }
+  } finally {
+    setCreatingJira(null)
+  }
+}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16b1
+
+# 2. Verify columns added
+psql -c "\d mismatches" | grep "jira_issue"
+
+# 3. Test create issue (requires active Jira integration)
+curl -X POST /api/v1/integrations/jira/create-issue \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"mismatch_id": 1, "project_key": "PROJ", "issue_type": "Task"}'
+# Expected: { "jira_key": "PROJ-123", "jira_url": "https://..." }
+
+# 4. Verify stored on mismatch
+psql -c "SELECT jira_issue_key, jira_issue_url FROM mismatches WHERE id = 1"
+
+# 5. Test duplicate prevention
+# Call endpoint again for same mismatch
+# Expected: 409 "Jira issue already exists: PROJ-123"
+```
+
+### Risk Assessment
+- **No DB writes on Jira API failure:** HTTPException is raised before DB update
+- **Duplicate prevention:** 409 check on `mismatch.jira_issue_key` prevents double-creation
+- **Non-breaking:** New columns nullable, new endpoint only — nothing existing changed
+- **SSRF protection:** `config.base_url` comes from admin-configured integration, not user input
+
+
+---
+
+## P5B-04 — False Positive Workflow (Mark, Reason, Dispute, Exclude From Score)
+
+**Ticket ID:** P5B-04
+**Priority:** P0 — Without this, teams lose trust in DokyDoc. Every tool that auto-detects issues MUST have a dispute mechanism.
+**Complexity:** Low
+**Risk:** LOW — status transition only; feeds Phase 1 training flywheel
+
+### Why This Exists
+
+The AI generates mismatches. Some will be wrong. If a developer can't say "this is a false positive and here's why," they will stop trusting ALL the mismatches — including the real ones. The false positive workflow:
+1. Marks the mismatch with `status="false_positive"`
+2. Requires a reason (free text, mandatory) — "The BRD says 'authentication required' which IS implemented via the JWT middleware, the AI didn't see the middleware"
+3. Excludes false positives from the compliance score (P5B-02)
+4. Captures as a TrainingExample with `human_label="rejected"` (Phase 1 flywheel)
+5. Shows false positives in a separate filtered view so they're not lost
+
+A BA can **dispute** a false positive decision: if developer marks as FP but BA disagrees, BA can re-open as "open" with their counter-reason.
+
+### Current State
+
+**File: `backend/app/models/mismatch.py` (line 30)**
+`status: Mapped[str] = mapped_column(String, default="new", index=True, nullable=False)`
+Only one real state: `"new"`. No `false_positive`, no `disputed`, no lifecycle.
+
+**File: `backend/app/api/endpoints/validation.py`**
+No endpoint to update mismatch status. Only creation endpoints exist.
+
+**File: `backend/app/models/training_example.py`** (Phase 1)
+`TrainingExample` exists with `human_label` field. False positive capture is planned but not wired to mismatch status changes.
+
+### What to Change
+
+#### Step 1: No new migration needed for P5B-04 itself
+The status field already exists and stores strings. We add new valid values ("false_positive", "disputed") via application-layer enforcement only (P5B-10 will add a proper migration with a CHECK constraint later).
+
+However, we DO need to add `resolution_note` to mismatches:
+
+**File: `backend/app/models/mismatch.py`**
+
+Add after `user_notes` field:
+
+```python
+    # P5B-04 / P5B-10: free-text reason for status transitions
+    # Required when marking as false_positive; optional for resolved/verified
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # P5B-04: who last changed the status and when
+    status_changed_by_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True
+    )
+    status_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+```
+
+**Add to migration s16b1** (add to upgrade() of s16b1 since we're already modifying mismatches):
+```python
+# In s16b1 upgrade(), add:
+op.add_column('mismatches',
+    sa.Column('resolution_note', sa.Text(), nullable=True))
+op.add_column('mismatches',
+    sa.Column('status_changed_by_id', sa.Integer(),
+              sa.ForeignKey('users.id'), nullable=True))
+op.add_column('mismatches',
+    sa.Column('status_changed_at', sa.DateTime(), nullable=True))
+```
+
+#### Step 2: Add `mark_false_positive` and `dispute_false_positive` to CRUDMismatch
+
+**File: `backend/app/crud/crud_mismatch.py`**
+
+```python
+def mark_false_positive(
+    self,
+    db: Session,
+    *,
+    mismatch_id: int,
+    tenant_id: int,
+    reason: str,
+    changed_by_user_id: int,
+) -> "Mismatch":
+    """
+    P5B-04: Mark a mismatch as false positive.
+    reason is REQUIRED — raises ValueError if empty.
+    Captures TrainingExample with human_label='rejected'.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("A reason is required when marking a mismatch as false positive")
+
+    mismatch = self.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise ValueError(f"Mismatch {mismatch_id} not found")
+
+    from datetime import datetime
+    mismatch.status = "false_positive"
+    mismatch.resolution_note = reason.strip()
+    mismatch.status_changed_by_id = changed_by_user_id
+    mismatch.status_changed_at = datetime.now()
+    db.commit()
+    db.refresh(mismatch)
+
+    # Capture training example (Phase 1 flywheel)
+    try:
+        from app.crud.crud_training_example import training_example as crud_te
+        crud_te.create_from_mismatch(
+            db=db,
+            mismatch_id=mismatch_id,
+            tenant_id=tenant_id,
+            ai_output={"verdict": "mismatch", "confidence": mismatch.confidence},
+            input_context={
+                "mismatch_type": mismatch.mismatch_type,
+                "description": mismatch.description,
+                "human_label": "rejected",
+                "rejection_reason": reason,
+            }
+        )
+    except Exception:
+        pass  # Never block status update due to training capture failure
+
+    return mismatch
+
+
+def dispute_false_positive(
+    self,
+    db: Session,
+    *,
+    mismatch_id: int,
+    tenant_id: int,
+    dispute_reason: str,
+    changed_by_user_id: int,
+) -> "Mismatch":
+    """
+    P5B-04: Re-open a false positive as disputed (BA disagrees with FP decision).
+    Sets status to 'disputed' — shows in both FP view and open mismatch view.
+    """
+    if not dispute_reason or not dispute_reason.strip():
+        raise ValueError("A dispute reason is required")
+
+    mismatch = self.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise ValueError(f"Mismatch {mismatch_id} not found")
+
+    if mismatch.status != "false_positive":
+        raise ValueError("Can only dispute a mismatch that is marked as false positive")
+
+    from datetime import datetime
+    mismatch.status = "disputed"
+    mismatch.resolution_note = (
+        f"[DISPUTED by user {changed_by_user_id}]: {dispute_reason.strip()}\n"
+        f"[Previous FP reason]: {mismatch.resolution_note or 'none'}"
+    )
+    mismatch.status_changed_by_id = changed_by_user_id
+    mismatch.status_changed_at = datetime.now()
+    db.commit()
+    db.refresh(mismatch)
+    return mismatch
+```
+
+#### Step 3: New endpoints
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+from pydantic import BaseModel
+
+class MismatchFalsePositiveRequest(BaseModel):
+    reason: str  # Required — min 10 characters
+
+class MismatchDisputeRequest(BaseModel):
+    dispute_reason: str
+
+
+@router.post("/mismatches/{mismatch_id}/false-positive")
+def mark_mismatch_false_positive(
+    mismatch_id: int,
+    body: MismatchFalsePositiveRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-04: Mark a mismatch as false positive with required reason.
+    Excludes from compliance score. Captures training data.
+    """
+    if len(body.reason.strip()) < 10:
+        raise HTTPException(status_code=422, detail="Reason must be at least 10 characters")
+    try:
+        mismatch = crud.mismatch.mark_false_positive(
+            db=db,
+            mismatch_id=mismatch_id,
+            tenant_id=tenant_id,
+            reason=body.reason,
+            changed_by_user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "false_positive", "mismatch_id": mismatch_id, "reason": mismatch.resolution_note}
+
+
+@router.post("/mismatches/{mismatch_id}/dispute")
+def dispute_false_positive(
+    mismatch_id: int,
+    body: MismatchDisputeRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-04: Dispute a false positive decision. Re-opens as 'disputed'.
+    Typically used by BA when developer incorrectly marked as FP.
+    """
+    try:
+        mismatch = crud.mismatch.dispute_false_positive(
+            db=db,
+            mismatch_id=mismatch_id,
+            tenant_id=tenant_id,
+            dispute_reason=body.dispute_reason,
+            changed_by_user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "disputed", "mismatch_id": mismatch_id}
+```
+
+#### Step 4: Frontend — False Positive button on mismatch card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+In the mismatch card action buttons (next to "Accept/Reject" from Phase 1):
+
+```tsx
+{/* False Positive button */}
+{mismatch.status !== 'false_positive' && mismatch.status !== 'resolved' && (
+  <button
+    onClick={() => setFalsePositiveMismatch(mismatch)}
+    className="text-xs px-2 py-1 bg-gray-100 hover:bg-orange-50 hover:text-orange-700 text-gray-600 rounded border border-gray-200"
+  >
+    Not Real
+  </button>
+)}
+
+{/* Show FP badge + dispute option */}
+{mismatch.status === 'false_positive' && (
+  <div className="flex items-center gap-1">
+    <span className="text-xs px-2 py-1 bg-orange-100 text-orange-700 rounded">
+      False Positive
+    </span>
+    <button
+      onClick={() => handleDispute(mismatch.id)}
+      className="text-xs text-gray-400 hover:text-red-500"
+      title="Dispute this false positive decision"
+    >
+      Dispute
+    </button>
+  </div>
+)}
+```
+
+False Positive modal:
+```tsx
+{falsePositiveMismatch && (
+  <Modal
+    title="Mark as False Positive"
+    onClose={() => setFalsePositiveMismatch(null)}
+  >
+    <p className="text-sm text-gray-600 mb-3">
+      Explain why this is NOT a real mismatch. This helps train DokyDoc to be more accurate.
+    </p>
+    <textarea
+      value={fpReason}
+      onChange={(e) => setFpReason(e.target.value)}
+      placeholder="e.g. 'The authentication IS implemented via the JWT middleware in app/middleware/auth.py — the AI didn't see it because the file wasn't attached'"
+      className="w-full text-sm border rounded p-2 h-24 resize-none"
+      minLength={10}
+    />
+    <p className="text-xs text-gray-400 mt-1">{fpReason.length}/10 characters minimum</p>
+    <div className="flex gap-2 mt-3">
+      <button
+        onClick={() => submitFalsePositive(falsePositiveMismatch.id, fpReason)}
+        disabled={fpReason.length < 10}
+        className="px-3 py-1.5 bg-orange-500 text-white rounded text-sm disabled:opacity-40"
+      >
+        Confirm False Positive
+      </button>
+      <button
+        onClick={() => setFalsePositiveMismatch(null)}
+        className="px-3 py-1.5 text-gray-600 text-sm"
+      >
+        Cancel
+      </button>
+    </div>
+  </Modal>
+)}
+```
+
+Also add a filter tab for false positives:
+```tsx
+<TabGroup>
+  <Tab active={filter === 'open'} onClick={() => setFilter('open')}>
+    Open ({openCount})
+  </Tab>
+  <Tab active={filter === 'false_positive'} onClick={() => setFilter('false_positive')}>
+    False Positives ({fpCount})
+  </Tab>
+  <Tab active={filter === 'disputed'} onClick={() => setFilter('disputed')}>
+    Disputed ({disputedCount})
+  </Tab>
+</TabGroup>
+```
+
+### Test Commands
+
+```bash
+# 1. Mark mismatch as false positive (requires reason)
+curl -X POST /api/v1/validation/mismatches/1/false-positive \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Authentication IS implemented via JWT middleware"}'
+# Expected: { "status": "false_positive", "mismatch_id": 1 }
+
+# 2. Try without reason (should fail)
+curl -X POST /api/v1/validation/mismatches/1/false-positive \
+  -d '{"reason": "short"}'
+# Expected: 422 "Reason must be at least 10 characters"
+
+# 3. Verify excluded from compliance score
+# GET /validation/{doc_id}/compliance-score
+# false_positive_excluded should be 1
+
+# 4. Dispute the FP decision
+curl -X POST /api/v1/validation/mismatches/1/dispute \
+  -d '{"dispute_reason": "The middleware is not enough, BRD requires explicit endpoint auth"}'
+# Expected: { "status": "disputed" }
+
+# 5. Verify training example captured
+psql -c "SELECT human_label, input_context FROM training_examples ORDER BY id DESC LIMIT 1"
+# Expected: human_label = 'rejected', input_context contains rejection_reason
+```
+
+### Risk Assessment
+- **No schema migration needed for status** — status is a free-form String column, existing values unaffected
+- **Training example capture is try/except guarded** — FP marking never fails due to training error
+- **Reason validation both backend + frontend** — prevents useless "idk" reasons that don't train the model
+- **Audit trail via `resolution_note` + `status_changed_at`** — full accountability
+
+
+---
+
+## P5B-05 — Mismatch Evidence Transparency (Show Exactly What AI Checked)
+
+**Ticket ID:** P5B-05
+**Priority:** P0 — Developers will reject mismatch findings they can't verify. Showing the evidence builds trust.
+**Complexity:** Low
+**Risk:** LOW — read-only; just surfacing data already stored in `mismatch.details` JSONB field
+
+### Why This Exists
+
+Current mismatch card shows: "API_CONTRACT: POST /payments missing rate limiting"
+
+Developer's response: "But we DO have rate limiting! Show me where you looked."
+
+Currently they can't. DokyDoc's validation engine sees `structured_analysis` from the code file and the atom content from the BRD — but this evidence is NOT shown to the user. It's buried in the `details` JSONB field or dropped entirely.
+
+After P5B-05, every mismatch has an expandable "Evidence" panel:
+
+```
+[▼ Show Evidence]
+  BRD Requirement (REQ-007):
+    "API /payments/charge must enforce a rate limit of max 30 requests per minute per user"
+
+  Code DokyDoc Analyzed (payment_service.py):
+    api_contracts: [{ method: "POST", path: "/payments/charge", auth: "bearer_token" }]
+    data_flows: ["request → rate_check → charge_processor → db_write"]
+    internal_imports: ["from ratelimit import limits"]  ← This is the key field
+
+  What AI Concluded:
+    "rate_limit import found but no decorator applied to the endpoint function"
+    Confidence: 0.78
+
+  AI's Raw Reasoning:
+    "The code imports ratelimit library but the @limits() decorator is not visible
+     on the charge endpoint in structured_analysis.api_contracts[0]"
+```
+
+### Current State
+
+**File: `backend/app/models/mismatch.py` (line 31)**
+`details: Mapped[dict] = mapped_column(JSONB, nullable=True)` — JSONB field exists but is inconsistently populated. Some mismatches have `details={"verdict": "missing", "evidence": "..."}`, others have null.
+
+**File: `backend/app/services/validation_service.py` (line 291-340)**
+`call_gemini_for_typed_validation` returns a `mismatches` list. Each mismatch dict includes whatever Gemini returns — but `atom_content`, `code_analysis_snapshot`, and `confidence_reasoning` are NOT systematically stored in `details`.
+
+### What to Change
+
+#### Step 1: Ensure `details` JSONB is populated with evidence on mismatch creation
+
+**File: `backend/app/services/ai/gemini.py`**
+
+In `call_gemini_for_typed_validation`, the prompt already asks Gemini for `evidence` per mismatch. Ensure the prompt output schema includes `confidence_reasoning`:
+
+Find the section where the prompt is built (around line 700-760) and ensure the JSON output schema includes:
+
+```python
+# The existing prompt already requests these fields per mismatch.
+# Ensure these keys are explicitly in the schema section:
+"""
+Each mismatch in the array must have these fields:
+{
+  "atom_local_id": "REQ-001",       // which atom
+  "mismatch_type": "...",           // type of gap
+  "description": "...",             // human-readable description
+  "severity": "critical|high|medium|low|info",
+  "confidence": "high|medium|low",
+  "evidence": "...",                // one sentence: what the AI found (or didn't find)
+  "confidence_reasoning": "..."     // NEW: why AI is confident in this finding
+}
+"""
+```
+
+#### Step 2: Store richer evidence in `details` when creating mismatch
+
+**File: `backend/app/services/validation_service.py`**
+
+In the `create_with_link` call (line ~315-325), enrich the `obj_in` dict with evidence data:
+
+```python
+# BEFORE:
+new_mismatch = crud.mismatch.create_with_link(
+    db=db,
+    obj_in={
+        **m,
+        "direction": "forward",
+        "requirement_atom_id": db_atom_id,
+    },
+    link_id=link.id,
+    owner_id=user_id,
+    tenant_id=tenant_id,
+)
+
+# AFTER — enrich with evidence snapshot:
+# Find the atom's full content for evidence
+atom_content = next(
+    (a.content for a in atoms if a.atom_id == m.get("atom_local_id", "")),
+    None
+)
+
+# Extract relevant snippet from code_analysis for evidence
+code_evidence_snapshot = _extract_evidence_snapshot(
+    code_analysis=code_analysis,
+    atom_type=atype,
+    mismatch_description=m.get("description", ""),
+)
+
+new_mismatch = crud.mismatch.create_with_link(
+    db=db,
+    obj_in={
+        **m,
+        "direction": "forward",
+        "requirement_atom_id": db_atom_id,
+        # P5B-05: store evidence for transparency
+        "details": {
+            **(m.get("details") or {}),
+            "evidence": m.get("evidence", ""),
+            "confidence_reasoning": m.get("confidence_reasoning", ""),
+            "atom_content": atom_content,
+            "atom_type": atype,
+            "code_evidence": code_evidence_snapshot,
+            "validation_timestamp": datetime.now().isoformat(),
+        }
+    },
+    link_id=link.id,
+    owner_id=user_id,
+    tenant_id=tenant_id,
+)
+```
+
+**Helper function** (add to `validation_service.py`):
+
+```python
+def _extract_evidence_snapshot(
+    code_analysis: dict,
+    atom_type: str,
+    mismatch_description: str,
+) -> dict:
+    """
+    P5B-05: Extract the specific structured_analysis section most relevant
+    to the atom_type being checked. Used to populate mismatch.details.code_evidence.
+    Only stores the fields that matter for each atom type — not the full analysis.
+    """
+    if not code_analysis:
+        return {}
+
+    # Which structured_analysis fields matter per atom type
+    RELEVANT_FIELDS_BY_TYPE = {
+        "API_CONTRACT":           ["api_contracts", "auth_patterns"],
+        "BUSINESS_RULE":          ["business_logic", "validation_rules", "functions"],
+        "FUNCTIONAL_REQUIREMENT": ["purpose", "responsibilities", "functions"],
+        "DATA_CONSTRAINT":        ["data_models", "validation_rules", "schemas"],
+        "WORKFLOW_STEP":          ["data_flows", "functions", "component_interactions"],
+        "ERROR_SCENARIO":         ["error_handling", "exceptions", "functions"],
+        "SECURITY_REQUIREMENT":   ["auth_patterns", "security_controls", "dependencies"],
+        "NFR":                    ["performance_notes", "caching_patterns", "async_patterns"],
+        "INTEGRATION_POINT":      ["external_calls", "component_interactions", "webhooks"],
+    }
+
+    relevant = RELEVANT_FIELDS_BY_TYPE.get(atom_type, ["purpose", "responsibilities"])
+    snapshot = {}
+    for field in relevant:
+        val = code_analysis.get(field)
+        if val:
+            # Truncate lists to avoid storing massive evidence blobs
+            if isinstance(val, list):
+                snapshot[field] = val[:5]  # Max 5 items
+            elif isinstance(val, str):
+                snapshot[field] = val[:500]  # Max 500 chars
+            else:
+                snapshot[field] = val
+    return snapshot
+```
+
+#### Step 3: New endpoint `GET /validation/mismatches/{id}/evidence`
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+@router.get("/mismatches/{mismatch_id}/evidence")
+def get_mismatch_evidence(
+    mismatch_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-05: Returns the evidence DokyDoc used to detect this mismatch.
+    Shows: BRD atom content, code analysis snapshot, AI reasoning.
+    """
+    mismatch = crud.mismatch.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    details = mismatch.details or {}
+
+    # Load the requirement atom content
+    atom_content = details.get("atom_content")
+    if not atom_content and mismatch.requirement_atom_id:
+        from app.models.requirement_atom import RequirementAtom
+        atom = db.query(RequirementAtom).filter(
+            RequirementAtom.id == mismatch.requirement_atom_id
+        ).first()
+        if atom:
+            atom_content = atom.content
+
+    return {
+        "mismatch_id": mismatch_id,
+        "mismatch_type": mismatch.mismatch_type,
+        "severity": mismatch.severity,
+        "evidence": {
+            "brd_requirement": {
+                "atom_id": details.get("atom_local_id"),
+                "atom_type": details.get("atom_type", mismatch.mismatch_type),
+                "content": atom_content or "Not available (pre-P5B-05 mismatch)",
+            },
+            "code_analyzed": {
+                "snapshot": details.get("code_evidence", {}),
+                "note": "Subset of structured_analysis relevant to this atom type"
+            },
+            "ai_conclusion": {
+                "verdict": details.get("verdict", "mismatch"),
+                "evidence_sentence": details.get("evidence", mismatch.description),
+                "confidence": mismatch.confidence,
+                "reasoning": details.get("confidence_reasoning", "Not available"),
+                "validated_at": details.get("validation_timestamp"),
+            }
+        }
+    }
+```
+
+#### Step 4: Frontend — Evidence expandable panel on mismatch card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add collapsible evidence section inside each mismatch card:
+
+```tsx
+const [expandedEvidence, setExpandedEvidence] = useState<number | null>(null)
+const [evidenceData, setEvidenceData] = useState<Record<number, any>>({})
+
+const loadEvidence = async (mismatchId: number) => {
+  if (evidenceData[mismatchId]) {
+    setExpandedEvidence(expandedEvidence === mismatchId ? null : mismatchId)
+    return
+  }
+  const res = await fetch(`/api/v1/validation/mismatches/${mismatchId}/evidence`, { headers: authHeaders })
+  if (res.ok) {
+    setEvidenceData(prev => ({ ...prev, [mismatchId]: await res.json() }))
+    setExpandedEvidence(mismatchId)
+  }
+}
+
+// Inside mismatch card:
+<button
+  onClick={() => loadEvidence(mismatch.id)}
+  className="text-xs text-blue-500 hover:underline flex items-center gap-1 mt-2"
+>
+  {expandedEvidence === mismatch.id ? (
+    <><ChevronUp className="h-3 w-3" /> Hide Evidence</>
+  ) : (
+    <><ChevronDown className="h-3 w-3" /> Show Evidence</>
+  )}
+</button>
+
+{expandedEvidence === mismatch.id && evidenceData[mismatch.id] && (
+  <div className="mt-2 border-t pt-2 space-y-2 text-xs">
+    <div className="bg-blue-50 rounded p-2">
+      <p className="font-semibold text-blue-700 mb-1">
+        BRD Requirement ({evidenceData[mismatch.id].evidence.brd_requirement.atom_type}):
+      </p>
+      <p className="text-gray-700 italic">
+        "{evidenceData[mismatch.id].evidence.brd_requirement.content}"
+      </p>
+    </div>
+    <div className="bg-gray-50 rounded p-2">
+      <p className="font-semibold text-gray-600 mb-1">Code Analyzed:</p>
+      <pre className="text-gray-600 whitespace-pre-wrap overflow-x-auto">
+        {JSON.stringify(evidenceData[mismatch.id].evidence.code_analyzed.snapshot, null, 2)}
+      </pre>
+    </div>
+    <div className="bg-amber-50 rounded p-2">
+      <p className="font-semibold text-amber-700 mb-1">AI Conclusion:</p>
+      <p className="text-gray-700">
+        {evidenceData[mismatch.id].evidence.ai_conclusion.evidence_sentence}
+      </p>
+      {evidenceData[mismatch.id].evidence.ai_conclusion.reasoning && (
+        <p className="text-gray-500 mt-1">
+          Reasoning: {evidenceData[mismatch.id].evidence.ai_conclusion.reasoning}
+        </p>
+      )}
+      <p className="text-gray-400 mt-1">
+        Confidence: {evidenceData[mismatch.id].evidence.ai_conclusion.confidence}
+      </p>
+    </div>
+  </div>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Run validation on a document
+# 2. Check details field is populated
+psql -c "SELECT id, details FROM mismatches ORDER BY id DESC LIMIT 1"
+# Expected: details contains code_evidence, atom_content, evidence keys
+
+# 3. Call evidence endpoint
+curl /api/v1/validation/mismatches/1/evidence
+# Expected: full structured evidence object
+
+# 4. For old mismatches (pre-P5B-05): graceful degradation
+# brd_requirement.content = "Not available (pre-P5B-05 mismatch)"
+# reasoning = "Not available"
+```
+
+### Risk Assessment
+- **No new columns needed** — uses existing `details` JSONB field
+- **Backward compatible** — old mismatches get "Not available" for fields not previously stored
+- **Lazy loading** — evidence loaded on demand (click), not on page load
+- **Snapshot max size** — `_extract_evidence_snapshot` caps list fields at 5 items and strings at 500 chars — prevents bloated JSONB blobs
+
+
+---
+
+## P5B-06 — Webhook → Auto Re-validation → Smart Mismatch Auto-Close
+
+**Ticket ID:** P5B-06
+**Priority:** P1 — Without this, DokyDoc is a one-shot tool. Enterprise teams need continuous validation as code evolves.
+**Complexity:** Medium-High
+**Risk:** MEDIUM — modifies Celery task pipeline; all changes are additive and guarded
+
+### Why This Exists
+
+Current flow after developer pushes code to GitHub:
+```
+GitHub push → webhook → code re-analysis task (done)
+```
+
+Missing:
+```
+→ auto re-validation (are the mismatches now fixed?)
+→ auto-close resolved mismatches (celebrate progress!)
+→ reopen regressions (something broke)
+→ notify team of changes
+```
+
+Without this, a developer fixes a critical mismatch, pushes code, and DokyDoc still shows it as OPEN. They have to manually re-run validation. That's broken.
+
+### Current State
+
+**File: `backend/app/api/endpoints/webhooks.py` (line ~310-325)**
+After successful push, dispatches `webhook_triggered_analysis.delay(...)`. This re-analyzes changed code files but **does NOT trigger re-validation**.
+
+**File: `backend/app/tasks/code_analysis_tasks.py`**
+`webhook_triggered_analysis` task — completes when code analysis is done. Has no post-analysis hook to trigger validation.
+
+**File: `backend/app/crud/crud_mismatch.py` (line 63-80)**
+`remove_by_link` — deletes ALL mismatches on re-validation. This is the blunt-force approach we're replacing with smart compare-and-merge.
+
+### What to Change
+
+#### Step 1: New Celery task `auto_revalidate_after_analysis`
+
+**New content in `backend/app/tasks/code_analysis_tasks.py`** (or a new file `backend/app/tasks/validation_tasks.py`):
+
+```python
+@celery_app.task(name="auto_revalidate_after_analysis", max_retries=2, bind=True)
+def auto_revalidate_after_analysis(
+    self,
+    repo_id: int,
+    tenant_id: int,
+    changed_component_ids: list[int],
+    commit_hash: str | None = None,
+):
+    """
+    P5B-06: Triggered after code re-analysis to auto-run validation and smart-merge results.
+
+    For each document linked to changed code components:
+    1. Run validation ONLY for the changed components (not entire document)
+    2. Compare new mismatches vs existing open mismatches
+    3. Auto-close mismatches that no longer appear (developer fixed them)
+    4. Keep existing mismatches that still appear (still broken)
+    5. Add new mismatches that weren't there before (regressions)
+    6. Send notification summary to document owners
+    """
+    from app.db.session import SessionLocal
+    from app.services.validation_service import ValidationService
+    from app.crud import crud_document_code_link, crud_mismatch, crud_notification
+
+    db = SessionLocal()
+    try:
+        validation_svc = ValidationService()
+
+        # Find all document-code links that involve the changed components
+        affected_links = crud_document_code_link.get_by_component_ids(
+            db=db,
+            component_ids=changed_component_ids,
+            tenant_id=tenant_id,
+        )
+
+        if not affected_links:
+            return {"status": "no_affected_links", "repo_id": repo_id}
+
+        results = {
+            "auto_closed": 0,
+            "still_open": 0,
+            "new_mismatches": 0,
+            "documents_revalidated": set(),
+        }
+
+        for link in affected_links:
+            try:
+                link_result = _revalidate_link_and_merge(
+                    db=db,
+                    link=link,
+                    tenant_id=tenant_id,
+                    validation_svc=validation_svc,
+                    commit_hash=commit_hash,
+                )
+                results["auto_closed"] += link_result["closed"]
+                results["still_open"] += link_result["still_open"]
+                results["new_mismatches"] += link_result["new"]
+                results["documents_revalidated"].add(link.document_id)
+
+            except Exception as e:
+                logger.warning(
+                    f"Auto-revalidation failed for link {link.id}: {e}"
+                )
+                # Continue with other links — never stop batch for one failure
+
+        # Send notification if anything changed
+        total_changes = results["auto_closed"] + results["new_mismatches"]
+        if total_changes > 0:
+            _notify_validation_changes(
+                db=db, tenant_id=tenant_id,
+                results=results, commit_hash=commit_hash,
+            )
+
+        results["documents_revalidated"] = list(results["documents_revalidated"])
+        return results
+
+    finally:
+        db.close()
+
+
+def _revalidate_link_and_merge(
+    db,
+    link,
+    tenant_id: int,
+    validation_svc,
+    commit_hash: str | None,
+) -> dict:
+    """
+    Runs validation for ONE document-code link and merges results with existing mismatches.
+
+    Strategy:
+    1. Get existing open mismatches for this link (before re-validation)
+    2. Run fresh validation (generates new mismatch set)
+    3. Compare: new set vs old set using (atom_id + mismatch_type) as the key
+    4. Matches in BOTH → still_open (keep as-is, update details if changed)
+    5. In OLD only → auto_close (developer fixed it)
+    6. In NEW only → add as new mismatch
+    """
+    import asyncio
+
+    # 1. Get existing open mismatches
+    existing_open = db.query(Mismatch).filter(
+        Mismatch.document_id == link.document_id,
+        Mismatch.code_component_id == link.code_component_id,
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.status.in_(["open", "in_progress"]),
+    ).all()
+
+    # Key for matching: atom_id + mismatch_type (normalized)
+    def mismatch_key(m_dict_or_obj) -> str:
+        if isinstance(m_dict_or_obj, dict):
+            return f"{m_dict_or_obj.get('requirement_atom_id','X')}::{m_dict_or_obj.get('mismatch_type','')}"
+        return f"{m_dict_or_obj.requirement_atom_id}::{m_dict_or_obj.mismatch_type}"
+
+    existing_keys = {mismatch_key(m): m for m in existing_open}
+
+    # 2. Run fresh validation for this specific link
+    # Get document and component
+    document = db.query(Document).get(link.document_id)
+    component = db.query(CodeComponent).get(link.code_component_id)
+
+    if not document or not component:
+        return {"closed": 0, "still_open": len(existing_open), "new": 0}
+
+    # Run validation without destroying existing mismatches first
+    new_mismatches_raw = asyncio.get_event_loop().run_until_complete(
+        validation_svc.run_validation_for_link_preview(
+            db=db,
+            document=document,
+            component=component,
+            tenant_id=tenant_id,
+        )
+    )
+
+    new_keys = {mismatch_key(m): m for m in new_mismatches_raw}
+
+    # 3. Compare and merge
+    closed_count = 0
+    new_count = 0
+    from datetime import datetime
+
+    # Auto-close mismatches no longer detected
+    for key, existing_m in existing_keys.items():
+        if key not in new_keys:
+            existing_m.status = "auto_closed"
+            existing_m.resolution_note = (
+                f"Auto-closed: not detected after code push"
+                + (f" (commit {commit_hash[:8]})" if commit_hash else "")
+            )
+            existing_m.updated_at = datetime.now()
+            # P5B-11: store commit hash that resolved it
+            if hasattr(existing_m, 'resolved_commit_hash'):
+                existing_m.resolved_commit_hash = commit_hash
+            closed_count += 1
+
+    # Add genuinely new mismatches
+    for key, new_m_data in new_keys.items():
+        if key not in existing_keys:
+            try:
+                crud.mismatch.create_with_link(
+                    db=db,
+                    obj_in={**new_m_data, "direction": "forward"},
+                    link_id=link.id,
+                    owner_id=1,  # system user — auto-validation
+                    tenant_id=tenant_id,
+                )
+                new_count += 1
+            except Exception:
+                pass
+
+    db.commit()
+
+    return {
+        "closed": closed_count,
+        "still_open": len(existing_keys) - closed_count,
+        "new": new_count,
+    }
+
+
+def _notify_validation_changes(db, tenant_id, results, commit_hash):
+    """Send in-app notification summarizing what changed after code push."""
+    try:
+        from app.services.notification_service import notification_service
+        n_docs = len(results["documents_revalidated"])
+        message_parts = []
+        if results["auto_closed"] > 0:
+            message_parts.append(f"✅ {results['auto_closed']} mismatch(es) auto-closed (code fixed)")
+        if results["new_mismatches"] > 0:
+            message_parts.append(f"⚠️ {results['new_mismatches']} new mismatch(es) detected")
+
+        if message_parts:
+            notification_service.create(
+                db,
+                tenant_id=tenant_id,
+                title="Validation updated after code push",
+                body="\n".join(message_parts),
+                notification_type="validation_auto_update",
+                metadata={"commit_hash": commit_hash, "docs_affected": n_docs},
+            )
+    except Exception:
+        pass  # Notification failure never blocks the task
+```
+
+#### Step 2: Hook auto-revalidate into `webhook_triggered_analysis`
+
+**File: `backend/app/tasks/code_analysis_tasks.py`**
+
+Find `webhook_triggered_analysis` task. After the analysis completes and components are updated, add:
+
+```python
+# At end of webhook_triggered_analysis, after code analysis complete:
+# P5B-06: Trigger auto re-validation for changed components
+try:
+    changed_component_ids = [
+        c.id for c in updated_components  # List of newly analyzed CodeComponent objects
+    ]
+    if changed_component_ids:
+        auto_revalidate_after_analysis.apply_async(
+            kwargs={
+                "repo_id": repo_id,
+                "tenant_id": tenant_id,
+                "changed_component_ids": changed_component_ids,
+                "commit_hash": commit_hash,
+            },
+            countdown=30,  # Wait 30s for analysis to fully settle before validating
+        )
+        logger.info(
+            f"Webhook analysis done — queued auto-revalidation for "
+            f"{len(changed_component_ids)} components"
+        )
+except Exception as e:
+    logger.warning(f"Could not queue auto-revalidation (non-fatal): {e}")
+```
+
+#### Step 3: Add `get_by_component_ids` to `CRUDDocumentCodeLink`
+
+**File: `backend/app/crud/crud_document_code_link.py`** (or equivalent CRUD file):
+
+```python
+def get_by_component_ids(
+    self,
+    db: Session,
+    *,
+    component_ids: list[int],
+    tenant_id: int,
+) -> list:
+    """P5B-06: Find all document-code links for a list of component IDs."""
+    if not component_ids:
+        return []
+    return db.query(self.model).filter(
+        self.model.code_component_id.in_(component_ids),
+        self.model.tenant_id == tenant_id,
+    ).all()
+```
+
+#### Step 4: New migration for `resolved_commit_hash` on mismatches
+
+Add to `s16b1` (or create `s16c1`):
+```python
+op.add_column('mismatches',
+    sa.Column('resolved_commit_hash', sa.String(40), nullable=True))
+op.add_column('mismatches',
+    sa.Column('created_commit_hash', sa.String(40), nullable=True))
+```
+
+(These overlap with P5B-11 — merge into one migration.)
+
+#### Step 5: Frontend — "Auto-Updated" badge on recently auto-closed mismatches
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+```tsx
+{mismatch.status === 'auto_closed' && (
+  <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full flex items-center gap-1">
+    <CheckCircle className="h-3 w-3" />
+    Auto-resolved after code push
+  </span>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Create a mismatch manually via validation
+# Note the mismatch ID
+
+# 2. Simulate webhook push that fixes the code
+# (In testing: directly call auto_revalidate_after_analysis)
+python -c "
+from app.tasks.code_analysis_tasks import auto_revalidate_after_analysis
+auto_revalidate_after_analysis(
+    repo_id=1, tenant_id=1,
+    changed_component_ids=[5],
+    commit_hash='abc123'
+)
+"
+
+# 3. Verify mismatch auto-closed
+psql -c "SELECT status, resolution_note FROM mismatches WHERE id = {id}"
+# Expected: status='auto_closed', resolution_note contains 'abc123'
+
+# 4. Test notification created
+psql -c "SELECT title, body FROM notifications ORDER BY id DESC LIMIT 1"
+```
+
+### Risk Assessment
+- **`countdown=30`**: Prevents validation running on mid-analysis state
+- **Never deletes mismatches**: Only changes status to `auto_closed` — history preserved
+- **Per-link errors don't stop batch**: try/except per link — 1 failure doesn't block 20 others
+- **False positive protection**: `auto_closed` mismatches that were manually marked FP won't be re-opened (filter only `open` + `in_progress`)
+- **`run_validation_for_link_preview` must be added**: This is a new non-destructive validation method that returns results without writing to DB first — implement alongside this task
+
+
+---
+
+## P5B-07 — Multi-File Coverage Matrix (BRD Rows × Code File Columns)
+
+**Ticket ID:** P5B-07
+**Priority:** P1 — Answers the manager question: "which code file covers which requirement?"
+**Complexity:** Medium
+**Risk:** LOW — read-only computation, new endpoint + frontend component only
+
+### Why This Exists
+
+When a BRD has 50 requirements and a repo has 20 files, a manager needs to see at a glance which files cover which requirements, and where the gaps are. The Coverage Matrix view shows exactly this:
+
+```
+                     payment_svc.py   auth.py   models.py   utils.py
+REQ-001 API /charge     ✅ 100%        -          -           -
+REQ-002 Auth required   ✅ 100%      ✅ 100%      -           -
+REQ-003 Rate limit       ⚠️ 50%       -           -           -
+REQ-004 DB schema        -            -         ✅ 100%       -
+REQ-005 Audit log        ❌ 0%        -           -          ⚠️ 50%
+```
+
+Color code: green (≥90%), amber (50-89%), red (<50%), dash (not linked).
+
+This is also the answer to "which files should I attach for better coverage?" — the matrix shows which requirements have no linked code file.
+
+### Current State
+
+No coverage matrix endpoint or view exists. Individual mismatches are shown per-document, but there is no matrix aggregation that joins `requirement_atoms → mismatches → code_components`.
+
+### What to Change
+
+#### Step 1: New endpoint `GET /validation/{document_id}/coverage-matrix`
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+@router.get("/{document_id}/coverage-matrix")
+def get_coverage_matrix(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-07: Returns coverage matrix: atoms × code files.
+    Each cell shows coverage score (0-100) and open mismatch count.
+
+    Response:
+    {
+      "atoms": [{ id, atom_id, content, atom_type, criticality }],
+      "components": [{ id, name, location, language }],
+      "matrix": {
+        "{atom_id}::{component_id}": {
+          "coverage_score": 0.85,
+          "open_mismatches": 1,
+          "critical_mismatches": 0,
+          "status": "partial"  // "covered" | "partial" | "missing" | "not_linked"
+        }
+      }
+    }
+    """
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.code_component import CodeComponent
+    from app.models.document_code_link import DocumentCodeLink
+
+    # Load all atoms for this document
+    atoms = db.query(RequirementAtom).filter(
+        RequirementAtom.document_id == document_id,
+        RequirementAtom.tenant_id == tenant_id,
+    ).order_by(RequirementAtom.atom_id).all()
+
+    if not atoms:
+        raise HTTPException(status_code=404, detail="No atoms found. Run validation first.")
+
+    # Load all linked code components
+    links = db.query(DocumentCodeLink).filter(
+        DocumentCodeLink.document_id == document_id,
+        DocumentCodeLink.tenant_id == tenant_id,
+    ).all()
+    component_ids = [l.code_component_id for l in links]
+
+    components = db.query(CodeComponent).filter(
+        CodeComponent.id.in_(component_ids)
+    ).all() if component_ids else []
+
+    # Load all open mismatches for this document
+    open_mismatches = db.query(Mismatch).filter(
+        Mismatch.document_id == document_id,
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.status.in_(["open", "in_progress"]),
+        Mismatch.status != "false_positive",
+    ).all()
+
+    # Build matrix: key = "{atom_db_id}::{component_id}"
+    matrix = {}
+
+    # Initialize all cells as "not_linked"
+    for atom in atoms:
+        for comp in components:
+            key = f"{atom.id}::{comp.id}"
+            matrix[key] = {
+                "coverage_score": None,
+                "open_mismatches": 0,
+                "critical_mismatches": 0,
+                "status": "not_linked",
+            }
+
+    # Fill in mismatch counts
+    for m in open_mismatches:
+        if m.requirement_atom_id and m.code_component_id:
+            key = f"{m.requirement_atom_id}::{m.code_component_id}"
+            if key in matrix:
+                matrix[key]["open_mismatches"] += 1
+                if m.severity == "critical":
+                    matrix[key]["critical_mismatches"] += 1
+
+    # Determine status for each linked cell
+    # A cell is "linked" if there is a DocumentCodeLink for that component
+    linked_component_ids = set(component_ids)
+    for atom in atoms:
+        for comp in components:
+            if comp.id not in linked_component_ids:
+                continue
+            key = f"{atom.id}::{comp.id}"
+            cell = matrix[key]
+            if cell["critical_mismatches"] > 0:
+                cell["status"] = "missing"
+                cell["coverage_score"] = 0.0
+            elif cell["open_mismatches"] > 0:
+                cell["status"] = "partial"
+                cell["coverage_score"] = 0.5
+            else:
+                cell["status"] = "covered"
+                cell["coverage_score"] = 1.0
+
+    return {
+        "document_id": document_id,
+        "atoms": [
+            {
+                "id": a.id,
+                "atom_id": a.atom_id,
+                "content": a.content[:150],  # Truncate for matrix display
+                "atom_type": a.atom_type,
+                "criticality": a.criticality,
+            }
+            for a in atoms
+        ],
+        "components": [
+            {
+                "id": c.id,
+                "name": c.name or c.location.split("/")[-1],
+                "location": c.location,
+                "language": c.language,
+            }
+            for c in components
+        ],
+        "matrix": matrix,
+        "summary": {
+            "total_atoms": len(atoms),
+            "total_components": len(components),
+            "covered_cells": sum(1 for v in matrix.values() if v["status"] == "covered"),
+            "partial_cells": sum(1 for v in matrix.values() if v["status"] == "partial"),
+            "missing_cells": sum(1 for v in matrix.values() if v["status"] == "missing"),
+            "atoms_with_no_coverage": _count_uncovered_atoms(atoms, matrix),
+        }
+    }
+
+
+def _count_uncovered_atoms(atoms, matrix) -> int:
+    """Count atoms that have no 'covered' cell across any component."""
+    count = 0
+    for atom in atoms:
+        has_coverage = any(
+            matrix.get(f"{atom.id}::{k.split('::')[1]}", {}).get("status") == "covered"
+            for k in matrix if k.startswith(f"{atom.id}::")
+        )
+        if not has_coverage:
+            count += 1
+    return count
+```
+
+#### Step 2: Frontend — Coverage Matrix Component
+
+**New file: `frontend/components/validation/CoverageMatrix.tsx`**
+
+```tsx
+interface CoverageMatrixProps {
+  documentId: number
+}
+
+export function CoverageMatrix({ documentId }: CoverageMatrixProps) {
+  const [data, setData] = useState<MatrixData | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    fetch(`/api/v1/validation/${documentId}/coverage-matrix`, { headers: authHeaders })
+      .then(r => r.json())
+      .then(setData)
+      .finally(() => setLoading(false))
+  }, [documentId])
+
+  if (loading) return <Skeleton className="h-64" />
+  if (!data) return null
+
+  const getCellColor = (status: string) => {
+    switch (status) {
+      case 'covered':     return 'bg-green-100 text-green-800'
+      case 'partial':     return 'bg-amber-100 text-amber-800'
+      case 'missing':     return 'bg-red-100 text-red-800'
+      case 'not_linked':  return 'bg-gray-50 text-gray-300'
+      default:            return 'bg-gray-50'
+    }
+  }
+
+  const getCellIcon = (status: string, cell: any) => {
+    if (status === 'covered')    return '✅'
+    if (status === 'partial')    return `⚠️ ${cell.open_mismatches}`
+    if (status === 'missing')    return `❌ ${cell.critical_mismatches}`
+    return '—'
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      {/* Summary bar */}
+      <div className="flex gap-4 mb-3 text-xs text-gray-500">
+        <span>✅ {data.summary.covered_cells} covered</span>
+        <span>⚠️ {data.summary.partial_cells} partial</span>
+        <span>❌ {data.summary.missing_cells} missing</span>
+        {data.summary.atoms_with_no_coverage > 0 && (
+          <span className="text-amber-600 font-medium">
+            ⚠ {data.summary.atoms_with_no_coverage} requirements have no linked code file
+          </span>
+        )}
+      </div>
+
+      <table className="text-xs border-collapse w-full">
+        <thead>
+          <tr>
+            <th className="text-left p-2 border bg-gray-50 sticky left-0 z-10 min-w-[200px]">
+              Requirement
+            </th>
+            {data.components.map(comp => (
+              <th key={comp.id} className="p-2 border bg-gray-50 text-center max-w-[120px]">
+                <div className="truncate" title={comp.location}>
+                  {comp.name}
+                </div>
+                <div className="text-gray-400 font-normal truncate text-[10px]">
+                  {comp.language}
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.atoms.map(atom => (
+            <tr key={atom.id} className="hover:bg-gray-50">
+              <td className="p-2 border sticky left-0 bg-white max-w-[200px]">
+                <div className="flex items-start gap-1">
+                  <span className="text-gray-400 flex-shrink-0">{atom.atom_id}</span>
+                  <span
+                    className="truncate"
+                    title={atom.content}
+                  >
+                    {atom.content}
+                  </span>
+                </div>
+                <div className="text-[10px] text-gray-400 mt-0.5">
+                  {atom.atom_type.replace(/_/g, ' ')}
+                  {atom.criticality === 'critical' && (
+                    <span className="ml-1 text-red-500">• critical</span>
+                  )}
+                </div>
+              </td>
+              {data.components.map(comp => {
+                const key = `${atom.id}::${comp.id}`
+                const cell = data.matrix[key] || { status: 'not_linked' }
+                return (
+                  <td
+                    key={comp.id}
+                    className={`p-2 border text-center ${getCellColor(cell.status)}`}
+                  >
+                    {getCellIcon(cell.status, cell)}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+```
+
+#### Step 3: Add Coverage Matrix tab to validation panel
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add "Coverage Matrix" tab alongside the existing "Mismatches" tab:
+
+```tsx
+<TabGroup>
+  <Tab active={view === 'mismatches'} onClick={() => setView('mismatches')}>
+    Mismatches ({mismatchCount})
+  </Tab>
+  <Tab active={view === 'matrix'} onClick={() => setView('matrix')}>
+    Coverage Matrix
+  </Tab>
+</TabGroup>
+
+{view === 'matrix' && <CoverageMatrix documentId={documentId} />}
+```
+
+### Test Commands
+
+```bash
+# 1. Run validation on a document with multiple code components linked
+# 2. Fetch matrix
+curl /api/v1/validation/{document_id}/coverage-matrix
+# Expected: atoms array, components array, matrix dict
+
+# 3. Verify summary counts
+# covered + partial + missing should equal total linked cells
+# atoms_with_no_coverage should equal atoms that appear in no "covered" cell
+
+# 4. Create a mismatch for atom 1 / component 2
+# Re-fetch matrix → cell status should be "partial" or "missing"
+```
+
+### Risk Assessment
+- **No writes** — pure read aggregation
+- **Empty state** — 404 with clear message if no atoms (run validation first)
+- **Performance** — 3 DB queries (atoms + components + mismatches) + in-memory join. Fast for typical BRD sizes (50-100 atoms × 10-20 files)
+- **Matrix size limit** — for very large BRDs (500+ atoms), add `?limit=50&offset=0` pagination to atoms
+
+
+---
+
+## P5B-08 — Regulatory Compliance Tagging (RBI, PCI-DSS, HIPAA, GDPR)
+
+**Ticket ID:** P5B-08
+**Priority:** P1 — Enterprise clients in regulated industries (banking, healthcare) need to know WHICH mismatches are regulatory violations vs mere implementation gaps.
+**Complexity:** Medium
+**Risk:** LOW — additive fields on atoms and mismatches; no existing logic changed
+
+### Why This Exists
+
+A bank using DokyDoc has two types of mismatches:
+1. "Pagination missing on /users list" — developer preference, can wait
+2. "AES-256 encryption not applied to PII fields" — RBI mandate, must fix before audit
+
+Without regulatory tagging, both look the same in the mismatch list. Auditors and compliance officers need to filter and report on the second type separately.
+
+After P5B-08:
+- SECURITY_REQUIREMENT atoms in a fintech BRD get tagged with `regulatory_frameworks: ["RBI", "PCI-DSS"]`
+- Mismatches for these atoms get `severity="compliance_risk"` (new severity level)
+- Compliance officer can filter: "Show only COMPLIANCE_RISK mismatches"
+- Compliance score shows a separate "Regulatory Score" breakdown
+
+The regulatory mapping uses the `tenant.settings.regulatory_context` set during onboarding (Phase 5 P5-04) and the `industry_context.json` library (Phase 5 P5-02).
+
+### Current State
+
+**File: `backend/app/models/requirement_atom.py`**
+No `regulatory_tags` field. Atoms have `criticality` (critical/standard/informational) but no regulatory linkage.
+
+**File: `backend/app/models/mismatch.py` (line 29)**
+`severity: Mapped[str] = mapped_column(String, index=True, nullable=False)`
+Valid values: "critical", "high", "medium", "low", "info" — no "compliance_risk" severity.
+
+**File: `backend/app/services/ai/gemini.py` (line 562-590)**
+Atomization prompt assigns `atom_type` but has no awareness of regulatory frameworks.
+
+### What to Change
+
+#### Step 1: Add `regulatory_tags` to RequirementAtom model
+
+**File: `backend/app/models/requirement_atom.py`**
+
+Add after `criticality` field:
+
+```python
+    from sqlalchemy.dialects.postgresql import ARRAY
+    from sqlalchemy import String as SAString
+
+    # P5B-08: regulatory framework tags for this requirement
+    # e.g. ["PCI-DSS", "RBI", "GDPR"] — set during atomization based on tenant industry
+    regulatory_tags: Mapped[Optional[list]] = mapped_column(
+        ARRAY(SAString), nullable=True
+    )
+```
+
+**New migration file: `backend/alembic/versions/s16c1_atom_regulatory_tags.py`**
+
+```python
+"""
+P5B-08: Add regulatory_tags to requirement_atoms, compliance_risk severity to mismatches.
+
+Revision ID: s16c1
+Revises: s16b1
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ARRAY
+
+revision = 's16c1'
+down_revision = 's16b1'
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.add_column('requirement_atoms',
+        sa.Column('regulatory_tags', ARRAY(sa.String()), nullable=True))
+
+    # Index for fast regulatory tag queries (e.g. "all PCI-DSS atoms")
+    op.execute("""
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS
+        idx_requirement_atoms_regulatory_tags
+        ON requirement_atoms USING GIN (regulatory_tags)
+    """)
+
+def downgrade():
+    op.drop_index('idx_requirement_atoms_regulatory_tags')
+    op.drop_column('requirement_atoms', 'regulatory_tags')
+```
+
+#### Step 2: Regulatory tag assignment in atomization prompt
+
+**File: `backend/app/services/ai/gemini.py`**
+
+In `call_gemini_for_atomization` method, inject tenant regulatory context into the prompt. Find the prompt assembly section (around line 556-595) and add:
+
+```python
+# BEFORE (current prompt excerpt around line 566):
+"""
+For each extracted requirement, return JSON with:
+- atom_id: "REQ-001", "REQ-002" ...
+- atom_type: one of [API_CONTRACT, BUSINESS_RULE, ...]
+- content: exact original sentence
+- criticality: "critical" | "standard" | "informational"
+"""
+
+# AFTER — add regulatory_tags field to output schema:
+"""
+For each extracted requirement, return JSON with:
+- atom_id: "REQ-001", "REQ-002" ...
+- atom_type: one of [API_CONTRACT, BUSINESS_RULE, ...]
+- content: exact original sentence
+- criticality: "critical" | "standard" | "informational"
+- regulatory_tags: list of regulatory frameworks this requirement addresses.
+  Use ONLY frameworks relevant to the current context: {regulatory_context_placeholder}
+  Examples: ["PCI-DSS"] for payment card data, ["HIPAA"] for PHI, ["GDPR"] for EU personal data,
+            ["RBI"] for Reserve Bank of India requirements, ["SOX"] for financial controls.
+  Leave empty [] if no regulatory framework is clearly applicable.
+"""
+```
+
+Pass the tenant's regulatory context into the prompt by updating `call_gemini_for_atomization` to accept a `regulatory_context` parameter:
+
+```python
+async def call_gemini_for_atomization(
+    self,
+    document_text: str,
+    tenant_id: int = None,
+    user_id: int = None,
+    regulatory_context: list[str] | None = None,  # P5B-08: new param
+) -> list:
+    """..."""
+    regulatory_hint = ""
+    if regulatory_context:
+        frameworks = ", ".join(regulatory_context)
+        regulatory_hint = (
+            f"\nThis document is from a {frameworks}-regulated industry. "
+            f"Tag atoms that directly address {frameworks} compliance requirements "
+            f"with the appropriate framework name(s) in the regulatory_tags field."
+        )
+
+    # Inject into prompt before the JSON schema section:
+    prompt = f"""...(existing prompt start)...
+{regulatory_hint}
+
+For each extracted requirement, return JSON:
+...(rest of schema)...
+- regulatory_tags: [...]
+"""
+```
+
+#### Step 3: Store `regulatory_tags` in `create_atoms_bulk`
+
+**File: `backend/app/crud/crud_requirement_atom.py`**
+
+In `create_atoms_bulk`, add `regulatory_tags` to the `RequirementAtom` constructor:
+
+```python
+# In the db_obj creation inside create_atoms_bulk:
+db_obj = RequirementAtom(
+    ...
+    regulatory_tags=atom.get("regulatory_tags") or [],
+    ...
+)
+```
+
+#### Step 4: Validate `compliance_risk` severity on mismatch creation
+
+**File: `backend/app/services/validation_service.py`**
+
+When a mismatch is being created for an atom that has `regulatory_tags`, auto-upgrade severity to `compliance_risk` if it would be "high" or "critical":
+
+```python
+# In the mismatch creation section, after resolving db_atom_id:
+# P5B-08: Check if atom has regulatory tags — upgrade severity
+atom_obj = next((a for a in atoms if a.atom_id == m.get("atom_local_id", "")), None)
+regulatory_tags = getattr(atom_obj, 'regulatory_tags', None) or []
+if regulatory_tags and m.get("severity") in ("critical", "high"):
+    m["severity"] = "compliance_risk"
+    m_details = m.get("details") or {}
+    m_details["regulatory_frameworks"] = regulatory_tags
+    m["details"] = m_details
+```
+
+#### Step 5: New endpoint for regulatory compliance summary
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+@router.get("/{document_id}/regulatory-summary")
+def get_regulatory_summary(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-08: Returns compliance status broken down by regulatory framework.
+    Shows which frameworks have open violations vs are fully covered.
+
+    Response:
+    {
+      "frameworks": {
+        "PCI-DSS": {
+          "total_atoms": 8,
+          "covered": 6,
+          "open_violations": 2,
+          "score": 0.75
+        },
+        "RBI": { ... }
+      },
+      "overall_regulatory_score": 0.82,
+      "compliance_risk_mismatches": 3
+    }
+    """
+    from app.models.requirement_atom import RequirementAtom
+    from sqlalchemy import text
+
+    # Get all atoms with their regulatory tags
+    atoms = db.query(RequirementAtom).filter(
+        RequirementAtom.document_id == document_id,
+        RequirementAtom.tenant_id == tenant_id,
+        RequirementAtom.regulatory_tags.isnot(None),
+    ).all()
+
+    # Get compliance_risk mismatches for this document
+    compliance_mismatches = db.query(Mismatch).filter(
+        Mismatch.document_id == document_id,
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.severity == "compliance_risk",
+        Mismatch.status.in_(["open", "in_progress"]),
+    ).all()
+
+    # Build per-framework stats
+    frameworks: dict[str, dict] = {}
+    violated_atom_ids: set[int] = {
+        m.requirement_atom_id for m in compliance_mismatches
+        if m.requirement_atom_id
+    }
+
+    for atom in atoms:
+        for framework in (atom.regulatory_tags or []):
+            if framework not in frameworks:
+                frameworks[framework] = {"total_atoms": 0, "covered": 0, "open_violations": 0}
+            frameworks[framework]["total_atoms"] += 1
+            if atom.id in violated_atom_ids:
+                frameworks[framework]["open_violations"] += 1
+            else:
+                frameworks[framework]["covered"] += 1
+
+    for fw, stats in frameworks.items():
+        total = stats["total_atoms"]
+        stats["score"] = round(stats["covered"] / total, 4) if total else 1.0
+
+    overall = (
+        sum(s["score"] for s in frameworks.values()) / len(frameworks)
+        if frameworks else None
+    )
+
+    return {
+        "document_id": document_id,
+        "frameworks": frameworks,
+        "overall_regulatory_score": round(overall, 4) if overall else None,
+        "compliance_risk_mismatches": len(compliance_mismatches),
+    }
+```
+
+#### Step 6: Frontend — Compliance Risk severity badge
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add "COMPLIANCE RISK" severity badge (distinct red-orange color):
+
+```tsx
+const SeverityBadge = ({ severity }: { severity: string }) => {
+  const styles = {
+    compliance_risk: 'bg-red-700 text-white border-red-800',  // NEW
+    critical:        'bg-red-100 text-red-800 border-red-200',
+    high:            'bg-orange-100 text-orange-800 border-orange-200',
+    medium:          'bg-yellow-100 text-yellow-800 border-yellow-200',
+    low:             'bg-blue-100 text-blue-800 border-blue-200',
+    info:            'bg-gray-100 text-gray-600 border-gray-200',
+  }
+  const labels = {
+    compliance_risk: '⚖ COMPLIANCE RISK',  // NEW
+    critical: 'Critical',
+    high: 'High',
+    medium: 'Medium',
+    low: 'Low',
+    info: 'Info',
+  }
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded border font-medium ${styles[severity] || styles.info}`}>
+      {labels[severity] || severity}
+    </span>
+  )
+}
+```
+
+Also add regulatory tags display on mismatch card:
+```tsx
+{mismatch.details?.regulatory_frameworks?.length > 0 && (
+  <div className="flex gap-1 mt-1">
+    {mismatch.details.regulatory_frameworks.map((fw: string) => (
+      <span key={fw} className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded border border-purple-200">
+        {fw}
+      </span>
+    ))}
+  </div>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16c1
+
+# 2. Verify column added
+psql -c "\d requirement_atoms" | grep regulatory_tags
+
+# 3. Upload a fintech BRD, run atomization with PCI-DSS context
+# Check atoms have regulatory_tags
+psql -c "SELECT atom_id, regulatory_tags FROM requirement_atoms WHERE document_id = X AND regulatory_tags IS NOT NULL"
+
+# 4. Run validation — check mismatches for tagged atoms have compliance_risk severity
+psql -c "SELECT severity, COUNT(*) FROM mismatches WHERE document_id = X GROUP BY severity"
+
+# 5. Get regulatory summary
+curl /api/v1/validation/{document_id}/regulatory-summary
+# Expected: { "frameworks": { "PCI-DSS": { "score": 0.75, ... } } }
+```
+
+### Risk Assessment
+- **Empty `regulatory_tags`** — defaults to `[]`, not null. GIN index handles empty arrays fine.
+- **`compliance_risk` severity** — new value in string column, doesn't break existing queries
+- **Only applies to atoms WITH regulatory_tags** — atoms without tags are unaffected, severity unchanged
+- **No-op without Phase 5 industry detection** — if `tenant.settings.regulatory_context` is empty, `regulatory_context=[]` is passed to prompt → `regulatory_tags=[]` for all atoms → no change in behavior
+
+
+---
+
+## P5B-09 — Strengthen Per-Atom-Type Validation Prompt Instructions
+
+**Ticket ID:** P5B-09
+**Priority:** P0 — The quality of validation output is 80% determined by prompt quality. Current instructions are 1-2 sentences. They need to be 8-12 specific checks per type.
+**Complexity:** Low (prompt engineering only, no DB changes)
+**Risk:** LOW — only `_ATOM_TYPE_INSTRUCTIONS` dict in `gemini.py` changes; all other code untouched
+
+### Why This Exists
+
+Current instruction for NFR atoms (1 line):
+```
+"Non-functional requirements: check whether performance/scalability constraints are reflected
+(pagination, caching, async, timeouts, retry). Flag: no pagination on list endpoints..."
+```
+
+This misses: rate limits (RPM/RPS numbers), SLA uptime targets, exact response time thresholds, database query time limits, concurrent user handling, etc.
+
+A BRD saying "API must handle 1000 concurrent users" — the current prompt can't check this because it doesn't know to look in `structured_analysis.performance_notes` or check for async patterns, thread pool sizes, or load balancing config in `structured_analysis.architecture_notes`.
+
+After P5B-09, each atom type instruction is 8-12 specific checks, grounded in what `structured_analysis` actually contains.
+
+### Current State
+
+**File: `backend/app/services/ai/gemini.py` (line 630-672)**
+
+`_ATOM_TYPE_INSTRUCTIONS` dict — 9 entries, each 1-3 sentences.
+
+### What to Change
+
+**File: `backend/app/services/ai/gemini.py`**
+
+Replace `_ATOM_TYPE_INSTRUCTIONS` dict completely:
+
+```python
+# BEFORE (line 630):
+_ATOM_TYPE_INSTRUCTIONS = {
+    "API_CONTRACT": (
+        "API CONTRACTS: For each atom, check whether the code implements the specified "
+        "HTTP endpoint with the correct method, path, authentication requirement, request "
+        "parameters, and response shape. Flag: missing endpoints, wrong HTTP method, missing "
+        "auth enforcement, wrong response structure, incorrect status codes."
+    ),
+    # ... 8 more single-paragraph entries
+}
+
+# AFTER — replace with expanded instructions:
+_ATOM_TYPE_INSTRUCTIONS = {
+    "API_CONTRACT": """API CONTRACTS — Check ALL of the following for each atom:
+1. ENDPOINT EXISTS: Is the specified HTTP method + path present in api_contracts[]?
+2. AUTH ENFORCEMENT: Does the endpoint require the stated authentication (bearer, API key, OAuth)?
+   Check auth_patterns[] and api_contracts[].auth field.
+3. REQUEST PARAMETERS: Are all required query params / path params / request body fields present?
+   Check api_contracts[].parameters and data_models[].
+4. RESPONSE SHAPE: Does the response schema match the BRD's specified fields and types?
+   Check api_contracts[].response_schema.
+5. HTTP STATUS CODES: Are the BRD-specified status codes (200, 201, 400, 404, 429, 500) returned?
+   Check error_handling[] for 4xx/5xx patterns.
+6. RATE LIMITING: If BRD specifies a rate limit (e.g. "30 req/min"), is a rate limiter
+   applied to this endpoint? Check dependencies[] for ratelimit/slowapi/throttle libraries.
+7. PAGINATION: If endpoint returns a collection and BRD specifies page size or cursor,
+   is pagination implemented? Check api_contracts[].response_schema for page/cursor fields.
+8. IDEMPOTENCY: If BRD requires idempotency keys (especially for payments/mutations),
+   is the idempotency-key header handled?
+Flag mismatches with: missing endpoint, wrong method, missing auth, missing param, wrong response type, no rate limit, no pagination, no idempotency.""",
+
+    "BUSINESS_RULE": """BUSINESS RULES — Check ALL of the following for each atom:
+1. CONDITION LOGIC: Is the stated condition (IF x THEN y, when A and B, only if C) coded?
+   Look in business_logic[], validation_rules[], functions[].
+2. THRESHOLD VALUES: Are exact thresholds (max 5 retries, minimum $10, age >= 18) present
+   as constants or configuration? Check functions[].body_summary and validation_rules[].
+3. CALCULATION FORMULA: If BRD specifies a formula (interest = principal × rate / 100),
+   is it implemented exactly? Wrong formula = critical mismatch.
+4. ELIGIBILITY CRITERIA: Are all eligibility conditions checked (e.g. KYC verified,
+   account active, not blacklisted)? Check functions[] and external_calls[].
+5. MUTUALLY EXCLUSIVE CONDITIONS: If BRD says conditions are mutually exclusive,
+   is there an else/elif branch handling all cases?
+6. DEFAULT BEHAVIOR: If BRD specifies default values (default currency = USD, default
+   timeout = 30s), are they set as constants/defaults in the code?
+7. EDGE CASES: Does code handle boundary values (e.g. amount = 0, list is empty,
+   null input)? Look for None/null/empty checks in functions[].
+8. AUDIT REQUIREMENT: If business rule must be logged for audit, is there a log/event
+   write in the code path?
+Flag: missing condition branch, wrong threshold, incorrect formula, missing eligibility check,
+missing default, unhandled edge case, missing audit log.""",
+
+    "FUNCTIONAL_REQUIREMENT": """FUNCTIONAL REQUIREMENTS — Check ALL of the following:
+1. FEATURE EXISTS: Is the stated capability present in responsibilities[] or functions[]?
+   A function named or described matching the requirement.
+2. COMPLETE IMPLEMENTATION: Does the function do everything the BRD says,
+   not just return a stub or placeholder?
+3. TRIGGER/ENTRY POINT: Is the feature accessible from the correct entry point
+   (API endpoint, event handler, scheduled job)?
+4. DATA PERSISTENCE: If the BRD requirement involves saving data, is there a DB write
+   in the code path? Check data_flows[] for storage step.
+5. RETURN VALUE: Does the feature return the specified output (confirmation ID, 
+   updated record, boolean, etc.)?
+6. SIDE EFFECTS: If the BRD specifies side effects (send email, update cache, 
+   emit event), are all side effects present in component_interactions[] or external_calls[]?
+7. ROLE/PERMISSION: Is the feature accessible only to the stated user roles?
+   Check auth_patterns[] and dependencies[].
+8. CONFIGURATION: If BRD says feature is configurable (e.g. feature flag, env var),
+   is it configured via settings/env, not hardcoded?
+Flag: feature entirely missing, partial implementation (stub/TODO), wrong trigger,
+missing DB write, missing side effect, wrong access control.""",
+
+    "DATA_CONSTRAINT": """DATA CONSTRAINTS — Check ALL of the following:
+1. FIELD EXISTS: Is the specified field present in data_models[] with correct name?
+2. DATA TYPE: Is the field type correct (String vs Integer, DateTime vs Date)?
+   Type mismatch = critical mismatch.
+3. REQUIRED/NULLABLE: If BRD says field is required (non-null), is nullable=False set?
+4. LENGTH LIMIT: If BRD specifies max/min length (max 255 chars, min 8 chars),
+   is the constraint enforced in validation_rules[] or Pydantic schema?
+5. RANGE CONSTRAINT: If BRD specifies numeric range (0-100, positive only),
+   is it enforced as a validator?
+6. REGEX PATTERN: If BRD specifies format (email, phone, UUID, ISO date),
+   is regex validation applied?
+7. UNIQUENESS: If BRD says field must be unique, is there a DB unique constraint?
+   Check data_models[].constraints or migration for UniqueConstraint.
+8. FOREIGN KEY RELATIONSHIP: If BRD specifies that a field references another entity,
+   is a FK constraint present?
+9. DEFAULT VALUE: If BRD specifies a default, is it set at DB level (server_default)
+   or application level?
+Flag: missing field, wrong type, missing null check, missing length limit,
+missing range check, missing regex, missing unique constraint.""",
+
+    "WORKFLOW_STEP": """WORKFLOW STEPS — Check ALL of the following:
+1. ALL STEPS PRESENT: Are all specified steps in the BRD sequence present as
+   discrete operations in data_flows[] or functions[]?
+2. CORRECT ORDER: Do the steps occur in the BRD-specified sequence?
+   Check data_flows[] order — any step out of order is a mismatch.
+3. STEP TRIGGERS: Does each step trigger the next step correctly
+   (not skipping or short-circuiting)?
+4. ROLLBACK/COMPENSATION: If any step fails, is there a rollback of prior steps?
+   Check error_handling[] for compensation transactions.
+5. STATE TRANSITIONS: If workflow involves state changes (pending → active → closed),
+   are all transitions present and guarded by precondition checks?
+6. BLOCKING GATES: If workflow requires approval/review before proceeding,
+   is there a gate check in the code?
+7. TIMEOUT HANDLING: If BRD specifies step timeout (payment must complete in 30s),
+   is there a timeout enforced?
+8. CONCURRENT STEP SAFETY: If BRD says steps should not run concurrently for the
+   same entity, is there a lock/mutex?
+Flag: missing step, wrong order, no rollback on step N failure, missing state guard,
+missing approval gate, no timeout.""",
+
+    "ERROR_SCENARIO": """ERROR SCENARIOS — Check ALL of the following:
+1. ERROR CASE HANDLED: Is the specific error condition (invalid input, timeout, 
+   auth failure, not found) handled with a try/except or conditional?
+   Check error_handling[] and functions[].
+2. HTTP STATUS CODE: Does the error return the BRD-specified HTTP status code?
+   (400 for validation, 401 for auth, 404 for not found, 422 for schema error,
+   429 for rate limit, 500 for internal)
+3. ERROR MESSAGE FORMAT: Is the error response in the BRD-specified format?
+   (e.g. { "error": "...", "code": "...", "detail": "..." })
+4. ERROR LOGGING: Is the error logged at the appropriate level (ERROR for 5xx,
+   WARNING for 4xx)? Check functions[] for logger usage.
+5. USER-FACING MESSAGE: Is the error message safe (no stack traces, no internal paths,
+   no DB schema exposure in 5xx responses)?
+6. RETRY HINT: If BRD says clients should retry on timeout, is Retry-After header
+   or retry indication included in the error response?
+7. PARTIAL FAILURE: If BRD specifies partial failure handling (batch operations where
+   some items fail), is the partial success/failure response format implemented?
+8. CIRCUIT BREAKER: If BRD specifies that external service failures should not cascade,
+   is there a circuit breaker pattern in external_calls[]?
+Flag: unhandled error case, wrong status code, wrong message format,
+missing log, unsafe error message, missing retry hint.""",
+
+    "SECURITY_REQUIREMENT": """SECURITY REQUIREMENTS — Check ALL of the following:
+1. AUTHENTICATION: Is the stated auth mechanism implemented?
+   (JWT: check auth_patterns[] for bearer/JWT; API key: check header validation;
+   OAuth: check OAuth flow in external_calls[])
+2. AUTHORIZATION/RBAC: Is the stated role/permission check present?
+   Check auth_patterns[] for permission decorators/middleware.
+3. INPUT SANITIZATION: If BRD specifies that input must be sanitized (SQL injection,
+   XSS, command injection), is sanitization applied before DB/shell use?
+4. DATA ENCRYPTION: If BRD requires encrypted storage (PII, PCI data),
+   is encryption applied at application layer (field encryption) or DB layer?
+   Check dependencies[] for encryption libraries.
+5. SENSITIVE DATA MASKING: Are sensitive fields (password, card number, SSN) masked
+   in logs and API responses? Check functions[] for masking logic.
+6. SECURE COMMUNICATION: Are external calls using HTTPS only?
+   Check external_calls[] for protocol.
+7. CORS POLICY: If BRD specifies CORS restrictions, is CORS properly configured?
+   Check dependencies[] and configuration notes.
+8. SESSION MANAGEMENT: If BRD specifies session timeout or invalidation,
+   is it implemented?
+9. AUDIT LOGGING: If BRD requires audit trail for this operation, is there an
+   audit log write in the code path?
+Flag: missing auth, missing permission check, missing input sanitization,
+missing encryption, data exposure in logs, HTTP instead of HTTPS, missing audit log.""",
+
+    "NFR": """NON-FUNCTIONAL REQUIREMENTS — Check ALL of the following:
+1. RESPONSE TIME: If BRD specifies max response time (< 200ms, < 2s),
+   is there async processing, caching, or DB indexing to achieve it?
+   Check caching_patterns[], async_patterns[].
+2. THROUGHPUT/RATE LIMIT: If BRD specifies requests-per-minute or requests-per-second,
+   is a rate limiter configured at the correct level (per user, per IP, global)?
+3. PAGINATION: If BRD specifies max page size or cursor-based pagination,
+   is it implemented with correct default and max limits?
+4. CACHING: If BRD specifies that responses should be cached (TTL, cache-control),
+   is caching implemented? Check caching_patterns[] and dependencies[].
+5. DATABASE QUERY OPTIMIZATION: If BRD specifies query time limits, are indexes
+   present for the queried fields? Check data_models[].indexes.
+6. CONCURRENT USERS: If BRD specifies concurrent user capacity (handle 1000 simultaneous),
+   is there connection pooling, async I/O, or horizontal scaling support?
+7. RETRY POLICY: If BRD requires retry on transient failure (external API call),
+   is exponential backoff implemented? Check external_calls[] for retry config.
+8. GRACEFUL DEGRADATION: If BRD specifies that service must remain partially available
+   under load, is there a fallback or circuit breaker?
+9. MEMORY/RESOURCE LIMITS: If BRD specifies memory limits or file size limits,
+   are they enforced (streaming large files, not loading full dataset into memory)?
+10. MONITORING/ALERTING: If BRD specifies SLA monitoring, are metrics emitted?
+    Check dependencies[] for prometheus/datadog/metrics libraries.
+Flag: no async on slow operation, no rate limiter, no pagination, no cache,
+no index for slow query, no retry policy, no resource limit enforcement.""",
+
+    "INTEGRATION_POINT": """INTEGRATION POINTS — Check ALL of the following:
+1. CALL EXISTS: Is the external service call present in external_calls[] or
+   component_interactions[]? Matching service name/URL.
+2. CORRECT TRIGGER: Does the integration fire at the BRD-specified trigger
+   (on user registration, after payment, on schedule)?
+   Check which function contains the call.
+3. REQUEST FORMAT: Are the required fields sent to the external service?
+   (e.g. Stripe requires amount, currency, customer_id)
+4. RESPONSE HANDLING: Is the external service response parsed and acted upon?
+   Check for response.json(), response.status_code checks.
+5. FAILURE HANDLING: Is there a try/except around the external call?
+   What happens if the service is unavailable? (Dead letter queue? Alert? Fallback?)
+6. RETRY LOGIC: For critical integrations (payment processing, email), is there
+   retry with exponential backoff?
+7. TIMEOUT: Is there a timeout on the external call?
+   (Hanging calls without timeout will exhaust thread pool)
+8. IDEMPOTENCY: For payment or other financial integrations, is idempotency key
+   sent to prevent duplicate transactions on retry?
+9. WEBHOOK RECEIVER: If BRD specifies receiving webhooks from external service,
+   is there a webhook endpoint and signature verification?
+10. CREDENTIAL ROTATION: Are credentials stored as env vars/secrets (not hardcoded)?
+    Check dependencies[] for secrets management.
+Flag: missing call, wrong trigger timing, missing required fields, no failure handling,
+no retry, no timeout, missing idempotency key, no signature verification.""",
+}
+```
+
+### Test Commands
+
+```bash
+# No migration needed. Test by running validation:
+
+# 1. Create a BRD with specific NFR: "API must handle 1000 concurrent users"
+# 2. Link to a code component with no async patterns in structured_analysis
+# 3. Run validation
+# Expected: mismatch "NFR: no async/connection pooling for concurrency requirement"
+
+# 2. Test API_CONTRACT rate limit detection:
+# BRD: "POST /payments limited to 30 requests/minute"
+# Code: no ratelimit dependency in structured_analysis
+# Expected: mismatch "API_CONTRACT: rate limit not enforced"
+
+# 3. Test SECURITY_REQUIREMENT audit log detection:
+# BRD: "all fund transfers must be audit logged"
+# Code: no audit log write in functions[]
+# Expected: mismatch "SECURITY_REQUIREMENT: audit log missing for transfer operation"
+
+# Verify prompt structure is correct:
+python3 -c "
+from app.services.ai.gemini import GeminiService
+gs = GeminiService.__new__(GeminiService)
+print(gs._ATOM_TYPE_INSTRUCTIONS['NFR'][:200])
+"
+```
+
+### Risk Assessment
+- **Zero DB changes** — prompt-only change
+- **No existing logic changed** — `_ATOM_TYPE_INSTRUCTIONS` is used only as text injection into prompts
+- **More specific instructions → more mismatches found** — this is the intended effect; brief regression testing recommended to ensure no false positives spike
+- **Token cost increases slightly** — instructions are ~4× longer; adds ~500 tokens per validation call (~$0.0001 per call at Gemini Flash pricing). Negligible.
+
+
+---
+
+## P5B-10 — Mismatch Status Lifecycle (OPEN → IN_PROGRESS → RESOLVED → VERIFIED)
+
+**Ticket ID:** P5B-10
+**Priority:** P0 — Enterprise teams need workflow states beyond "open"/"resolved" to manage mismatch triage.
+**Complexity:** Low-Medium
+**Risk:** LOW — existing rows keep their current status; only new transitions added
+
+### Why This Exists
+
+Current mismatch statuses: `"new"` (only real state). This fails for team workflows:
+- Developer acknowledges a mismatch but hasn't fixed it yet → needs `in_progress`
+- Developer fixes it and marks resolved → needs `resolved`
+- BA confirms the fix passes UAT → needs `verified`
+- Mismatch turns out to be wrong AI output → needs `false_positive` (P5B-04)
+- Code push auto-closes it → needs `auto_closed` (P5B-06)
+- BA disputes a false positive decision → needs `disputed` (P5B-04)
+
+Without proper lifecycle states, teams can't track velocity (how fast are mismatches being fixed?) or compliance (which mismatches have been verified by a human?).
+
+### Valid Status Transitions
+
+```
+new → open                    (on creation — migrate "new" → "open")
+open → in_progress            (developer acknowledges and starts work)
+open → false_positive         (marked FP with reason — P5B-04)
+open → auto_closed            (auto-closed by re-validation — P5B-06)
+in_progress → resolved        (developer marks as fixed)
+in_progress → false_positive  (realized it was a false positive mid-work)
+resolved → verified           (BA confirms fix passes UAT)
+resolved → open               (BA re-opens — fix didn't actually work)
+verified → open               (regression discovered — extremely rare)
+false_positive → disputed     (BA disputes FP decision — P5B-04)
+disputed → open               (dispute upheld — mismatch is real)
+disputed → false_positive     (dispute rejected — still FP)
+auto_closed → open            (regression on later push — P5B-06)
+```
+
+### Current State
+
+**File: `backend/app/models/mismatch.py` (line 30)**
+`status: Mapped[str] = mapped_column(String, default="new", index=True, nullable=False)`
+
+**File: `backend/app/crud/crud_mismatch.py`**
+No `update_status` method exists.
+
+**File: `backend/app/api/endpoints/validation.py`**
+No PUT/PATCH endpoint for updating mismatch status.
+
+### What to Change
+
+#### Step 1: New Alembic migration — add CHECK constraint + default rename
+
+**New file: `backend/alembic/versions/s16d1_mismatch_lifecycle.py`**
+
+```python
+"""
+P5B-10: Add full mismatch status lifecycle with CHECK constraint.
+Migrates existing "new" → "open" status.
+
+Revision ID: s16d1
+Revises: s16c1
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's16d1'
+down_revision = 's16c1'
+branch_labels = None
+depends_on = None
+
+VALID_STATUSES = (
+    'open', 'in_progress', 'resolved', 'verified',
+    'false_positive', 'auto_closed', 'disputed'
+)
+
+def upgrade():
+    # Migrate "new" → "open" (P5B-10: "new" is not a meaningful lifecycle state)
+    op.execute("UPDATE mismatches SET status = 'open' WHERE status = 'new'")
+
+    # Add CHECK constraint for valid statuses
+    op.create_check_constraint(
+        'ck_mismatches_valid_status',
+        'mismatches',
+        "status IN ('open', 'in_progress', 'resolved', 'verified', "
+        "'false_positive', 'auto_closed', 'disputed')"
+    )
+
+    # Update default to 'open'
+    op.alter_column('mismatches', 'status', server_default='open')
+
+def downgrade():
+    op.drop_constraint('ck_mismatches_valid_status', 'mismatches')
+    op.alter_column('mismatches', 'status', server_default='new')
+    op.execute("UPDATE mismatches SET status = 'new' WHERE status = 'open'")
+```
+
+#### Step 2: Add `update_status` to CRUDMismatch
+
+**File: `backend/app/crud/crud_mismatch.py`**
+
+```python
+# Valid transitions map: current_status → allowed next statuses
+VALID_TRANSITIONS = {
+    "open":          {"in_progress", "false_positive", "auto_closed", "resolved"},
+    "in_progress":   {"resolved", "false_positive", "open"},
+    "resolved":      {"verified", "open"},
+    "verified":      {"open"},
+    "false_positive": {"disputed"},
+    "disputed":      {"open", "false_positive"},
+    "auto_closed":   {"open"},
+}
+
+def update_status(
+    self,
+    db: Session,
+    *,
+    mismatch_id: int,
+    tenant_id: int,
+    new_status: str,
+    changed_by_user_id: int,
+    note: Optional[str] = None,
+) -> "Mismatch":
+    """
+    P5B-10: Update mismatch status with lifecycle validation.
+    Raises ValueError if transition is invalid.
+    """
+    mismatch = self.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise ValueError(f"Mismatch {mismatch_id} not found")
+
+    current = mismatch.status
+    allowed = VALID_TRANSITIONS.get(current, set())
+    if new_status not in allowed:
+        raise ValueError(
+            f"Invalid transition: {current} → {new_status}. "
+            f"Allowed from '{current}': {sorted(allowed)}"
+        )
+
+    from datetime import datetime
+    mismatch.status = new_status
+    mismatch.status_changed_by_id = changed_by_user_id
+    mismatch.status_changed_at = datetime.now()
+    if note:
+        mismatch.resolution_note = note
+    db.commit()
+    db.refresh(mismatch)
+    return mismatch
+```
+
+#### Step 3: New endpoint `PATCH /validation/mismatches/{id}/status`
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+class MismatchStatusUpdate(BaseModel):
+    status: str
+    note: Optional[str] = None
+
+    @validator('status')
+    def validate_status(cls, v):
+        valid = {'open', 'in_progress', 'resolved', 'verified',
+                 'false_positive', 'auto_closed', 'disputed'}
+        if v not in valid:
+            raise ValueError(f"status must be one of: {sorted(valid)}")
+        return v
+
+
+@router.patch("/mismatches/{mismatch_id}/status")
+def update_mismatch_status(
+    mismatch_id: int,
+    body: MismatchStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-10: Update mismatch lifecycle status with transition validation.
+    Returns the updated mismatch.
+    """
+    try:
+        mismatch = crud.mismatch.update_status(
+            db=db,
+            mismatch_id=mismatch_id,
+            tenant_id=tenant_id,
+            new_status=body.status,
+            changed_by_user_id=current_user.id,
+            note=body.note,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "mismatch_id": mismatch_id,
+        "old_status": mismatch.status,  # Note: already updated, this shows new
+        "new_status": body.status,
+        "changed_by": current_user.email,
+        "changed_at": mismatch.status_changed_at.isoformat() if mismatch.status_changed_at else None,
+    }
+```
+
+#### Step 4: Frontend — Status Lifecycle Dropdown on mismatch card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Replace the simple static badge with an interactive dropdown:
+
+```tsx
+const STATUS_TRANSITIONS = {
+  open:          ['in_progress', 'false_positive', 'resolved'],
+  in_progress:   ['resolved', 'open', 'false_positive'],
+  resolved:      ['verified', 'open'],
+  verified:      ['open'],
+  false_positive: ['disputed'],
+  disputed:      ['open', 'false_positive'],
+  auto_closed:   ['open'],
+}
+
+const STATUS_LABELS = {
+  open:           { label: 'Open',           color: 'bg-red-100 text-red-800' },
+  in_progress:    { label: 'In Progress',    color: 'bg-blue-100 text-blue-800' },
+  resolved:       { label: 'Resolved',       color: 'bg-amber-100 text-amber-800' },
+  verified:       { label: 'Verified ✓',     color: 'bg-green-100 text-green-800' },
+  false_positive: { label: 'False Positive', color: 'bg-orange-100 text-orange-800' },
+  auto_closed:    { label: 'Auto-Closed ✓',  color: 'bg-gray-100 text-gray-600' },
+  disputed:       { label: 'Disputed',       color: 'bg-purple-100 text-purple-800' },
+}
+
+// Status dropdown component:
+const StatusDropdown = ({ mismatch, onUpdate }) => {
+  const nextStatuses = STATUS_TRANSITIONS[mismatch.status] || []
+  const current = STATUS_LABELS[mismatch.status] || { label: mismatch.status, color: 'bg-gray-100' }
+
+  const updateStatus = async (newStatus: string) => {
+    const res = await fetch(`/api/v1/validation/mismatches/${mismatch.id}/status`, {
+      method: 'PATCH',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus })
+    })
+    if (res.ok) onUpdate({ ...mismatch, status: newStatus })
+  }
+
+  return (
+    <div className="relative group">
+      <span className={`text-xs px-2 py-1 rounded cursor-pointer ${current.color}`}>
+        {current.label} ▾
+      </span>
+      {nextStatuses.length > 0 && (
+        <div className="absolute left-0 top-full mt-1 bg-white border rounded shadow-lg z-20 hidden group-hover:block min-w-[140px]">
+          {nextStatuses.map(status => (
+            <button
+              key={status}
+              onClick={() => updateStatus(status)}
+              className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50"
+            >
+              → {STATUS_LABELS[status]?.label || status}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+```
+
+Also add status filter tabs (update existing filter):
+```tsx
+// Summary counts by status
+const statusCounts = mismatches.reduce((acc, m) => {
+  acc[m.status] = (acc[m.status] || 0) + 1
+  return acc
+}, {} as Record<string, number>)
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16d1
+
+# 2. Verify "new" migrated to "open"
+psql -c "SELECT status, COUNT(*) FROM mismatches GROUP BY status"
+# Expected: no rows with status="new"
+
+# 3. Verify CHECK constraint works
+psql -c "UPDATE mismatches SET status = 'invalid_status' WHERE id = 1"
+# Expected: ERROR: violates check constraint
+
+# 4. Valid transition test
+curl -X PATCH /api/v1/validation/mismatches/1/status \
+  -H "Content-Type: application/json" \
+  -d '{"status": "in_progress", "note": "Developer assigned"}'
+# Expected: 200
+
+# 5. Invalid transition test
+curl -X PATCH /api/v1/validation/mismatches/1/status \
+  -d '{"status": "verified"}'
+# Expected: 400 "Invalid transition: in_progress → verified"
+```
+
+### Risk Assessment
+- **Data migration: "new" → "open"** — non-destructive, only changes existing values. Run `SELECT COUNT(*) FROM mismatches WHERE status = 'new'` before migration to verify.
+- **CHECK constraint** — any code writing `status="new"` will break. Grep for `"new"` in mismatch creation code and update to `"open"` first.
+- **Backward compatibility** — `default="open"` replaces `default="new"` — new mismatches created correctly going forward
+- **Frontend graceful** — STATUS_LABELS has a fallback for unknown statuses
+
+
+---
+
+## P5B-11 — Version-Linked Mismatches (Document Version + Git Commit Hash)
+
+**Ticket ID:** P5B-11
+**Priority:** P1 — Audit trail and regression detection. "Which BRD version and git commit created this mismatch?"
+**Complexity:** Low
+**Risk:** LOW — additive nullable fields on mismatches; existing rows unaffected
+
+### Why This Exists
+
+An auditor asks: "This compliance mismatch was created 3 months ago. Which BRD version triggered it? Which git commit was current when it was found?"
+
+A developer asks: "This mismatch appeared after today's commit. Which exact commit introduced the regression?"
+
+Currently, mismatches have no version linkage. They're orphaned findings with no context.
+
+After P5B-11:
+- Every mismatch knows `document_version_id` (which BRD version triggered the finding)
+- Every mismatch knows `created_commit_hash` (git commit hash at validation time)
+- When a mismatch is auto-closed (P5B-06), `resolved_commit_hash` is recorded
+- Timeline view: "Mismatch created at BRD v2 / commit abc123, resolved at commit def456"
+
+### Current State
+
+**File: `backend/app/models/mismatch.py`**
+No `document_version_id` or `created_commit_hash` fields.
+
+**File: `backend/app/services/validation_service.py`**
+`validate_single_link` runs without knowing which document version is active or which commit triggered the validation.
+
+**File: `backend/app/api/endpoints/webhooks.py`**
+`webhook_triggered_analysis` receives `commit_hash` from GitHub push — this is NOT passed through to the validation that follows.
+
+### What to Change
+
+#### Step 1: New migration adding version/commit fields
+
+**New file: `backend/alembic/versions/s16e1_mismatch_version_links.py`**
+
+```python
+"""
+P5B-11: Add document_version_id and commit hash fields to mismatches.
+
+Revision ID: s16e1
+Revises: s16d1
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's16e1'
+down_revision = 's16d1'
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    # Link to the document version that was active when mismatch was found
+    op.add_column('mismatches',
+        sa.Column('document_version_id', sa.Integer(),
+                  sa.ForeignKey('document_versions.id', ondelete='SET NULL'),
+                  nullable=True))
+
+    # Git commit hash when mismatch was created
+    op.add_column('mismatches',
+        sa.Column('created_commit_hash', sa.String(40), nullable=True))
+
+    # Git commit hash when mismatch was resolved/auto-closed (P5B-06)
+    op.add_column('mismatches',
+        sa.Column('resolved_commit_hash', sa.String(40), nullable=True))
+
+    # Index for filtering mismatches by document version
+    op.create_index(
+        'ix_mismatches_document_version_id',
+        'mismatches', ['document_version_id'],
+        postgresql_concurrently=True
+    )
+
+    # Index for looking up mismatches created at a specific commit
+    op.create_index(
+        'ix_mismatches_created_commit_hash',
+        'mismatches', ['created_commit_hash'],
+        postgresql_concurrently=True
+    )
+
+def downgrade():
+    op.drop_index('ix_mismatches_created_commit_hash')
+    op.drop_index('ix_mismatches_document_version_id')
+    op.drop_column('mismatches', 'resolved_commit_hash')
+    op.drop_column('mismatches', 'created_commit_hash')
+    op.drop_column('mismatches', 'document_version_id')
+```
+
+#### Step 2: Update Mismatch model
+
+**File: `backend/app/models/mismatch.py`**
+
+Add after `owner_id` field (line 46):
+
+```python
+    # P5B-11: Version-linked mismatches for audit trail
+    document_version_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    created_commit_hash: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    resolved_commit_hash: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+```
+
+#### Step 3: Pass version/commit context into validation
+
+**File: `backend/app/services/validation_service.py`**
+
+Update `run_validation` method signature to accept optional `commit_hash`:
+
+```python
+# BEFORE:
+async def run_validation(
+    self, db, *, tenant_id, user_id, document_id, repository_id=None, ...
+):
+
+# AFTER:
+async def run_validation(
+    self, db, *, tenant_id, user_id, document_id, repository_id=None,
+    commit_hash: str | None = None,  # P5B-11: git commit that triggered this validation
+    **kwargs,
+):
+    ...
+    # When creating mismatches in create_with_link, pass commit_hash:
+    new_mismatch = crud.mismatch.create_with_link(
+        db=db,
+        obj_in={
+            **m,
+            "direction": "forward",
+            "requirement_atom_id": db_atom_id,
+            "created_commit_hash": commit_hash,     # P5B-11
+            "document_version_id": current_doc_version_id,  # P5B-11 (see below)
+        },
+        link_id=link.id,
+        owner_id=user_id,
+        tenant_id=tenant_id,
+    )
+```
+
+Get `current_doc_version_id` from the document at validation time:
+
+```python
+# After loading document in validation_service.py:
+from app.crud.crud_document_version import crud_document_version
+
+latest_version = crud_document_version.get_by_document(
+    db, document_id=document_id, tenant_id=tenant_id
+)
+current_doc_version_id = latest_version[0].id if latest_version else None
+```
+
+#### Step 4: Pass commit hash from webhook through to validation
+
+**File: `backend/app/tasks/code_analysis_tasks.py`** (in `auto_revalidate_after_analysis`):
+
+```python
+# When creating mismatches in _revalidate_link_and_merge:
+# The commit_hash parameter is already passed to this function (from P5B-06)
+# Just pass it through to run_validation_for_link_preview:
+
+link_result = _revalidate_link_and_merge(
+    db=db, link=link, tenant_id=tenant_id,
+    validation_svc=validation_svc,
+    commit_hash=commit_hash,  # ← Already have this from webhook
+)
+```
+
+And in `_revalidate_link_and_merge`:
+```python
+# When calling create_with_link for new mismatches:
+crud.mismatch.create_with_link(
+    db=db,
+    obj_in={
+        **new_m_data,
+        "direction": "forward",
+        "created_commit_hash": commit_hash,  # P5B-11
+    },
+    ...
+)
+
+# When auto-closing:
+existing_m.resolved_commit_hash = commit_hash  # P5B-11
+```
+
+#### Step 5: New endpoint for mismatch version history
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+@router.get("/mismatches/{mismatch_id}/version-info")
+def get_mismatch_version_info(
+    mismatch_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-11: Returns version context for a mismatch.
+    Shows: which BRD version + git commit created it, which commit resolved it.
+    """
+    mismatch = crud.mismatch.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    doc_version = None
+    if mismatch.document_version_id:
+        from app.models.document_version import DocumentVersion
+        dv = db.query(DocumentVersion).get(mismatch.document_version_id)
+        if dv:
+            doc_version = {
+                "id": dv.id,
+                "version_number": dv.version_number,
+                "original_filename": dv.original_filename,
+                "uploaded_at": dv.created_at.isoformat(),
+            }
+
+    return {
+        "mismatch_id": mismatch_id,
+        "created_at": mismatch.created_at.isoformat(),
+        "document_version": doc_version or "Not tracked (pre-P5B-11 mismatch)",
+        "created_commit": mismatch.created_commit_hash or "Not tracked",
+        "resolved_commit": mismatch.resolved_commit_hash,
+        "current_status": mismatch.status,
+        "status_changed_at": (
+            mismatch.status_changed_at.isoformat()
+            if mismatch.status_changed_at else None
+        ),
+    }
+```
+
+#### Step 6: Frontend — Version info tooltip on mismatch card
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add a small info icon on mismatch card that shows version tooltip on hover:
+
+```tsx
+{(mismatch.created_commit_hash || mismatch.document_version_id) && (
+  <div className="relative group ml-auto">
+    <Info className="h-3.5 w-3.5 text-gray-300 hover:text-gray-500 cursor-help" />
+    <div className="absolute right-0 bottom-full mb-1 bg-gray-900 text-white text-xs rounded p-2 min-w-[200px] hidden group-hover:block z-30">
+      <div>Found at: BRD v{mismatch.document_version?.version_number || '?'}</div>
+      {mismatch.created_commit_hash && (
+        <div>Commit: {mismatch.created_commit_hash.slice(0, 8)}</div>
+      )}
+      {mismatch.resolved_commit_hash && (
+        <div className="text-green-300">
+          Fixed at: {mismatch.resolved_commit_hash.slice(0, 8)}
+        </div>
+      )}
+    </div>
+  </div>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16e1
+
+# 2. Verify columns added
+psql -c "\d mismatches" | grep "version\|commit"
+
+# 3. Run validation (manually or via webhook)
+# Check document_version_id + created_commit_hash populated
+psql -c "SELECT id, document_version_id, created_commit_hash FROM mismatches ORDER BY id DESC LIMIT 3"
+
+# 4. Simulate code push (P5B-06 webhook)
+# Auto-closed mismatches should have resolved_commit_hash set
+psql -c "SELECT status, resolved_commit_hash FROM mismatches WHERE status = 'auto_closed'"
+
+# 5. Get version info endpoint
+curl /api/v1/validation/mismatches/1/version-info
+```
+
+### Risk Assessment
+- **All new columns nullable** — existing mismatches unaffected (show "Not tracked")
+- **Backward compatible** — `run_validation(commit_hash=None)` is the default; no callers break
+- **`SET NULL` on delete** — if a document version is deleted, mismatch keeps `document_version_id=NULL` rather than cascade-deleting the mismatch
+- **Performance** — `created_commit_hash` and `document_version_id` indexes enable fast commit-specific queries
+
+
+---
+
+## P5B-12 — BA Sign-Off Workflow + Compliance Certificate
+
+**Ticket ID:** P5B-12
+**Priority:** P1 — Required for regulated industry customers. "Can we prove this BRD was reviewed and signed off before the release?"
+**Complexity:** Medium
+**Risk:** LOW — new models/endpoints only; no existing functionality modified
+
+### Why This Exists
+
+Before a banking system ships to production, the BA must sign off that:
+1. All requirements in BRD v3 have been validated against the code
+2. All critical mismatches have been resolved or explicitly accepted with justification
+3. A compliance certificate can be produced for the audit trail
+
+Currently DokyDoc has no sign-off concept. After P5B-12:
+- BA can perform sign-off for a specific BRD version against a specific repository
+- Sign-off requires: all critical mismatches resolved OR explicitly acknowledged
+- System generates a signed compliance certificate (JSON/PDF) with:
+  - Tenant name, document title, document version
+  - Date signed, signed by (name + role)
+  - Compliance score at time of sign-off
+  - List of open mismatches acknowledged as acceptable
+  - SHA-256 tamper-evidence hash
+
+### Current State
+
+No sign-off model or endpoint exists.
+`Approval` model exists (`backend/app/models/approval.py`) for general workflow approvals — but it's not wired to document validation sign-off.
+
+### What to Change
+
+#### Step 1: New model `BRDSignOff`
+
+**New file: `backend/app/models/brd_sign_off.py`**
+
+```python
+"""
+P5B-12: BRD Sign-Off — records a BA's formal sign-off of a document version.
+Used for audit trail and compliance certificate generation.
+"""
+import hashlib
+import json
+from datetime import datetime
+from typing import Optional
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import JSONB
+
+from app.db.base_class import Base
+
+
+class BRDSignOff(Base):
+    __tablename__ = "brd_sign_offs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    # What was signed off
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    document_version_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    repository_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Who signed off
+    signed_by_user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=False
+    )
+    signed_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, nullable=False
+    )
+
+    # Sign-off details
+    # Compliance score at time of sign-off (snapshot)
+    compliance_score_at_signoff: Mapped[Optional[float]] = mapped_column(Integer, nullable=True)
+
+    # Summary of open mismatches at sign-off time
+    open_mismatches_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    critical_mismatches_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Explicitly acknowledged open mismatches (developer/BA accepts the risk)
+    # List of mismatch IDs that are open but acknowledged as acceptable
+    acknowledged_mismatch_ids: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+
+    # BA notes (free text)
+    sign_off_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Can only sign off if all critical mismatches are resolved OR acknowledged
+    has_unresolved_critical: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    # Certificate fields
+    certificate_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # SHA-256 of the certificate content for tamper detection
+
+    # Relationships
+    document = relationship("Document")
+    signed_by = relationship("User")
+
+    def generate_certificate_hash(self) -> str:
+        """Generate a tamper-evident hash of the sign-off content."""
+        content = {
+            "tenant_id": self.tenant_id,
+            "document_id": self.document_id,
+            "document_version_id": self.document_version_id,
+            "signed_by_user_id": self.signed_by_user_id,
+            "signed_at": self.signed_at.isoformat(),
+            "compliance_score": self.compliance_score_at_signoff,
+            "open_mismatches": self.open_mismatches_count,
+            "critical_mismatches": self.critical_mismatches_count,
+        }
+        return hashlib.sha256(
+            json.dumps(content, sort_keys=True).encode()
+        ).hexdigest()
+```
+
+**New migration: `backend/alembic/versions/s16f1_brd_sign_offs.py`**
+
+```python
+"""
+P5B-12: Create brd_sign_offs table.
+
+Revision ID: s16f1
+Revises: s16e1
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
+
+revision = 's16f1'
+down_revision = 's16e1'
+branch_labels = None
+depends_on = None
+
+def upgrade():
+    op.create_table(
+        'brd_sign_offs',
+        sa.Column('id', sa.Integer(), primary_key=True),
+        sa.Column('tenant_id', sa.Integer(), nullable=False),
+        sa.Column('document_id', sa.Integer(),
+                  sa.ForeignKey('documents.id', ondelete='CASCADE'), nullable=False),
+        sa.Column('document_version_id', sa.Integer(),
+                  sa.ForeignKey('document_versions.id', ondelete='SET NULL'), nullable=True),
+        sa.Column('repository_id', sa.Integer(),
+                  sa.ForeignKey('repositories.id', ondelete='SET NULL'), nullable=True),
+        sa.Column('signed_by_user_id', sa.Integer(),
+                  sa.ForeignKey('users.id'), nullable=False),
+        sa.Column('signed_at', sa.DateTime(), nullable=False,
+                  server_default=sa.text('now()')),
+        sa.Column('compliance_score_at_signoff', sa.Float(), nullable=True),
+        sa.Column('open_mismatches_count', sa.Integer(), default=0, nullable=False),
+        sa.Column('critical_mismatches_count', sa.Integer(), default=0, nullable=False),
+        sa.Column('acknowledged_mismatch_ids', JSONB(), nullable=True),
+        sa.Column('sign_off_notes', sa.Text(), nullable=True),
+        sa.Column('has_unresolved_critical', sa.Boolean(), default=False, nullable=False),
+        sa.Column('certificate_hash', sa.String(64), nullable=True),
+    )
+    op.create_index('ix_brd_sign_offs_tenant_id', 'brd_sign_offs', ['tenant_id'])
+    op.create_index('ix_brd_sign_offs_document_id', 'brd_sign_offs', ['document_id'])
+
+def downgrade():
+    op.drop_table('brd_sign_offs')
+```
+
+#### Step 2: Add `BRDSignOff` to models `__init__`
+
+**File: `backend/app/models/__init__.py`**
+
+```python
+from .brd_sign_off import BRDSignOff  # P5B-12
+```
+
+#### Step 3: CRUD for BRDSignOff
+
+**New file: `backend/app/crud/crud_brd_sign_off.py`**
+
+```python
+from sqlalchemy.orm import Session
+from app.models.brd_sign_off import BRDSignOff
+
+
+class CRUDBRDSignOff:
+
+    def create_sign_off(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        document_id: int,
+        document_version_id: int | None,
+        repository_id: int | None,
+        signed_by_user_id: int,
+        compliance_score: float | None,
+        open_mismatches_count: int,
+        critical_mismatches_count: int,
+        acknowledged_mismatch_ids: list[int] | None,
+        sign_off_notes: str | None,
+        has_unresolved_critical: bool,
+    ) -> BRDSignOff:
+        from datetime import datetime
+        sign_off = BRDSignOff(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            document_version_id=document_version_id,
+            repository_id=repository_id,
+            signed_by_user_id=signed_by_user_id,
+            signed_at=datetime.now(),
+            compliance_score_at_signoff=compliance_score,
+            open_mismatches_count=open_mismatches_count,
+            critical_mismatches_count=critical_mismatches_count,
+            acknowledged_mismatch_ids=acknowledged_mismatch_ids or [],
+            sign_off_notes=sign_off_notes,
+            has_unresolved_critical=has_unresolved_critical,
+        )
+        # Generate certificate hash BEFORE committing
+        sign_off.certificate_hash = sign_off.generate_certificate_hash()
+        db.add(sign_off)
+        db.commit()
+        db.refresh(sign_off)
+        return sign_off
+
+    def get_by_document(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> list[BRDSignOff]:
+        return db.query(BRDSignOff).filter(
+            BRDSignOff.document_id == document_id,
+            BRDSignOff.tenant_id == tenant_id,
+        ).order_by(BRDSignOff.signed_at.desc()).all()
+
+    def get_latest(
+        self, db: Session, *, document_id: int, tenant_id: int
+    ) -> BRDSignOff | None:
+        return db.query(BRDSignOff).filter(
+            BRDSignOff.document_id == document_id,
+            BRDSignOff.tenant_id == tenant_id,
+        ).order_by(BRDSignOff.signed_at.desc()).first()
+
+
+crud_brd_sign_off = CRUDBRDSignOff()
+```
+
+#### Step 4: Sign-off endpoints
+
+**File: `backend/app/api/endpoints/validation.py`**
+
+```python
+from pydantic import BaseModel
+from typing import Optional
+
+class SignOffRequest(BaseModel):
+    repository_id: Optional[int] = None
+    acknowledged_mismatch_ids: list[int] = []
+    sign_off_notes: Optional[str] = None
+    # BA must explicitly confirm they've reviewed open critical mismatches
+    confirm_acknowledged_criticals: bool = False
+
+
+@router.post("/{document_id}/sign-off")
+def sign_off_document(
+    document_id: int,
+    body: SignOffRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-12: BA signs off on a document version after validation review.
+    
+    Pre-conditions:
+    - All CRITICAL mismatches must be resolved OR in acknowledged_mismatch_ids
+    - Only users with role business_analyst, admin, or owner can sign off
+    
+    Returns: sign-off record with certificate_hash.
+    """
+    # Role check — only BA/admin/owner can sign off
+    if current_user.role not in ("business_analyst", "admin", "owner"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only Business Analysts, Admins, and Owners can sign off documents."
+        )
+
+    document = crud.document.get(db, id=document_id)
+    if not document or document.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Get compliance breakdown
+    from app.crud.crud_mismatch import crud as mismatch_crud
+    breakdown = mismatch_crud.mismatch.get_compliance_breakdown(
+        db=db, document_id=document_id, tenant_id=tenant_id
+    )
+
+    compliance_score = breakdown.get("overall_score")
+
+    # Count open mismatches
+    open_mismatches = db.query(Mismatch).filter(
+        Mismatch.document_id == document_id,
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.status.in_(["open", "in_progress"]),
+    ).all()
+
+    critical_open = [m for m in open_mismatches if m.severity in ("critical", "compliance_risk")]
+    unacknowledged_criticals = [
+        m for m in critical_open
+        if m.id not in body.acknowledged_mismatch_ids
+    ]
+
+    # Block sign-off if there are unacknowledged critical mismatches
+    if unacknowledged_criticals and not body.confirm_acknowledged_criticals:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unresolved_critical_mismatches",
+                "message": (
+                    f"{len(unacknowledged_criticals)} critical/compliance-risk mismatch(es) "
+                    f"are unresolved. Either resolve them or include their IDs in "
+                    f"acknowledged_mismatch_ids and set confirm_acknowledged_criticals=true."
+                ),
+                "unresolved_ids": [m.id for m in unacknowledged_criticals],
+            }
+        )
+
+    # Get latest document version
+    from app.crud.crud_document_version import crud_document_version
+    versions = crud_document_version.get_by_document(
+        db, document_id=document_id, tenant_id=tenant_id
+    )
+    doc_version_id = versions[0].id if versions else None
+
+    # Create sign-off record
+    from app.crud.crud_brd_sign_off import crud_brd_sign_off
+    sign_off = crud_brd_sign_off.create_sign_off(
+        db=db,
+        tenant_id=tenant_id,
+        document_id=document_id,
+        document_version_id=doc_version_id,
+        repository_id=body.repository_id,
+        signed_by_user_id=current_user.id,
+        compliance_score=compliance_score,
+        open_mismatches_count=len(open_mismatches),
+        critical_mismatches_count=len(critical_open),
+        acknowledged_mismatch_ids=body.acknowledged_mismatch_ids,
+        sign_off_notes=body.sign_off_notes,
+        has_unresolved_critical=len(unacknowledged_criticals) > 0,
+    )
+
+    # Log audit event
+    try:
+        from app.services.audit_service import audit_service
+        audit_service.log(
+            db, tenant_id=tenant_id, actor_id=current_user.id,
+            event_type="document.signed_off",
+            resource_type="document", resource_id=document_id,
+            metadata={
+                "sign_off_id": sign_off.id,
+                "compliance_score": compliance_score,
+                "open_mismatches": len(open_mismatches),
+            }
+        )
+    except Exception:
+        pass
+
+    return {
+        "sign_off_id": sign_off.id,
+        "document_id": document_id,
+        "signed_by": current_user.email,
+        "signed_at": sign_off.signed_at.isoformat(),
+        "compliance_score": compliance_score,
+        "open_mismatches": len(open_mismatches),
+        "certificate_hash": sign_off.certificate_hash,
+        "status": "signed_off",
+    }
+
+
+@router.get("/{document_id}/certificate")
+def get_compliance_certificate(
+    document_id: int,
+    sign_off_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    P5B-12: Returns compliance certificate for a signed-off document.
+    JSON format by default — can be used to generate PDF via frontend.
+    """
+    from app.crud.crud_brd_sign_off import crud_brd_sign_off
+
+    if sign_off_id:
+        sign_off = db.query(BRDSignOff).filter(
+            BRDSignOff.id == sign_off_id,
+            BRDSignOff.tenant_id == tenant_id,
+        ).first()
+    else:
+        sign_off = crud_brd_sign_off.get_latest(
+            db, document_id=document_id, tenant_id=tenant_id
+        )
+
+    if not sign_off:
+        raise HTTPException(status_code=404, detail="No sign-off found for this document")
+
+    document = crud.document.get(db, id=document_id)
+    tenant = crud.tenant.get(db, id=tenant_id)
+
+    # Load document version info
+    doc_version = None
+    if sign_off.document_version_id:
+        from app.models.document_version import DocumentVersion
+        dv = db.query(DocumentVersion).get(sign_off.document_version_id)
+        if dv:
+            doc_version = {
+                "version_number": dv.version_number,
+                "filename": dv.original_filename,
+                "uploaded_at": dv.created_at.isoformat(),
+            }
+
+    # Load acknowledged mismatch details
+    acknowledged_details = []
+    if sign_off.acknowledged_mismatch_ids:
+        ack_mismatches = db.query(Mismatch).filter(
+            Mismatch.id.in_(sign_off.acknowledged_mismatch_ids)
+        ).all()
+        acknowledged_details = [
+            {
+                "id": m.id,
+                "type": m.mismatch_type,
+                "description": m.description[:200],
+                "severity": m.severity,
+            }
+            for m in ack_mismatches
+        ]
+
+    certificate = {
+        "certificate_type": "Documentation Compliance Sign-Off",
+        "certificate_id": f"DOKYDOC-{sign_off.id:06d}",
+        "tenant": {
+            "name": tenant.name if tenant else "Unknown",
+            "id": tenant_id,
+        },
+        "document": {
+            "id": document_id,
+            "title": document.title if document else "Unknown",
+            "version": doc_version,
+        },
+        "validation_summary": {
+            "compliance_score": sign_off.compliance_score_at_signoff,
+            "compliance_percentage": (
+                round(sign_off.compliance_score_at_signoff * 100)
+                if sign_off.compliance_score_at_signoff else None
+            ),
+            "open_mismatches_at_signoff": sign_off.open_mismatches_count,
+            "critical_mismatches_at_signoff": sign_off.critical_mismatches_count,
+        },
+        "acknowledged_risks": {
+            "count": len(acknowledged_details),
+            "mismatches": acknowledged_details,
+            "sign_off_notes": sign_off.sign_off_notes,
+        },
+        "sign_off": {
+            "signed_by_user_id": sign_off.signed_by_user_id,
+            "signed_at": sign_off.signed_at.isoformat(),
+            "sign_off_id": sign_off.id,
+        },
+        "tamper_evidence": {
+            "certificate_hash": sign_off.certificate_hash,
+            "hash_algorithm": "SHA-256",
+            "note": "Recompute this hash to verify certificate authenticity",
+        }
+    }
+
+    return certificate
+
+
+@router.get("/{document_id}/sign-off-history")
+def get_sign_off_history(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """P5B-12: List all sign-offs for a document, newest first."""
+    from app.crud.crud_brd_sign_off import crud_brd_sign_off
+    sign_offs = crud_brd_sign_off.get_by_document(
+        db, document_id=document_id, tenant_id=tenant_id
+    )
+    return {
+        "document_id": document_id,
+        "sign_offs": [
+            {
+                "id": s.id,
+                "signed_at": s.signed_at.isoformat(),
+                "signed_by_user_id": s.signed_by_user_id,
+                "compliance_score": s.compliance_score_at_signoff,
+                "open_mismatches": s.open_mismatches_count,
+                "certificate_hash": s.certificate_hash,
+            }
+            for s in sign_offs
+        ]
+    }
+```
+
+#### Step 5: Frontend — Sign-Off UI on validation panel
+
+**File: `frontend/app/dashboard/validation-panel/page.tsx`**
+
+Add sign-off section at bottom of validation panel (visible to BA/admin/owner roles):
+
+```tsx
+{canSignOff && (
+  <div className="mt-6 border-t pt-4">
+    <h3 className="font-semibold text-gray-700 mb-3">Sign Off This Document Version</h3>
+
+    {latestSignOff ? (
+      <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center justify-between">
+        <div>
+          <div className="font-medium text-green-800 flex items-center gap-2">
+            <CheckCircle className="h-4 w-4" />
+            Signed off by {latestSignOff.signed_by_email}
+          </div>
+          <div className="text-sm text-green-600 mt-1">
+            {new Date(latestSignOff.signed_at).toLocaleString()} ·
+            Compliance: {Math.round(latestSignOff.compliance_score * 100)}%
+          </div>
+        </div>
+        <button
+          onClick={downloadCertificate}
+          className="text-sm px-3 py-1.5 border border-green-300 text-green-700 rounded hover:bg-green-100 flex items-center gap-1"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Certificate
+        </button>
+      </div>
+    ) : (
+      <div className="bg-gray-50 border rounded-lg p-4">
+        {criticalOpenCount > 0 && (
+          <div className="text-amber-700 text-sm mb-3">
+            ⚠ {criticalOpenCount} critical mismatch(es) require resolution or acknowledgment before sign-off
+          </div>
+        )}
+        <div className="flex items-center gap-3">
+          <textarea
+            value={signOffNotes}
+            onChange={(e) => setSignOffNotes(e.target.value)}
+            placeholder="Sign-off notes (optional)..."
+            className="flex-1 text-sm border rounded p-2 h-16 resize-none"
+          />
+          <button
+            onClick={handleSignOff}
+            disabled={signingOff}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+          >
+            {signingOff ? 'Signing...' : 'Sign Off'}
+          </button>
+        </div>
+        <p className="text-xs text-gray-400 mt-2">
+          Compliance score: {complianceScore?.percentage}% · Open mismatches: {openCount}
+        </p>
+      </div>
+    )}
+  </div>
+)}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s16f1
+
+# 2. Verify table created
+psql -c "\d brd_sign_offs"
+
+# 3. Test sign-off with no critical mismatches
+curl -X POST /api/v1/validation/{document_id}/sign-off \
+  -H "Authorization: Bearer $BA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sign_off_notes": "Reviewed and approved for release v1.2"}'
+# Expected: { "sign_off_id": 1, "certificate_hash": "abc...", "status": "signed_off" }
+
+# 4. Test sign-off with critical mismatches (should fail)
+# Expected: 422 { "error": "unresolved_critical_mismatches", "unresolved_ids": [...] }
+
+# 5. Test sign-off with acknowledged criticals
+curl -X POST /api/v1/validation/{document_id}/sign-off \
+  -d '{"acknowledged_mismatch_ids": [5, 7], "confirm_acknowledged_criticals": true,
+       "sign_off_notes": "Mismatches 5 and 7 are accepted risk for MVP release"}'
+# Expected: success with has_unresolved_critical=true
+
+# 6. Download certificate
+curl /api/v1/validation/{document_id}/certificate
+# Expected: JSON certificate with certificate_hash
+
+# 7. Verify certificate hash is tamper-evident
+# Manually change one field in the certificate JSON
+# Recompute SHA-256 → should not match certificate_hash
+```
+
+### Risk Assessment
+- **Role check** — only BA/admin/owner can sign off; developers cannot self-approve their own work
+- **Certificate hash** — SHA-256 of key fields; any field change breaks hash → detectable tampering
+- **Blocking on unacknowledged criticals** — prevents accidental sign-off with critical gaps
+- **No cascade deletes** — `SET NULL` on FK deletion prevents sign-off records from disappearing if document version is removed
+- **Audit log** — every sign-off writes an audit event for compliance evidence
+
