@@ -12560,3 +12560,243 @@ alembic upgrade s17e1  # P5C-06: CI webhook config
 - [ ] `clarification_requested` — when BA asks developer a question (P5C-03)
 - [ ] `clarification_answered` — when developer answers (P5C-03)
 
+
+---
+
+## KNOWN IMPLEMENTATION BUGS — Fix Before Execution
+
+> These bugs were identified during a solution architect review of the full plan against the live
+> codebase. Each one will cause a runtime error or silent failure if not patched before the
+> affected task is coded. Assign one developer to fix these as the FIRST action before any
+> Phase 5C code is written.
+
+---
+
+### BUG-01 — `Document.title` Field Does Not Exist
+
+**Severity:** HIGH — Runtime `AttributeError` on first use
+**Affects:** P5C-05 (`TestSuiteService`), P5C-09 (`compliance_overview` endpoint), P5B-12 (certificate generation)
+**Discovery:** The `Document` model (`backend/app/models/document.py`) has no `title` column. The only name field is `filename`.
+
+**Everywhere in P5C/P5B-12 code that reads:**
+```python
+doc.title
+doc.title or "Untitled"
+"document_title": doc.title
+```
+
+**Replace with:**
+```python
+doc.filename
+doc.filename or "Untitled"
+"document_title": doc.filename
+```
+
+**If a human-readable title separate from the filename is needed long-term,** add it in the same migration that first needs it (s17a1). Add to s17a1 upgrade():
+```python
+op.add_column('documents', sa.Column('title', sa.String(512), nullable=True))
+```
+And add to Document model:
+```python
+title: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+```
+Then render as: `doc.title or doc.filename`
+
+**Resolution:** Patch all plan code snippets now OR add the column in s17a1. Decide before starting P5C.
+
+---
+
+### BUG-02 — `User.full_name` Field Does Not Exist
+
+**Severity:** HIGH — `None` silently replaces expected display name in all notifications
+**Affects:** P5C-02 (`request-uploads` endpoint), P5C-03 (clarification notifications), P5B-04 (false positive audit trail), P5B-12 (certificate `signed_by`)
+**Discovery:** The `User` model (`backend/app/models/user.py`) only has `email`, `hashed_password`, `is_active`, `is_superuser`, `roles`. There is no `full_name` field.
+
+**Every plan snippet that writes:**
+```python
+current_user.full_name or current_user.email
+```
+evaluates as `None or current_user.email` → always returns `current_user.email`. This means notifications always say the email address, never a name. Functionally this works but looks unprofessional.
+
+**Short-term fix (no migration — P5C is unblocked immediately):**
+```python
+# Replace in all P5C/P5B notification code:
+current_user.full_name or current_user.email
+# With:
+current_user.email   # clean, no None risk
+```
+
+**Long-term fix (optional, add to s17a1 migration):**
+```python
+# In s17a1 upgrade():
+op.add_column('users', sa.Column('full_name', sa.String(255), nullable=True))
+
+# In User model:
+full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+```
+Then `current_user.full_name or current_user.email` works as intended.
+
+**Resolution:** Either patch all snippets to use `current_user.email` directly, OR add the column in s17a1. The second option is better UX.
+
+---
+
+### BUG-03 — `from app.core.redis import get_redis_client` — Module Does Not Exist
+
+**Severity:** HIGH — `ImportError` on Celery task startup, crashes the entire worker
+**Affects:** P5C-05 (`test_generation_tasks.py` Celery task)
+**Discovery:** `backend/app/core/` contains only: `config.py`, `exceptions.py`, `logging.py`, `permissions.py`, `security.py`. There is no `redis.py`. Redis is only accessible through `CacheService` in `backend/app/services/cache_service.py`.
+
+**The plan writes:**
+```python
+from app.core.redis import get_redis_client
+redis = get_redis_client()
+redis.set(redis_key, zip_bytes, ex=3600)
+```
+
+**Fix option A — Use CacheService (recommended, already tested):**
+```python
+from app.services.cache_service import CacheService
+cache = CacheService()
+# CacheService.set() stores JSON — but zip_bytes is binary, so encode:
+import base64
+cache.set(redis_key, base64.b64encode(zip_bytes).decode(), ttl=3600)
+# On retrieval:
+raw = cache.get(redis_key)
+zip_bytes = base64.b64decode(raw) if raw else None
+```
+
+**Fix option B — Create the missing module (clean, reusable):**
+
+**New file: `backend/app/core/redis.py`**
+```python
+# backend/app/core/redis.py
+"""Thin wrapper around redis-py. Exposes a singleton get_redis_client() function.
+Use for raw bytes storage (e.g. zip files). Use CacheService for JSON key-value cache."""
+import redis as redis_lib
+from app.core.config import settings
+from app.core.logging import get_logger
+
+logger = get_logger("core.redis")
+_client = None
+
+
+def get_redis_client() -> redis_lib.Redis:
+    global _client
+    if _client is None:
+        try:
+            _client = redis_lib.from_url(settings.REDIS_URL, decode_responses=False)
+            _client.ping()
+        except Exception as e:
+            logger.warning(f"Redis unavailable: {e}")
+            raise
+    return _client
+```
+
+**Resolution:** Create `backend/app/core/redis.py` as the first file created in P5C-05 sprint. The developer must not start `test_generation_tasks.py` before this file exists.
+
+---
+
+### BUG-04 — `asyncio.run()` Inside Celery Workers Is Unsafe
+
+**Severity:** HIGH — Crashes Celery workers using gevent/eventlet or Python 3.12+
+**Affects:** P5C-01 (`document_pipeline.py` hook for file suggestion), P5C-05 (`generate_test_suite` Celery task), P4-07 (BOE notification inside code analysis task)
+
+**The plan writes in Celery task bodies:**
+```python
+asyncio.run(
+    file_suggestion_service.generate_and_store(db=db, ...)
+)
+```
+
+**Why this breaks:**
+1. `asyncio.run()` creates a **new event loop** and blocks the calling thread
+2. If the Celery worker uses gevent or eventlet (event loop already running), `asyncio.run()` raises `RuntimeError: This event loop is already running`
+3. In Python 3.12+, `asyncio.run()` in certain contexts emits deprecation warnings and can deadlock
+4. The existing pattern in `code_analysis_tasks.py` uses synchronous calls only — no `asyncio.run()`
+
+**Fix — Use the safe pattern already established in the codebase:**
+
+For services that need to call async functions from sync Celery tasks:
+
+**Option A — Make the service method synchronous (preferred):**
+```python
+# In FileSuggestionService, add a sync wrapper:
+def generate_and_store_sync(self, db, *, document_id, tenant_id):
+    """Synchronous wrapper for use in Celery tasks."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(
+            self.generate_and_store(db=db, document_id=document_id, tenant_id=tenant_id)
+        )
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+```
+
+**Option B — Refactor the service to be synchronous from the start:**
+Since `call_gemini_for_file_suggestions` is the only async call inside `generate_and_store`, and the Gemini client supports sync calls, the entire service can be written synchronously. The plan uses `async def` unnecessarily for these services.
+
+**Rule going forward for ALL P5B and P5C services called from Celery:**
+- If a service is ONLY called from Celery tasks → write it as `def` (synchronous)
+- If a service is ONLY called from FastAPI endpoints → `async def` is fine
+- If called from both → provide a `_sync` wrapper using the `new_event_loop` pattern above
+
+**Resolution:** Before any P5C service is coded, decide synchronous vs async. The safer default is synchronous — FastAPI can call sync services fine; the reverse is what breaks.
+
+---
+
+### BUG-05 — Mismatch Model Multi-Ticket Edit Conflict (Data Integrity Risk)
+
+**Severity:** MEDIUM — Not a runtime crash but causes model/migration desync if not managed
+**Affects:** P5B-03, P5B-04, P5B-10, P5B-11 — all four tickets modify `backend/app/models/mismatch.py`
+**Discovery:** The plan adds fields to `Mismatch` across 4 separate tickets in 4 separate migrations:
+- P5B-03 adds `jira_issue_key`, `jira_issue_url` → migration s16b1
+- P5B-04 adds `resolution_note`, `status_changed_by_id`, `status_changed_at` → also s16b1
+- P5B-10 migrates `status` default + adds CHECK constraint → migration s16d1
+- P5B-11 adds `document_version_id`, `created_commit_hash`, `resolved_commit_hash` → migration s16e1
+
+**The risk:** If a developer implements P5B-03's model changes (adds `jira_issue_key` to `mismatch.py`) and pushes that model file, then another developer doing P5B-10 also edits `mismatch.py` to add the CHECK constraint — they will have a merge conflict. Worse: if P5B-10's CHECK constraint `status IN ('open', 'in_progress', ...)` is applied to the model **before** s16d1 migration runs (which renames `"new"` → `"open"`), existing rows with `status="new"` will fail the CHECK.
+
+**Fix — Single-owner rule + staged model updates:**
+
+**Rule:** ONE developer owns `backend/app/models/mismatch.py` for the entire Phase 5B sprint. No PR that touches this file is merged without that developer's explicit review.
+
+**Staged approach:**
+```
+Step 1: Write ALL migrations first (s16a1 through s16f1) in sequence, test on empty DB
+Step 2: Apply ALL migrations to staging DB: alembic upgrade s16f1
+Step 3: Run data migration: UPDATE mismatches SET status='open' WHERE status='new'
+Step 4: ONLY THEN update mismatch.py with all new fields + CHECK constraint in one PR
+Step 5: Deploy model change
+```
+
+**The model file edit sequence must be:**
+```python
+# ALL of these fields added in ONE commit to mismatch.py:
+jira_issue_key: Mapped[Optional[str]]       # P5B-03
+jira_issue_url: Mapped[Optional[str]]       # P5B-03
+resolution_note: Mapped[Optional[str]]      # P5B-04
+status_changed_by_id: Mapped[Optional[int]] # P5B-04
+status_changed_at: Mapped[Optional[datetime]] # P5B-04
+document_version_id: Mapped[Optional[int]]  # P5B-11
+created_commit_hash: Mapped[Optional[str]]  # P5B-11
+resolved_commit_hash: Mapped[Optional[str]] # P5B-11
+# AND the CHECK constraint on status — ONLY after s16d1 migration confirms all rows have valid status
+```
+
+**Resolution:** Create a `mismatch.py` ownership rule in team standup before Phase 5B starts.
+
+---
+
+## Bug Fix Sprint Checklist
+
+These are pre-conditions for Phase 5C to execute cleanly. Mark all done before the P5C sprint starts:
+
+- [ ] **BUG-01** — `doc.title` → either replace with `doc.filename` everywhere OR add `title` column to `documents` in s17a1
+- [ ] **BUG-02** — `user.full_name` → either replace with `user.email` everywhere OR add `full_name` column to `users` in s17a1
+- [ ] **BUG-03** — Create `backend/app/core/redis.py` with `get_redis_client()` before starting P5C-05
+- [ ] **BUG-04** — Review all async service methods called from Celery tasks; add `_sync` wrappers or refactor to sync
+- [ ] **BUG-05** — Assign single developer to own `mismatch.py`; agree on staged migration + model update sequence before Phase 5B starts
+
