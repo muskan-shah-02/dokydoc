@@ -12800,3 +12800,2638 @@ These are pre-conditions for Phase 5C to execute cleanly. Mark all done before t
 - [ ] **BUG-04** — Review all async service methods called from Celery tasks; add `_sync` wrappers or refactor to sync
 - [ ] **BUG-05** — Assign single developer to own `mismatch.py`; agree on staged migration + model update sequence before Phase 5B starts
 
+
+---
+
+# PHASE 3 — Request Data Flow Diagrams (Premium Visual Intelligence)
+
+## Solution Architect Preamble
+
+**What this phase builds:** When a developer opens any code file in DokyDoc today, they see raw JSON and a knowledge graph. A BA sees nothing useful. A CTO sees nothing at all. Phase 3 changes this by adding a **visual swimlane diagram** that shows the exact journey of a request through the codebase:
+
+```
+POST /register → validate(UserCreateSchema) → AuthService.register()
+  → UserCRUD.create() → users table (id, email, password_hash)
+  → EmailService.send_welcome() → SendGrid API
+```
+
+**Why it costs zero extra Gemini money:** All data already exists in `CodeComponent.structured_analysis` (JSONB) from Sprint 3. The `DataFlowService` is a **deterministic parser** — it reads existing JSON and derives edges algorithmically. Four new optional fields added to the prompt (P3.1) only enrich NEW files analyzed going forward; existing records work immediately.
+
+**Who benefits:**
+- **Developer** — sees who calls them and who they call; navigates entire request trace by clicking nodes
+- **BA** — "Business View" mode shows human labels in swimlanes, no function names; understands system behavior without reading code
+- **CXO/Tech Lead** — executive diagram of system flow per feature for architecture reviews
+- **QA** — sees all data entry/exit points for a request; generates test boundary list
+
+**Premium gate:** Free tier sees a blurred preview with an upsell card. Pro and Enterprise see the full interactive diagram.
+
+---
+
+## Developer Ownership (Phase 3)
+
+| File | Owner |
+|------|-------|
+| `backend/app/services/ai/prompt_manager.py` | **BE-P3** (coordinate with Phase 5 developer — same file) |
+| `backend/app/models/code_data_flow_edge.py` | BE-P3 (new file) |
+| `backend/app/crud/crud_code_data_flow_edge.py` | BE-P3 (new file) |
+| `backend/app/services/data_flow_service.py` | BE-P3 (new file) |
+| `backend/app/tasks/data_flow_tasks.py` | BE-P3 (new file) |
+| `backend/app/api/endpoints/code_components.py` | BE-P3 (additive only — new endpoints appended) |
+| `backend/app/api/endpoints/repositories.py` | BE-P3 (additive only — one endpoint appended) |
+| `backend/app/schemas/code_component.py` | BE-P3 (additive — new schemas appended) |
+| `backend/alembic/versions/s13a1_code_data_flow_edges.py` | BE-P3 (new file) |
+| `frontend/components/data-flow/DataFlowDiagram.tsx` | FE-P3 (new file) |
+| `frontend/components/data-flow/RequestTracePanel.tsx` | FE-P3 (new file) |
+| `frontend/components/data-flow/EdgeListPanel.tsx` | FE-P3 (new file) |
+| `frontend/components/data-flow/PremiumGateCard.tsx` | FE-P3 (new file) |
+| `frontend/app/dashboard/code/[id]/page.tsx` | FE-P3 (additive — new tab only) |
+| `frontend/hooks/useDataFlow.ts` | FE-P3 (new file) |
+
+**Rule:** BE-P3 developer must coordinate with Phase 5 developer before touching `prompt_manager.py`. Both changes (P3.1 output schema + P5-03 input prefix injection) must be reviewed together to avoid git conflicts. Recommended: Phase 5 developer makes their change first (P5-03), then BE-P3 developer rebases on top and adds P3.1 fields.
+
+**Phase 3 can run fully in parallel with Phase 5B.** No shared files.
+
+**Sprint estimate:** 6–7 days for 1 backend + 1 frontend developer working in parallel.
+
+---
+
+## Migration Chain (Phase 3)
+
+```
+s12a1 (training_examples — existing baseline)
+  └── s13a1 (code_data_flow_edges — Phase 3)
+       └── s14a1 (concept_mapping fields — Phase 4, separate chain)
+```
+
+Phase 3 migration is independent. Can be deployed before or after Phase 4/5.
+
+---
+
+## P3.1 — Enhance ENHANCED_SEMANTIC_ANALYSIS Prompt (Additive Fields)
+
+**Priority:** P1 — Must happen before any new code analysis runs; enriches future analyses
+**Complexity:** LOW — Additive prompt change; backward compatible
+**Risk:** LOW — Old `structured_analysis` records remain valid; new fields are OPTIONAL
+
+### Why This Exists
+
+The current `ENHANCED_SEMANTIC_ANALYSIS` prompt (lines 752–930 of `prompt_manager.py`) extracts 7 sections: `business_rules`, `api_contracts`, `data_model_relationships`, `security_patterns`, `component_interactions`, `data_flows`, `components`. These sections contain the raw material for data flow diagrams, but 4 pieces of structured metadata are missing that make deterministic graph building significantly more accurate:
+
+1. **`file_role`** — normalized enum (ENDPOINT/SERVICE/SCHEMA/MODEL/CRUD/etc.) is more stable than the 17-value `file_type` string
+2. **`backed_by_model`** — for schema files: which DB table + which columns map to which schema fields
+3. **`model_definition`** — for model files: exact column names, types, and constraints
+4. **`outbound_calls`** — for service/CRUD files: structured list of what external modules/functions are called
+
+Without these fields, the `DataFlowService` falls back to parsing free-text `component_interactions` which is messy. With them, graph building is deterministic and accurate.
+
+### Current State
+
+**File:** `backend/app/services/ai/prompt_manager.py`
+**Lines 885–895** (the CRITICAL section at the bottom of the prompt, before `CODE TO ANALYZE:`):
+
+```python
+CRITICAL:
+- For business_rules: Extract ACTUAL rules from code logic, not just comments
+- For api_contracts: Include ALL endpoints with their full contract
+- For data_model_relationships: Include FK constraints and cascade behavior
+- For security_patterns: Note GAPS as well as implemented patterns
+- For component_interactions: Extract ALL function-to-function calls...
+- For data_flows: Trace how data enters, transforms, and exits...
+- If a section is not applicable to this file type, return an empty array []
+
+CODE TO ANALYZE:
+```
+
+**Lines 905–916** (expected_schema properties):
+```python
+"properties": {
+    "language_info": {"type": "object"},
+    "business_rules": {"type": "array"},
+    "api_contracts": {"type": "array"},
+    "data_model_relationships": {"type": "array"},
+    "security_patterns": {"type": "array"},
+    "component_interactions": {"type": "array"},
+    "data_flows": {"type": "array"},
+    "components": {"type": "array"},
+    ...
+}
+```
+
+### What to Change
+
+**Step 1 — Add 4 new optional sections to the prompt body (insert BEFORE the existing CRITICAL block):**
+
+In `prompt_manager.py`, find the line that reads `"8. **STANDARD ANALYSIS**"` (or the last numbered analysis instruction). Add after item 7 (`DATA FLOWS`):
+
+```python
+"""
+8. **FILE ROLE** — Classify this file into exactly one normalized role:
+   - "ENDPOINT": HTTP handler/router file (FastAPI router, Express handler, Django view)
+   - "SERVICE": Business logic service class (AuthService, PaymentService, etc.)
+   - "SCHEMA": Data validation/serialization schema (Pydantic, Zod, Marshmallow)
+   - "MODEL": Database model/entity (SQLAlchemy, TypeORM, Prisma model)
+   - "CRUD": Database access layer (CRUD class, Repository pattern)
+   - "MIDDLEWARE": Request/response interceptor, authentication decorator
+   - "UTILITY": Helper functions, shared utilities, constants
+   - "CONFIG": Configuration, environment settings, constants
+   - "TEST": Test file
+   - "MIGRATION": Database migration file
+   Return as a single string under "file_role".
+
+9. **MODEL DEFINITION** — ONLY for MODEL/MIGRATION files:
+   Extract the DB table name and ALL columns with types.
+   Return as "model_definition": { "table_name": "...", "columns": [...] }
+   Skip entirely (omit the key) for non-MODEL files.
+
+10. **SCHEMA MAPPING** — ONLY for SCHEMA files:
+    Map each schema field to the underlying DB column if discernible.
+    Return as "backed_by_model": { "table_name": "...", "model_class": "...", "fields": [...] }
+    Skip entirely (omit the key) for non-SCHEMA files.
+
+11. **OUTBOUND CALLS** — ONLY for ENDPOINT/SERVICE/CRUD files:
+    List every call this file makes to an external module, service, or DB.
+    For each call: { "caller_function": "...", "target_module": "...",
+                     "target_function": "...", "data_in": "...", "data_out": "..." }
+    "target_module" must be the import path (e.g. "services.auth_service", "crud.users")
+    so it can be matched to other CodeComponent records.
+    Skip entirely (omit the key) for SCHEMA/MODEL/CONFIG/TEST files.
+"""
+```
+
+**Step 2 — Update the STRICT RESPONSE FORMAT JSON block** (inside the prompt string, add 4 new optional keys after `"data_flows"`):
+
+```python
+        "file_role": "ENDPOINT|SERVICE|SCHEMA|MODEL|CRUD|MIDDLEWARE|UTILITY|CONFIG|TEST|MIGRATION",
+        "model_definition": {
+            "table_name": "users",
+            "columns": [
+                {"name": "id", "type": "Integer", "primary_key": true, "nullable": false, "indexed": true},
+                {"name": "email", "type": "String", "nullable": false, "indexed": true}
+            ]
+        },
+        "backed_by_model": {
+            "table_name": "users",
+            "model_class": "User",
+            "fields": [
+                {"schema_field": "email", "model_column": "email", "type": "EmailStr"},
+                {"schema_field": "id", "model_column": "id", "type": "int"}
+            ]
+        },
+        "outbound_calls": [
+            {
+                "caller_function": "create_user",
+                "target_module": "services/auth_service",
+                "target_function": "AuthService.register",
+                "data_in": "UserCreateRequest",
+                "data_out": "User"
+            }
+        ]
+```
+
+**Step 3 — Update the CRITICAL block** to add guidance for the new fields:
+
+```python
+- For file_role: Classify into exactly one value from the enum above; prefer specificity
+- For model_definition: Only for MODEL files — extract ALL columns, not just a sample
+- For backed_by_model: Only for SCHEMA files — trace field names back to DB columns
+- For outbound_calls: Only for ENDPOINT/SERVICE/CRUD files — include ALL cross-module calls;
+  use the actual import path for target_module so it can be resolved to other files
+- ALL FOUR NEW FIELDS ARE OPTIONAL — omit entirely if not applicable to this file type
+```
+
+**Step 4 — Update `expected_schema`** in the same prompt definition dict:
+
+```python
+# Add inside "properties" of structured_analysis:
+"file_role": {"type": "string"},
+"model_definition": {"type": "object"},
+"backed_by_model": {"type": "object"},
+"outbound_calls": {"type": "array"},
+```
+
+### Test Commands
+
+```bash
+# 1. Verify prompt was updated (no syntax error):
+python -c "from app.services.ai.prompt_manager import prompt_manager; print('OK')"
+
+# 2. Re-analyze one file and check new fields appear:
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/code-components/{id}/retry
+# Wait for analysis to complete, then:
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/code-components/{id} | jq '.structured_analysis.file_role'
+# Expected: "SERVICE" or "ENDPOINT" etc.
+
+# 3. Verify old records still load (backward compat):
+psql -c "SELECT id, structured_analysis->>'file_role' FROM code_components LIMIT 10"
+# Old records: NULL (field absent) — that's fine, DataFlowService handles this
+```
+
+### Risk Assessment
+- **Pure additive** — existing `structured_analysis` records are untouched; null fields handled by DataFlowService fallback
+- **No migration** — no DB schema change; `structured_analysis` is already a JSONB column
+- **Coordinate with P5-03** — both changes touch `prompt_manager.py`; resolve in same PR or rebase
+
+
+---
+
+## P3.2 — New DB Model: `CodeDataFlowEdge`
+
+**Priority:** P0 — All other Phase 3 tasks depend on this table existing
+**Complexity:** LOW — New model, clean migration
+**Risk:** LOW — New table; no existing table modified
+
+### Why This Exists
+
+The `DataFlowService` needs to persist the edges it derives from `structured_analysis`. Edges must be stored (not computed on every request) because:
+1. Request trace BFS traverses multiple components — needs fast edge lookup by `source_component_id`
+2. Edges need to survive re-deployment (cannot be recomputed from `structured_analysis` in an API request without Gemini cost)
+3. Enables the admin backfill task to incrementally build edges without re-running AI
+
+### DB Migration
+
+**New file: `backend/alembic/versions/s13a1_code_data_flow_edges.py`**
+
+```python
+# backend/alembic/versions/s13a1_code_data_flow_edges.py
+"""Add code_data_flow_edges table for Phase 3 Data Flow Diagrams
+
+Revision ID: s13a1
+Revises: s12a1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's13a1'
+down_revision = 's12a1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'code_data_flow_edges',
+        sa.Column('id', sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column('tenant_id', sa.Integer, nullable=False),
+        sa.Column('repository_id', sa.Integer,
+                  sa.ForeignKey('repositories.id', ondelete='CASCADE'), nullable=True),
+        # The file that INITIATES the flow (always present)
+        sa.Column('source_component_id', sa.Integer,
+                  sa.ForeignKey('code_components.id', ondelete='CASCADE'), nullable=False),
+        # The file that RECEIVES the flow (null = external system like SendGrid, Redis)
+        sa.Column('target_component_id', sa.Integer,
+                  sa.ForeignKey('code_components.id', ondelete='SET NULL'), nullable=True),
+        # Edge classification
+        sa.Column('edge_type', sa.String(30), nullable=False),
+        # "HTTP_TRIGGER" | "SERVICE_CALL" | "SCHEMA_VALIDATION" |
+        # "DB_READ" | "DB_WRITE" | "EXTERNAL_API" | "CACHE_READ" |
+        # "CACHE_WRITE" | "EVENT_PUBLISH" | "EVENT_CONSUME"
+        # Function-level details
+        sa.Column('source_function', sa.String(200), nullable=True),
+        sa.Column('target_function', sa.String(200), nullable=True),
+        # Data descriptions
+        sa.Column('data_in_description', sa.Text, nullable=True),   # "UserCreateRequest (email, password)"
+        sa.Column('data_out_description', sa.Text, nullable=True),  # "User object with id"
+        # Human-readable label for Business View mode
+        sa.Column('human_label', sa.String(500), nullable=True),    # "Saves registration data"
+        # For edges where target_component_id is NULL (external systems)
+        sa.Column('external_target_name', sa.String(200), nullable=True),  # "SendGrid", "Redis", "S3"
+        # Position in the flow (for ordered swimlane rendering)
+        sa.Column('step_index', sa.Integer, nullable=True),
+        # Timestamps
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+    )
+    # Indexes for fast BFS traversal
+    op.create_index('ix_cdf_source', 'code_data_flow_edges', ['source_component_id'])
+    op.create_index('ix_cdf_target', 'code_data_flow_edges', ['target_component_id'])
+    op.create_index('ix_cdf_tenant', 'code_data_flow_edges', ['tenant_id'])
+    op.create_index('ix_cdf_repo', 'code_data_flow_edges', ['repository_id'])
+    op.create_index('ix_cdf_source_type', 'code_data_flow_edges', ['source_component_id', 'edge_type'])
+
+    # CHECK constraint on edge_type
+    op.create_check_constraint(
+        'ck_cdf_edge_type',
+        'code_data_flow_edges',
+        "edge_type IN ('HTTP_TRIGGER','SERVICE_CALL','SCHEMA_VALIDATION','DB_READ','DB_WRITE',"
+        "'EXTERNAL_API','CACHE_READ','CACHE_WRITE','EVENT_PUBLISH','EVENT_CONSUME')"
+    )
+
+
+def downgrade():
+    op.drop_table('code_data_flow_edges')
+```
+
+### New Model
+
+**New file: `backend/app/models/code_data_flow_edge.py`**
+
+```python
+# backend/app/models/code_data_flow_edge.py
+"""
+CodeDataFlowEdge — stores one directed edge in the request data flow graph.
+
+source_component_id → target_component_id (or external_target_name if target is NULL)
+
+Edge types:
+  HTTP_TRIGGER      — User/client calls an HTTP endpoint
+  SERVICE_CALL      — One service calls another service's method
+  SCHEMA_VALIDATION — Service validates input/output against a schema
+  DB_READ           — Component reads from a database table
+  DB_WRITE          — Component writes to a database table
+  EXTERNAL_API      — Component calls an external API (SendGrid, Stripe, etc.)
+  CACHE_READ        — Component reads from Redis/Memcached
+  CACHE_WRITE       — Component writes to Redis/Memcached
+  EVENT_PUBLISH     — Component publishes an event/message (Kafka, RabbitMQ, Celery)
+  EVENT_CONSUME     — Component consumes an event/message
+"""
+from typing import Optional, TYPE_CHECKING
+from datetime import datetime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, CheckConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.base_class import Base
+
+if TYPE_CHECKING:
+    from .code_component import CodeComponent
+
+
+VALID_EDGE_TYPES = {
+    "HTTP_TRIGGER", "SERVICE_CALL", "SCHEMA_VALIDATION",
+    "DB_READ", "DB_WRITE", "EXTERNAL_API",
+    "CACHE_READ", "CACHE_WRITE", "EVENT_PUBLISH", "EVENT_CONSUME",
+}
+
+# Human-readable label templates per edge type
+EDGE_LABEL_TEMPLATES = {
+    "HTTP_TRIGGER": "User calls {method} {path}",
+    "SERVICE_CALL": "{source} invokes {target}",
+    "SCHEMA_VALIDATION": "Validates data using {target}",
+    "DB_READ": "Reads from {table}",
+    "DB_WRITE": "Saves to {table}",
+    "EXTERNAL_API": "Calls external: {name}",
+    "CACHE_READ": "Reads cache: {key}",
+    "CACHE_WRITE": "Writes cache: {key}",
+    "EVENT_PUBLISH": "Publishes event: {topic}",
+    "EVENT_CONSUME": "Consumes event: {topic}",
+}
+
+# Swimlane assignment per file_role
+SWIMLANE_MAP = {
+    "ENDPOINT": "API Layer",
+    "MIDDLEWARE": "API Layer",
+    "SERVICE": "Business Logic",
+    "SCHEMA": "Validation",
+    "CRUD": "Data Access",
+    "MODEL": "Database",
+    "UTILITY": "Utilities",
+    "CONFIG": "Configuration",
+    None: "External Services",   # target_component_id is None → external
+}
+
+
+class CodeDataFlowEdge(Base):
+    __tablename__ = "code_data_flow_edges"
+    __table_args__ = (
+        CheckConstraint(
+            "edge_type IN ('HTTP_TRIGGER','SERVICE_CALL','SCHEMA_VALIDATION','DB_READ',"
+            "'DB_WRITE','EXTERNAL_API','CACHE_READ','CACHE_WRITE','EVENT_PUBLISH','EVENT_CONSUME')",
+            name="ck_cdf_edge_type"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    repository_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    source_component_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("code_components.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_component_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("code_components.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    edge_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_function: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    target_function: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    data_in_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    data_out_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    human_label: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    external_target_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    step_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    source_component: Mapped["CodeComponent"] = relationship(
+        "CodeComponent", foreign_keys=[source_component_id]
+    )
+    target_component: Mapped[Optional["CodeComponent"]] = relationship(
+        "CodeComponent", foreign_keys=[target_component_id]
+    )
+```
+
+**Add to `backend/app/models/__init__.py`:**
+```python
+from .code_data_flow_edge import CodeDataFlowEdge  # noqa: F401
+```
+
+**Add to `backend/app/db/base.py`:**
+```python
+from app.models.code_data_flow_edge import CodeDataFlowEdge  # noqa: F401
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s13a1
+
+# 2. Verify table + indexes + CHECK constraint
+psql -c "\d code_data_flow_edges"
+psql -c "SELECT indexname FROM pg_indexes WHERE tablename='code_data_flow_edges'"
+
+# 3. Verify CHECK constraint works
+psql -c "INSERT INTO code_data_flow_edges (tenant_id, source_component_id, edge_type) VALUES (1, 1, 'INVALID_TYPE')"
+# Expected: ERROR: new row violates check constraint "ck_cdf_edge_type"
+```
+
+### Risk Assessment
+- **CASCADE on source** — if a CodeComponent is deleted, its edges auto-delete; graph stays clean
+- **SET NULL on target** — if a target component is deleted, edge remains with `target_component_id=NULL`; renders as external node in diagram
+- **No FK on repository_id for standalone components** — some CodeComponents have no repository (standalone upload); `repository_id` is nullable
+
+
+---
+
+## P3.3 — CRUD: `CRUDCodeDataFlowEdge`
+
+**Priority:** P0 — Required by DataFlowService and API endpoints
+**Complexity:** LOW — Standard CRUD pattern matching existing cruds
+
+### New File: `backend/app/crud/crud_code_data_flow_edge.py`
+
+```python
+# backend/app/crud/crud_code_data_flow_edge.py
+"""
+CRUD operations for CodeDataFlowEdge.
+Optimised for graph traversal: get_by_source, get_by_target, get_egocentric.
+"""
+from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from app.models.code_data_flow_edge import CodeDataFlowEdge
+from app.core.logging import get_logger
+
+logger = get_logger("crud_code_data_flow_edge")
+
+
+class CRUDCodeDataFlowEdge:
+
+    def get_by_source(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+    ) -> list[CodeDataFlowEdge]:
+        """
+        Return all outgoing edges from this component.
+        Used to build the 'Calls' panel and traverse BFS forward.
+        """
+        return db.query(CodeDataFlowEdge).filter(
+            CodeDataFlowEdge.source_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).order_by(CodeDataFlowEdge.step_index.asc().nullslast()).all()
+
+    def get_by_target(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+    ) -> list[CodeDataFlowEdge]:
+        """
+        Return all incoming edges to this component.
+        Used to build the 'Called By' panel.
+        """
+        return db.query(CodeDataFlowEdge).filter(
+            CodeDataFlowEdge.target_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).all()
+
+    def get_egocentric(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+    ) -> list[CodeDataFlowEdge]:
+        """
+        Return all edges where this component is source OR target.
+        Used for the 'This File Only' data flow view.
+        """
+        return db.query(CodeDataFlowEdge).filter(
+            or_(
+                CodeDataFlowEdge.source_component_id == component_id,
+                CodeDataFlowEdge.target_component_id == component_id,
+            ),
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).order_by(CodeDataFlowEdge.step_index.asc().nullslast()).all()
+
+    def get_subgraph(
+        self,
+        db: Session,
+        *,
+        component_ids: list[int],
+        tenant_id: int,
+    ) -> list[CodeDataFlowEdge]:
+        """
+        Return all edges where BOTH source and target are in component_ids.
+        Used to build the subgraph for BFS result rendering.
+        """
+        from sqlalchemy import and_
+        return db.query(CodeDataFlowEdge).filter(
+            CodeDataFlowEdge.tenant_id == tenant_id,
+            or_(
+                CodeDataFlowEdge.source_component_id.in_(component_ids),
+                CodeDataFlowEdge.target_component_id.in_(component_ids),
+            ),
+        ).all()
+
+    def get_by_repository(
+        self,
+        db: Session,
+        *,
+        repository_id: int,
+        tenant_id: int,
+    ) -> list[CodeDataFlowEdge]:
+        """Return all edges in a repository. Used by backfill and overview."""
+        return db.query(CodeDataFlowEdge).filter(
+            CodeDataFlowEdge.repository_id == repository_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).all()
+
+    def delete_by_component(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+    ) -> int:
+        """
+        Delete all edges where this component is the SOURCE.
+        Called before rebuilding edges for a re-analyzed component.
+        Returns count deleted.
+        """
+        count = db.query(CodeDataFlowEdge).filter(
+            CodeDataFlowEdge.source_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+        return count
+
+    def bulk_create(
+        self,
+        db: Session,
+        *,
+        edges: list[dict],
+    ) -> int:
+        """
+        Batch insert edges. Returns count created.
+
+        Each dict in edges must have:
+          tenant_id, source_component_id, edge_type
+        Optional: target_component_id, repository_id, source_function,
+                  target_function, data_in_description, data_out_description,
+                  human_label, external_target_name, step_index
+        """
+        if not edges:
+            return 0
+        db_objs = [CodeDataFlowEdge(**e) for e in edges]
+        db.add_all(db_objs)
+        db.commit()
+        return len(db_objs)
+
+    def count_by_repository(
+        self,
+        db: Session,
+        *,
+        repository_id: int,
+        tenant_id: int,
+    ) -> dict:
+        """Return edge type breakdown for a repository. Used in analytics."""
+        from sqlalchemy import func
+        rows = db.query(
+            CodeDataFlowEdge.edge_type,
+            func.count(CodeDataFlowEdge.id).label("count"),
+        ).filter(
+            CodeDataFlowEdge.repository_id == repository_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        ).group_by(CodeDataFlowEdge.edge_type).all()
+        return {r.edge_type: r.count for r in rows}
+
+
+crud_code_data_flow_edge = CRUDCodeDataFlowEdge()
+```
+
+**Add to `backend/app/crud/__init__.py`:**
+```python
+from .crud_code_data_flow_edge import crud_code_data_flow_edge  # noqa: F401
+```
+
+
+---
+
+## P3.4 — New Service: `DataFlowService`
+
+**Priority:** P0 — Core Phase 3 logic. Everything else depends on this.
+**Complexity:** HIGH — BFS traversal, Mermaid rendering, fallback parsing
+**Risk:** MEDIUM — Must handle malformed `structured_analysis` gracefully
+
+### New File: `backend/app/services/data_flow_service.py`
+
+```python
+# backend/app/services/data_flow_service.py
+"""
+DataFlowService — derives request data flow graphs from existing structured_analysis JSON.
+
+ZERO extra Gemini cost: all data comes from CodeComponent.structured_analysis (already stored).
+The service is fully synchronous — safe to call from Celery tasks.
+
+Three main methods:
+  build_flow_for_component()  — extract + store edges for one component (idempotent)
+  get_request_trace()         — BFS from a starting component (returns nodes + edges)
+  render_mermaid()            — generate Mermaid flowchart syntax from nodes + edges
+"""
+from sqlalchemy.orm import Session
+from app.core.logging import get_logger
+from app.models.code_data_flow_edge import (
+    CodeDataFlowEdge, VALID_EDGE_TYPES, EDGE_LABEL_TEMPLATES, SWIMLANE_MAP
+)
+from app.crud.crud_code_data_flow_edge import crud_code_data_flow_edge
+
+logger = get_logger("data_flow_service")
+
+# Mapping from structured_analysis.language_info.file_type to normalized file_role
+_FILE_TYPE_TO_ROLE = {
+    "Controller": "ENDPOINT", "Route": "ENDPOINT", "Router": "ENDPOINT",
+    "Handler": "ENDPOINT", "View": "ENDPOINT",
+    "Service": "SERVICE",
+    "Schema": "SCHEMA", "Serializer": "SCHEMA", "Validator": "SCHEMA",
+    "Model": "MODEL", "Entity": "MODEL", "Migration": "MIGRATION",
+    "Repository": "CRUD", "CRUD": "CRUD", "DAO": "CRUD",
+    "Middleware": "MIDDLEWARE", "Interceptor": "MIDDLEWARE",
+    "Utility": "UTILITY", "Helper": "UTILITY", "Lib": "UTILITY",
+    "Config": "CONFIG", "Settings": "CONFIG", "Constants": "CONFIG",
+    "Test": "TEST",
+}
+
+
+class DataFlowService:
+
+    # ─────────────────────────────────────────────
+    # Method 1: Build and store edges for one file
+    # ─────────────────────────────────────────────
+    def build_flow_for_component(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+    ) -> dict:
+        """
+        Deterministically parse structured_analysis for one CodeComponent and
+        store the resulting edges. Idempotent: old edges deleted before insert.
+
+        Returns: { "edges_created": int, "file_role": str }
+        """
+        from app.models.code_component import CodeComponent
+
+        component = db.get(CodeComponent, component_id)
+        if not component or not component.structured_analysis:
+            logger.warning(f"Component {component_id} has no structured_analysis — skip")
+            return {"edges_created": 0, "file_role": "UNKNOWN"}
+
+        sa = component.structured_analysis
+        file_role = self._resolve_file_role(sa)
+
+        edges = []
+
+        # ENDPOINT: HTTP trigger edges from api_contracts
+        if file_role == "ENDPOINT":
+            for contract in sa.get("api_contracts", []):
+                method = contract.get("method", "")
+                path = contract.get("path", "")
+                if method and path:
+                    edges.append({
+                        "tenant_id": tenant_id,
+                        "repository_id": component.repository_id,
+                        "source_component_id": component_id,
+                        "target_component_id": None,
+                        "edge_type": "HTTP_TRIGGER",
+                        "source_function": None,
+                        "target_function": None,
+                        "data_in_description": contract.get("request_schema", ""),
+                        "data_out_description": contract.get("response_schema", ""),
+                        "human_label": f"Receives {method} {path}",
+                        "external_target_name": "HTTP Client",
+                        "step_index": 0,
+                    })
+
+        # OUTBOUND CALLS (new P3.1 field — most accurate)
+        for i, call in enumerate(sa.get("outbound_calls", []), start=1):
+            target_id = self._resolve_component_id(
+                db=db,
+                target_module=call.get("target_module", ""),
+                repository_id=component.repository_id,
+                tenant_id=tenant_id,
+            )
+            edges.append({
+                "tenant_id": tenant_id,
+                "repository_id": component.repository_id,
+                "source_component_id": component_id,
+                "target_component_id": target_id,
+                "edge_type": "SERVICE_CALL",
+                "source_function": call.get("caller_function"),
+                "target_function": call.get("target_function"),
+                "data_in_description": call.get("data_in"),
+                "data_out_description": call.get("data_out"),
+                "human_label": self._build_human_label(
+                    "SERVICE_CALL",
+                    source=call.get("caller_function", ""),
+                    target=call.get("target_function", ""),
+                ),
+                "external_target_name": call.get("target_module") if not target_id else None,
+                "step_index": i,
+            })
+
+        # COMPONENT INTERACTIONS fallback (Sprint 3 field — less structured)
+        if not sa.get("outbound_calls") and sa.get("component_interactions"):
+            for i, interaction in enumerate(sa.get("component_interactions", []), start=1):
+                target_id = self._resolve_component_id(
+                    db=db,
+                    target_module=interaction.get("target", ""),
+                    repository_id=component.repository_id,
+                    tenant_id=tenant_id,
+                )
+                edges.append({
+                    "tenant_id": tenant_id,
+                    "repository_id": component.repository_id,
+                    "source_component_id": component_id,
+                    "target_component_id": target_id,
+                    "edge_type": "SERVICE_CALL",
+                    "source_function": interaction.get("source"),
+                    "target_function": interaction.get("target"),
+                    "data_in_description": interaction.get("data_passed"),
+                    "data_out_description": None,
+                    "human_label": interaction.get("description", ""),
+                    "external_target_name": interaction.get("target") if not target_id else None,
+                    "step_index": i,
+                })
+
+        # DATA FLOWS → DB edges (look for DB/database keywords in destination)
+        for flow in sa.get("data_flows", []):
+            dest = (flow.get("destination") or "").lower()
+            if any(kw in dest for kw in ("db", "database", "table", "postgresql", "mysql")):
+                edge_type = "DB_WRITE" if any(
+                    kw in dest for kw in ("insert", "save", "write", "create", "update")
+                ) else "DB_READ"
+                edges.append({
+                    "tenant_id": tenant_id,
+                    "repository_id": component.repository_id,
+                    "source_component_id": component_id,
+                    "target_component_id": None,
+                    "edge_type": edge_type,
+                    "source_function": None,
+                    "target_function": None,
+                    "data_in_description": flow.get("source"),
+                    "data_out_description": flow.get("destination"),
+                    "human_label": self._build_human_label(
+                        edge_type, table=flow.get("destination", "database")
+                    ),
+                    "external_target_name": flow.get("destination"),
+                    "step_index": None,
+                })
+
+            # EXTERNAL API edges
+            elif any(kw in dest for kw in ("external", "api", "sendgrid", "stripe", "twilio", "s3", "sns", "sqs")):
+                edges.append({
+                    "tenant_id": tenant_id,
+                    "repository_id": component.repository_id,
+                    "source_component_id": component_id,
+                    "target_component_id": None,
+                    "edge_type": "EXTERNAL_API",
+                    "source_function": None,
+                    "target_function": None,
+                    "data_in_description": flow.get("source"),
+                    "data_out_description": flow.get("destination"),
+                    "human_label": self._build_human_label(
+                        "EXTERNAL_API", name=flow.get("destination", "External Service")
+                    ),
+                    "external_target_name": flow.get("destination"),
+                    "step_index": None,
+                })
+
+        # SCHEMA: backed_by_model → SCHEMA_VALIDATION edge back to source
+        if file_role == "SCHEMA" and sa.get("backed_by_model"):
+            bm = sa["backed_by_model"]
+            edges.append({
+                "tenant_id": tenant_id,
+                "repository_id": component.repository_id,
+                "source_component_id": component_id,
+                "target_component_id": None,
+                "edge_type": "SCHEMA_VALIDATION",
+                "human_label": self._build_human_label(
+                    "SCHEMA_VALIDATION",
+                    target=bm.get("model_class", "Model"),
+                ),
+                "external_target_name": bm.get("table_name"),
+                "step_index": None,
+            })
+
+        # Delete old edges and insert new ones (idempotent rebuild)
+        crud_code_data_flow_edge.delete_by_component(
+            db=db, component_id=component_id, tenant_id=tenant_id
+        )
+        created = crud_code_data_flow_edge.bulk_create(db=db, edges=edges)
+
+        logger.info(f"Built {created} edges for component {component_id} (role={file_role})")
+        return {"edges_created": created, "file_role": file_role}
+
+    # ─────────────────────────────────────────────
+    # Method 2: BFS request trace from an endpoint
+    # ─────────────────────────────────────────────
+    def get_request_trace(
+        self,
+        db: Session,
+        *,
+        component_id: int,
+        tenant_id: int,
+        max_depth: int = 5,
+    ) -> dict:
+        """
+        BFS traversal from a starting component through all SERVICE_CALL edges.
+        Returns all nodes + edges for Mermaid rendering.
+
+        Returns:
+        {
+          nodes: [{ component_id, name, location, file_role, model_columns?, schema_fields? }],
+          edges: [CodeDataFlowEdge as dict],
+          mermaid_technical: str,
+          mermaid_simple: str,
+        }
+        """
+        from app.models.code_component import CodeComponent
+        from collections import deque
+
+        visited_ids = set()
+        all_edges = []
+        queue = deque([(component_id, 0)])
+        node_info = {}
+
+        while queue:
+            current_id, depth = queue.popleft()
+            if current_id in visited_ids or depth > max_depth:
+                continue
+            visited_ids.add(current_id)
+
+            # Load node metadata
+            comp = db.get(CodeComponent, current_id)
+            if comp:
+                sa = comp.structured_analysis or {}
+                node_info[current_id] = {
+                    "component_id": current_id,
+                    "name": comp.name,
+                    "location": comp.location,
+                    "file_role": self._resolve_file_role(sa),
+                    "model_columns": sa.get("model_definition", {}).get("columns"),
+                    "schema_fields": sa.get("backed_by_model", {}).get("fields"),
+                    "summary": comp.summary,
+                }
+
+            # Get outgoing edges from this node
+            edges_out = crud_code_data_flow_edge.get_by_source(
+                db=db, component_id=current_id, tenant_id=tenant_id
+            )
+            for edge in edges_out:
+                all_edges.append(edge)
+                if edge.target_component_id and edge.target_component_id not in visited_ids:
+                    queue.append((edge.target_component_id, depth + 1))
+                elif edge.target_component_id is None and edge.external_target_name:
+                    # External node — add as virtual node with negative ID
+                    ext_key = f"EXT_{edge.external_target_name}"
+                    if ext_key not in node_info:
+                        node_info[ext_key] = {
+                            "component_id": None,
+                            "name": edge.external_target_name,
+                            "location": None,
+                            "file_role": None,
+                            "is_external": True,
+                        }
+
+        nodes = list(node_info.values())
+        edges_as_dicts = [
+            {
+                "id": e.id,
+                "source_component_id": e.source_component_id,
+                "target_component_id": e.target_component_id,
+                "edge_type": e.edge_type,
+                "source_function": e.source_function,
+                "target_function": e.target_function,
+                "data_in_description": e.data_in_description,
+                "data_out_description": e.data_out_description,
+                "human_label": e.human_label,
+                "external_target_name": e.external_target_name,
+                "step_index": e.step_index,
+            }
+            for e in all_edges
+        ]
+
+        return {
+            "nodes": nodes,
+            "edges": edges_as_dicts,
+            "mermaid_technical": self.render_mermaid(nodes, all_edges, mode="technical"),
+            "mermaid_simple": self.render_mermaid(nodes, all_edges, mode="simple"),
+        }
+
+    # ─────────────────────────────────────────────
+    # Method 3: Mermaid renderer (technical + business)
+    # ─────────────────────────────────────────────
+    def render_mermaid(self, nodes: list[dict], edges: list, mode: str = "technical") -> str:
+        """
+        Convert graph nodes+edges into Mermaid flowchart LR syntax.
+
+        mode="technical" — shows function names, types, column lists
+        mode="simple"    — shows human labels only, no code identifiers
+        """
+        lines = ["flowchart LR"]
+
+        # Group nodes by swimlane
+        swimlanes: dict[str, list] = {}
+        for node in nodes:
+            lane = SWIMLANE_MAP.get(node.get("file_role"), "External Services")
+            swimlanes.setdefault(lane, []).append(node)
+
+        # Swimlane order
+        lane_order = [
+            "API Layer", "Business Logic", "Validation",
+            "Data Access", "Database", "External Services",
+            "Utilities", "Configuration",
+        ]
+
+        node_id_map = {}  # component_id → mermaid node id (e.g. "n1")
+        n = 0
+        for lane in lane_order:
+            if lane not in swimlanes:
+                continue
+            safe_lane = lane.replace(" ", "_")
+            lines.append(f'  subgraph {safe_lane}["{lane}"]')
+            for node in swimlanes[lane]:
+                nid = f"n{n}"
+                n += 1
+                cid = node.get("component_id") or node.get("name", f"ext{n}")
+                node_id_map[cid] = nid
+
+                if mode == "technical":
+                    label = self._make_technical_label(node)
+                else:
+                    label = self._make_simple_label(node)
+
+                # Choose node shape by role
+                role = node.get("file_role")
+                if role == "ENDPOINT":
+                    lines.append(f'    {nid}["{label}"]')
+                elif role == "MODEL" or role is None:
+                    lines.append(f'    {nid}[("{label}")]')  # cylinder shape
+                elif node.get("is_external"):
+                    lines.append(f'    {nid}{{"{label}"}}')  # diamond shape
+                else:
+                    lines.append(f'    {nid}["{label}"]')
+
+                # Click directive (only for internal nodes with component_id)
+                if node.get("component_id"):
+                    lines.append(f'    click {nid} call dokydocClick("{node["component_id"]}")')
+
+            lines.append("  end")
+
+        # Edges
+        for edge in edges:
+            src_id = edge.source_component_id if hasattr(edge, "source_component_id") else edge.get("source_component_id")
+            tgt_id = edge.target_component_id if hasattr(edge, "target_component_id") else edge.get("target_component_id")
+            ext_name = edge.external_target_name if hasattr(edge, "external_target_name") else edge.get("external_target_name")
+
+            src_node = node_id_map.get(src_id)
+            tgt_node = node_id_map.get(tgt_id) if tgt_id else node_id_map.get(ext_name)
+
+            if not src_node or not tgt_node:
+                continue
+
+            if mode == "technical":
+                fn = edge.source_function if hasattr(edge, "source_function") else edge.get("source_function")
+                label = f"{fn or edge.edge_type if hasattr(edge,'edge_type') else edge.get('edge_type','→')}"
+            else:
+                label = edge.human_label if hasattr(edge, "human_label") else edge.get("human_label", "→")
+
+            label = (label or "→").replace('"', "'")
+            lines.append(f'  {src_node} -->|"{label}"| {tgt_node}')
+
+        return "\n".join(lines)
+
+    # ─────────────────────────────────────────────
+    # Private helpers
+    # ─────────────────────────────────────────────
+    def _resolve_file_role(self, structured_analysis: dict) -> str:
+        """Normalize file role from structured_analysis dict."""
+        # P3.1 new field — most accurate
+        if structured_analysis.get("file_role"):
+            return structured_analysis["file_role"]
+        # Fallback to language_info.file_type mapping
+        lang = structured_analysis.get("language_info", {})
+        file_type = lang.get("file_type", "")
+        return _FILE_TYPE_TO_ROLE.get(file_type, "UTILITY")
+
+    def _resolve_component_id(
+        self,
+        db: Session,
+        *,
+        target_module: str,
+        repository_id: int | None,
+        tenant_id: int,
+    ) -> int | None:
+        """
+        Try to match target_module path to an existing CodeComponent.location.
+        Returns component_id if found, None if external.
+        """
+        if not target_module or not repository_id:
+            return None
+        from app.models.code_component import CodeComponent
+        # Normalize path: "services/auth_service" → match on location containing "auth_service"
+        search_term = target_module.replace(".", "/").split("/")[-1]
+        match = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repository_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.location.ilike(f"%{search_term}%"),
+        ).first()
+        return match.id if match else None
+
+    def _build_human_label(self, edge_type: str, **kwargs) -> str:
+        template = EDGE_LABEL_TEMPLATES.get(edge_type, "→")
+        try:
+            return template.format(**kwargs)
+        except KeyError:
+            return edge_type
+
+    def _make_technical_label(self, node: dict) -> str:
+        name = node.get("name", "Unknown")
+        role = node.get("file_role", "")
+        fn_list = ""
+        if node.get("model_columns"):
+            cols = node["model_columns"][:4]
+            fn_list = "\\n" + " · ".join(c.get("name", "") for c in cols)
+        location = node.get("location", "").split("/")[-1] if node.get("location") else ""
+        return f"{name}\\n{location}{fn_list}".strip("\\n")
+
+    def _make_simple_label(self, node: dict) -> str:
+        name = node.get("name", "Unknown")
+        role = node.get("file_role", "")
+        role_emoji = {
+            "ENDPOINT": "🌐", "SERVICE": "⚙️", "SCHEMA": "✅",
+            "MODEL": "🗄️", "CRUD": "📋", "EXTERNAL_API": "🔌",
+        }.get(role, "")
+        return f"{role_emoji} {name}".strip()
+
+
+data_flow_service = DataFlowService()
+```
+
+
+---
+
+## P3.5 — Hook DataFlowService into Analysis Pipeline
+
+**Priority:** P1 — Without this, new analyses never build edges
+**Complexity:** LOW — 8-line addition to existing service
+**Risk:** LOW — Fully wrapped in try/except; never breaks existing analysis
+
+### Current State
+
+**File:** `backend/app/services/code_analysis_service.py`
+
+After the ontology extraction call (the last step in the file analysis pipeline, look for `build_graph_from_code_component` or the `# Step 6` comment), the pipeline completes without triggering edge building.
+
+### What to Add
+
+Find the successful completion section of `_run_enhanced_analysis_for_component()` (the method that runs after Gemini returns structured_analysis). Insert AFTER the ontology extraction step:
+
+```python
+# ─── Step 7: Build data flow edges (Phase 3 — premium only, zero AI cost) ───
+try:
+    from app.models.tenant import Tenant
+    from app.crud import crud as crud_main
+    tenant = db.query(Tenant).filter_by(id=tenant_id).first()
+    if tenant and tenant.tier in ("professional", "enterprise"):
+        from app.services.data_flow_service import data_flow_service
+        result = data_flow_service.build_flow_for_component(
+            db=db,
+            component_id=component.id,
+            tenant_id=tenant_id,
+        )
+        self.logger.info(
+            f"Data flow edges built: {result['edges_created']} edges "
+            f"(role={result['file_role']}) for component {component.id}"
+        )
+except Exception as e:
+    self.logger.warning(
+        f"Data flow edge build failed (non-fatal) for component {component.id}: {e}"
+    )
+# ─────────────────────────────────────────────────────────────────────────────
+```
+
+**Important:** The free-tier check (`tenant.tier in ("professional", "enterprise")`) means free-tier analyses never build edges. When a tenant upgrades, the backfill task (P3.6) populates all existing components.
+
+### Risk Assessment
+- `data_flow_service.build_flow_for_component()` is synchronous — no async issues
+- try/except wraps the entire block — a bug in DataFlowService cannot break code analysis
+- `tenant.tier` lookup is a single indexed query — negligible latency
+
+---
+
+## P3.6 — Backfill Celery Task
+
+**Priority:** P2 — Required for tenant tier upgrades and post-prompt-update rebuilds
+**Complexity:** LOW — Simple Celery task following existing patterns
+
+### New File: `backend/app/tasks/data_flow_tasks.py`
+
+```python
+# backend/app/tasks/data_flow_tasks.py
+"""
+Data flow edge backfill and rebuild tasks.
+
+backfill_data_flow_edges: Builds edges for all analyzed components in a repo.
+  Called when: (a) tenant upgrades free→pro, (b) P3.1 prompt is deployed and
+  existing analyses should be enriched.
+
+rebuild_component_data_flow: Rebuild edges for a single component.
+  Called when: user clicks "Rebuild diagram" in the UI (P3.8).
+"""
+from app.core.celery_app import celery_app
+from app.core.logging import get_logger
+
+logger = get_logger("data_flow_tasks")
+
+
+@celery_app.task(name="backfill_data_flow_edges", bind=True, max_retries=2)
+def backfill_data_flow_edges(self, repository_id: int, tenant_id: int):
+    """
+    Build data flow edges for all completed components in a repository.
+    Per-component errors do not stop the batch.
+    Returns: { "success": int, "failed": int, "total": int }
+    """
+    from app.db.session import SessionLocal
+    from app.models.code_component import CodeComponent
+    from app.services.data_flow_service import data_flow_service
+
+    db = SessionLocal()
+    results = {"success": 0, "failed": 0, "total": 0}
+    try:
+        components = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repository_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "completed",
+            CodeComponent.structured_analysis.isnot(None),
+        ).all()
+
+        results["total"] = len(components)
+        logger.info(f"Backfilling {len(components)} components for repo {repository_id}")
+
+        for component in components:
+            try:
+                data_flow_service.build_flow_for_component(
+                    db=db,
+                    component_id=component.id,
+                    tenant_id=tenant_id,
+                )
+                results["success"] += 1
+            except Exception as e:
+                logger.warning(f"Backfill failed for component {component.id}: {e}")
+                results["failed"] += 1
+
+        logger.info(f"Backfill complete: {results}")
+        return results
+    except Exception as exc:
+        logger.error(f"Backfill task failed: {exc}")
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="rebuild_component_data_flow", bind=True, max_retries=1)
+def rebuild_component_data_flow(self, component_id: int, tenant_id: int):
+    """
+    Rebuild data flow edges for a single component.
+    Triggered by user clicking "Rebuild diagram" in the UI.
+    """
+    from app.db.session import SessionLocal
+    from app.services.data_flow_service import data_flow_service
+
+    db = SessionLocal()
+    try:
+        result = data_flow_service.build_flow_for_component(
+            db=db, component_id=component_id, tenant_id=tenant_id
+        )
+        return result
+    except Exception as exc:
+        logger.error(f"Component {component_id} rebuild failed: {exc}")
+        raise self.retry(exc=exc, countdown=15)
+    finally:
+        db.close()
+```
+
+**Register in `backend/app/worker.py`** (add to include list):
+```python
+include=[
+    "app.tasks",
+    "app.tasks.ontology_tasks",
+    "app.tasks.code_analysis_tasks",
+    "app.tasks.data_flow_tasks",    # ← ADD THIS
+]
+```
+
+---
+
+## P3.7 — New API Endpoints
+
+**Priority:** P0 — Frontend cannot work without these
+**Complexity:** MEDIUM — 4 new endpoints + 4 new Pydantic schemas
+
+### Step 1: New Schemas
+
+**Add to `backend/app/schemas/code_component.py`** (append at end):
+
+```python
+# ─── Phase 3: Data Flow Response Schemas ───
+
+class DataFlowNodeSchema(BaseModel):
+    component_id: Optional[int] = None
+    name: str
+    location: Optional[str] = None
+    file_role: Optional[str] = None
+    summary: Optional[str] = None
+    model_columns: Optional[list] = None
+    schema_fields: Optional[list] = None
+    is_external: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DataFlowEdgeSchema(BaseModel):
+    id: Optional[int] = None
+    source_component_id: int
+    target_component_id: Optional[int] = None
+    edge_type: str
+    source_function: Optional[str] = None
+    target_function: Optional[str] = None
+    data_in_description: Optional[str] = None
+    data_out_description: Optional[str] = None
+    human_label: Optional[str] = None
+    external_target_name: Optional[str] = None
+    step_index: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EgocentricFlowResponse(BaseModel):
+    component_id: int
+    file_role: str
+    edges_in: list[DataFlowEdgeSchema]
+    edges_out: list[DataFlowEdgeSchema]
+    mermaid_technical: str
+    mermaid_simple: str
+    total_edges: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RequestTraceResponse(BaseModel):
+    start_component_id: int
+    depth: int
+    nodes: list[DataFlowNodeSchema]
+    edges: list[DataFlowEdgeSchema]
+    mermaid_technical: str
+    mermaid_simple: str
+    total_nodes: int
+    total_edges: int
+
+    model_config = ConfigDict(from_attributes=True)
+```
+
+**Add to `backend/app/schemas/__init__.py`:**
+```python
+from .code_component import (
+    ...,  # existing
+    DataFlowNodeSchema,
+    DataFlowEdgeSchema,
+    EgocentricFlowResponse,
+    RequestTraceResponse,
+)
+```
+
+### Step 2: New Endpoints
+
+**Add to `backend/app/api/endpoints/code_components.py`** (append after existing `/{id}/retry` route):
+
+```python
+from app.schemas.code_component import EgocentricFlowResponse, RequestTraceResponse
+from app.models.code_data_flow_edge import SWIMLANE_MAP
+
+
+def _check_premium(tenant_id: int, db: Session) -> None:
+    """Raise 403 if tenant is on free tier."""
+    from app.models.tenant import Tenant
+    tenant = db.query(Tenant).filter_by(id=tenant_id).first()
+    if not tenant or tenant.tier == "free":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "premium_required",
+                "message": "Data Flow Diagrams are available on Professional and Enterprise plans.",
+                "upgrade_url": "/settings/billing",
+            }
+        )
+
+
+# GET /code-components/{id}/data-flow
+@router.get("/{id}/data-flow", response_model=EgocentricFlowResponse)
+def get_component_data_flow(
+    id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return egocentric data flow for a single file — all edges in + out.
+    Premium gate: 403 for free tier tenants.
+
+    Used by: "This File Only" view in the Data Flow tab.
+    """
+    _check_premium(current_user.tenant_id, db)
+
+    from app.models.code_component import CodeComponent
+    from app.services.data_flow_service import data_flow_service
+    from app.crud.crud_code_data_flow_edge import crud_code_data_flow_edge
+
+    comp = db.get(CodeComponent, id)
+    if not comp or comp.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+    edges_in = crud_code_data_flow_edge.get_by_target(
+        db=db, component_id=id, tenant_id=current_user.tenant_id
+    )
+    edges_out = crud_code_data_flow_edge.get_by_source(
+        db=db, component_id=id, tenant_id=current_user.tenant_id
+    )
+    all_edges = edges_in + edges_out
+
+    sa = comp.structured_analysis or {}
+    file_role = data_flow_service._resolve_file_role(sa)
+
+    # Build simple node list for this file only
+    node_self = [{
+        "component_id": id,
+        "name": comp.name,
+        "location": comp.location,
+        "file_role": file_role,
+        "summary": comp.summary,
+    }]
+
+    return EgocentricFlowResponse(
+        component_id=id,
+        file_role=file_role,
+        edges_in=edges_in,
+        edges_out=edges_out,
+        mermaid_technical=data_flow_service.render_mermaid(node_self, all_edges, "technical"),
+        mermaid_simple=data_flow_service.render_mermaid(node_self, all_edges, "simple"),
+        total_edges=len(all_edges),
+    )
+
+
+# GET /code-components/{id}/request-trace
+@router.get("/{id}/request-trace", response_model=RequestTraceResponse)
+def get_request_trace(
+    id: int,
+    depth: int = Query(default=5, ge=1, le=8),
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    BFS request trace from this component (max depth=8, default=5).
+    Premium gate: 403 for free tier tenants.
+
+    Used by: "Full Request Trace" view in the Data Flow tab.
+    """
+    _check_premium(current_user.tenant_id, db)
+
+    from app.models.code_component import CodeComponent
+    from app.services.data_flow_service import data_flow_service
+
+    comp = db.get(CodeComponent, id)
+    if not comp or comp.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+    trace = data_flow_service.get_request_trace(
+        db=db,
+        component_id=id,
+        tenant_id=current_user.tenant_id,
+        max_depth=depth,
+    )
+
+    return RequestTraceResponse(
+        start_component_id=id,
+        depth=depth,
+        nodes=trace["nodes"],
+        edges=trace["edges"],
+        mermaid_technical=trace["mermaid_technical"],
+        mermaid_simple=trace["mermaid_simple"],
+        total_nodes=len(trace["nodes"]),
+        total_edges=len(trace["edges"]),
+    )
+
+
+# POST /code-components/{id}/data-flow/rebuild
+@router.post("/{id}/data-flow/rebuild", status_code=202)
+def rebuild_data_flow(
+    id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Trigger async rebuild of data flow edges for a single component.
+    Premium gate: 403 for free tier.
+    Used by: "Rebuild diagram" button in the UI after re-analysis.
+    """
+    _check_premium(current_user.tenant_id, db)
+
+    from app.models.code_component import CodeComponent
+    from app.tasks.data_flow_tasks import rebuild_component_data_flow
+
+    comp = db.get(CodeComponent, id)
+    if not comp or comp.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+    task = rebuild_component_data_flow.apply_async(
+        args=[id, current_user.tenant_id]
+    )
+    return {"task_id": task.id, "component_id": id, "status": "rebuilding"}
+```
+
+**Add to `backend/app/api/endpoints/repositories.py`** (append at end):
+
+```python
+# POST /repositories/{id}/backfill-data-flow
+@router.post("/{id}/backfill-data-flow", status_code=202)
+def backfill_repository_data_flow(
+    id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Trigger backfill of all data flow edges for a repository.
+    Admin or repo owner only. Used after tier upgrade or prompt update.
+    """
+    from app.models.repository import Repository
+    from app.models.code_component import CodeComponent
+    from sqlalchemy import func
+    from app.tasks.data_flow_tasks import backfill_data_flow_edges
+
+    repo = db.get(Repository, id)
+    if not repo or repo.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    # Count eligible components
+    component_count = db.query(func.count(CodeComponent.id)).filter(
+        CodeComponent.repository_id == id,
+        CodeComponent.tenant_id == current_user.tenant_id,
+        CodeComponent.analysis_status == "completed",
+    ).scalar()
+
+    task = backfill_data_flow_edges.apply_async(
+        args=[id, current_user.tenant_id]
+    )
+    return {
+        "task_id": task.id,
+        "repository_id": id,
+        "component_count": component_count,
+        "status": "backfilling",
+        "message": f"Building data flow edges for {component_count} components",
+    }
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s13a1
+
+# 2. Trigger backfill for a repo (pro tenant)
+curl -X POST -H "Authorization: Bearer $PRO_TOKEN" \
+  http://localhost:8000/api/v1/repositories/1/backfill-data-flow
+# Expected: { "task_id": "...", "component_count": 15, "status": "backfilling" }
+
+# 3. Check edges were created
+psql -c "SELECT edge_type, COUNT(*) FROM code_data_flow_edges GROUP BY edge_type"
+
+# 4. Get egocentric data flow for a service file
+curl -H "Authorization: Bearer $PRO_TOKEN" \
+  http://localhost:8000/api/v1/code-components/5/data-flow
+# Expected: { "file_role": "SERVICE", "edges_in": [...], "edges_out": [...], "mermaid_technical": "..." }
+
+# 5. Get request trace from an endpoint
+curl -H "Authorization: Bearer $PRO_TOKEN" \
+  "http://localhost:8000/api/v1/code-components/3/request-trace?depth=4"
+# Expected: { "nodes": [...], "edges": [...], "mermaid_technical": "flowchart LR\n..." }
+
+# 6. Verify premium gate blocks free tier
+curl -H "Authorization: Bearer $FREE_TOKEN" \
+  http://localhost:8000/api/v1/code-components/3/request-trace
+# Expected: 403 { "error": "premium_required", "upgrade_url": "/settings/billing" }
+
+# 7. Test rebuild single component
+curl -X POST -H "Authorization: Bearer $PRO_TOKEN" \
+  http://localhost:8000/api/v1/code-components/5/data-flow/rebuild
+# Expected: 202 { "task_id": "...", "status": "rebuilding" }
+```
+
+
+---
+
+## P3.8 — Frontend: "Data Flow" Tab — High-End UI/UX
+
+**Priority:** P0 — This is the user-facing deliverable; everything else supports it
+**Complexity:** HIGH — Interactive diagram, two view modes, edge list panels, premium gate
+**Risk:** LOW — Additive to existing tab bar; existing tabs untouched
+
+### UX Design Principles
+
+1. **Role-aware defaults:** Developer lands on "Technical" mode by default. BA/PM lands on "Business" mode by default (detected from `current_user.roles`).
+2. **Zero-loading on tab switch:** Data is fetched when the tab activates, not before. A skeleton loader appears immediately.
+3. **Diagram is clickable navigation:** Every node in the diagram is a link. Clicking a service node navigates to that file's detail page — developer never has to leave the flow.
+4. **Two views in one tab:** "Full Trace" (BFS from this file) and "This File Only" (egocentric). Toggle at the top. Default: Full Trace for ENDPOINTs, This File for everything else.
+5. **Evidence panels below the diagram:** After the diagram, show structured edge lists ("Calls", "Called By") with full function names, data types, and step descriptions.
+6. **Premium gate is not a wall:** Free tier sees a teaser diagram (static, blurred placeholder) with a clear upsell card. Never a blank screen.
+
+---
+
+### New Files
+
+**New file: `frontend/hooks/useDataFlow.ts`**
+
+```typescript
+// frontend/hooks/useDataFlow.ts
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+
+export type FlowMode = "technical" | "simple";
+export type FlowView = "trace" | "file";
+
+export function useRequestTrace(componentId: number, depth = 5, enabled = true) {
+  return useSWR(
+    enabled && componentId
+      ? `/code-components/${componentId}/request-trace?depth=${depth}`
+      : null,
+    apiGet,
+    { revalidateOnFocus: false }
+  );
+}
+
+export function useEgocentricFlow(componentId: number, enabled = true) {
+  return useSWR(
+    enabled && componentId ? `/code-components/${componentId}/data-flow` : null,
+    apiGet,
+    { revalidateOnFocus: false }
+  );
+}
+```
+
+---
+
+**New file: `frontend/components/data-flow/PremiumGateCard.tsx`**
+
+```tsx
+// frontend/components/data-flow/PremiumGateCard.tsx
+"use client";
+import { Sparkles, Lock, ArrowRight } from "lucide-react";
+import Link from "next/link";
+
+const EXAMPLE_NODES = [
+  { x: 80, y: 60, w: 120, label: "POST /register" },
+  { x: 260, y: 30, w: 120, label: "AuthService" },
+  { x: 260, y: 100, w: 120, label: "UserCreateSchema" },
+  { x: 440, y: 60, w: 120, label: "UserCRUD" },
+  { x: 620, y: 40, w: 100, label: "users table" },
+  { x: 620, y: 90, w: 100, label: "SendGrid API" },
+];
+
+export function PremiumGateCard() {
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-white">
+      {/* Blurred SVG teaser diagram */}
+      <div className="blur-sm select-none pointer-events-none p-6 opacity-60 h-52">
+        <svg width="100%" height="100%" viewBox="0 0 760 160" className="w-full">
+          {/* Draw fake nodes */}
+          {EXAMPLE_NODES.map((n, i) => (
+            <g key={i}>
+              <rect x={n.x} y={n.y} width={n.w} height={36} rx={6}
+                fill={i === 0 ? "#e0e7ff" : i === 4 || i === 5 ? "#fef9c3" : "#f0fdf4"}
+                stroke="#c7d2fe" strokeWidth={1.5} />
+              <text x={n.x + n.w / 2} y={n.y + 22} textAnchor="middle"
+                fontSize={11} fill="#374151" fontFamily="monospace">
+                {n.label}
+              </text>
+            </g>
+          ))}
+          {/* Arrows between nodes */}
+          {[
+            [200, 78, 260, 48], [200, 78, 260, 118], [380, 48, 440, 78],
+            [380, 118, 440, 78], [560, 78, 620, 58], [560, 78, 620, 108],
+          ].map(([x1, y1, x2, y2], i) => (
+            <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+              stroke="#6366f1" strokeWidth={1.5} markerEnd="url(#arr)" />
+          ))}
+          <defs>
+            <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="#6366f1" />
+            </marker>
+          </defs>
+        </svg>
+      </div>
+
+      {/* Overlay upsell card */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4
+                      bg-white/70 backdrop-blur-[2px]">
+        <div className="flex items-center gap-2 rounded-full bg-indigo-100 px-4 py-2">
+          <Sparkles className="h-4 w-4 text-indigo-600" />
+          <span className="text-sm font-semibold text-indigo-700">Professional Feature</span>
+        </div>
+        <div className="text-center space-y-1">
+          <h3 className="text-lg font-bold text-gray-900">Request Data Flow Diagrams</h3>
+          <p className="text-sm text-gray-500 max-w-sm">
+            See exactly how data flows through your entire codebase — from HTTP call to database.
+            Click any node to navigate to that file.
+          </p>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <Link href="/dashboard/settings?tab=billing"
+            className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5
+                       text-sm font-semibold text-white hover:bg-indigo-700 transition-colors">
+            Upgrade to Pro
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+          <button className="inline-flex items-center gap-2 rounded-lg border px-5 py-2.5
+                             text-sm text-gray-600 hover:bg-gray-50 transition-colors">
+            <Lock className="h-4 w-4" />
+            See what's included
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+**New file: `frontend/components/data-flow/EdgeListPanel.tsx`**
+
+```tsx
+// frontend/components/data-flow/EdgeListPanel.tsx
+"use client";
+import { ArrowUpRight, ArrowDownLeft, Database, Globe, Server, CheckSquare, Zap } from "lucide-react";
+import Link from "next/link";
+
+const EDGE_TYPE_CONFIG: Record<string, { icon: any; color: string; label: string }> = {
+  HTTP_TRIGGER:      { icon: Globe,       color: "text-blue-600 bg-blue-50",   label: "HTTP" },
+  SERVICE_CALL:      { icon: Server,      color: "text-purple-600 bg-purple-50", label: "Call" },
+  SCHEMA_VALIDATION: { icon: CheckSquare, color: "text-green-600 bg-green-50",  label: "Schema" },
+  DB_READ:           { icon: Database,    color: "text-amber-600 bg-amber-50",  label: "DB Read" },
+  DB_WRITE:          { icon: Database,    color: "text-red-600 bg-red-50",      label: "DB Write" },
+  EXTERNAL_API:      { icon: Globe,       color: "text-teal-600 bg-teal-50",    label: "External" },
+  CACHE_READ:        { icon: Zap,         color: "text-yellow-600 bg-yellow-50", label: "Cache Read" },
+  CACHE_WRITE:       { icon: Zap,         color: "text-orange-600 bg-orange-50", label: "Cache Write" },
+  EVENT_PUBLISH:     { icon: Zap,         color: "text-pink-600 bg-pink-50",    label: "Publish" },
+  EVENT_CONSUME:     { icon: Zap,         color: "text-violet-600 bg-violet-50", label: "Consume" },
+};
+
+interface Edge {
+  id?: number;
+  edge_type: string;
+  source_function?: string;
+  target_function?: string;
+  data_in_description?: string;
+  data_out_description?: string;
+  human_label?: string;
+  external_target_name?: string;
+  target_component_id?: number;
+  source_component_id?: number;
+  step_index?: number;
+}
+
+interface Node {
+  component_id?: number;
+  name: string;
+  file_role?: string;
+}
+
+interface Props {
+  edgesOut: Edge[];
+  edgesIn: Edge[];
+  nodes: Node[];
+}
+
+export function EdgeListPanel({ edgesOut, edgesIn, nodes }: Props) {
+  const nodeMap = new Map(nodes.map((n) => [n.component_id, n]));
+
+  const renderEdge = (edge: Edge, direction: "out" | "in") => {
+    const cfg = EDGE_TYPE_CONFIG[edge.edge_type] || { icon: Server, color: "text-gray-500 bg-gray-50", label: edge.edge_type };
+    const Icon = cfg.icon;
+    const connectedId = direction === "out" ? edge.target_component_id : edge.source_component_id;
+    const connectedNode = nodeMap.get(connectedId ?? -1);
+    const connectedName = connectedNode?.name ?? edge.external_target_name ?? "External";
+
+    return (
+      <div key={edge.id ?? Math.random()} className="flex items-start gap-3 py-2.5 border-b last:border-0">
+        {/* Direction + type badge */}
+        <div className="flex flex-col items-center gap-1 flex-shrink-0 w-14">
+          {direction === "out"
+            ? <ArrowUpRight className="h-3.5 w-3.5 text-purple-500" />
+            : <ArrowDownLeft className="h-3.5 w-3.5 text-blue-500" />}
+          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${cfg.color}`}>
+            {cfg.label}
+          </span>
+        </div>
+
+        {/* Edge details */}
+        <div className="flex-1 min-w-0 space-y-0.5">
+          <div className="flex items-center gap-2">
+            {edge.source_function && direction === "out" && (
+              <code className="text-xs text-gray-700 font-mono truncate">
+                {edge.source_function}
+              </code>
+            )}
+            <span className="text-xs text-gray-400">→</span>
+            {connectedId ? (
+              <Link href={`/dashboard/code/${connectedId}`}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium truncate hover:underline">
+                {connectedName}
+              </Link>
+            ) : (
+              <span className="text-xs text-teal-600 font-medium">{connectedName}</span>
+            )}
+            {edge.target_function && (
+              <code className="text-xs text-gray-500 font-mono truncate">
+                .{edge.target_function}
+              </code>
+            )}
+          </div>
+
+          {edge.human_label && (
+            <p className="text-xs text-gray-500">{edge.human_label}</p>
+          )}
+
+          {(edge.data_in_description || edge.data_out_description) && (
+            <div className="flex gap-2 text-[10px] text-gray-400 font-mono">
+              {edge.data_in_description && <span>in: {edge.data_in_description}</span>}
+              {edge.data_out_description && <span>out: {edge.data_out_description}</span>}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+      {/* Outgoing calls */}
+      <div className="rounded-lg border bg-white overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 border-b bg-purple-50">
+          <ArrowUpRight className="h-4 w-4 text-purple-600" />
+          <span className="text-sm font-semibold text-purple-700">
+            Calls ({edgesOut.length})
+          </span>
+        </div>
+        <div className="px-3 divide-y divide-gray-100 max-h-64 overflow-y-auto">
+          {edgesOut.length === 0
+            ? <p className="text-xs text-gray-400 py-4 text-center">No outgoing calls</p>
+            : edgesOut.map((e) => renderEdge(e, "out"))}
+        </div>
+      </div>
+
+      {/* Incoming calls */}
+      <div className="rounded-lg border bg-white overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 border-b bg-blue-50">
+          <ArrowDownLeft className="h-4 w-4 text-blue-600" />
+          <span className="text-sm font-semibold text-blue-700">
+            Called By ({edgesIn.length})
+          </span>
+        </div>
+        <div className="px-3 divide-y divide-gray-100 max-h-64 overflow-y-auto">
+          {edgesIn.length === 0
+            ? <p className="text-xs text-gray-400 py-4 text-center">Not called by any tracked file</p>
+            : edgesIn.map((e) => renderEdge(e, "in"))}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+**New file: `frontend/components/data-flow/DataFlowDiagram.tsx`**
+
+```tsx
+// frontend/components/data-flow/DataFlowDiagram.tsx
+"use client";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import {
+  GitBranch, Layers, Code2, RefreshCw, ZoomIn, ZoomOut,
+  ChevronDown, Loader2, AlertCircle, Info
+} from "lucide-react";
+import { MermaidDiagram } from "@/components/ontology/MermaidDiagram";
+import { EdgeListPanel } from "./EdgeListPanel";
+import { PremiumGateCard } from "./PremiumGateCard";
+import { useRequestTrace, useEgocentricFlow, type FlowMode, type FlowView } from "@/hooks/useDataFlow";
+import { apiPost } from "@/lib/api";
+import { toast } from "sonner";
+
+interface Props {
+  componentId: number;
+  fileRole?: string;           // passed from parent page (from structured_analysis)
+  userRoles?: string[];        // to default mode by role
+}
+
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+  ENDPOINT: "HTTP handler — shows the full request journey from this API endpoint",
+  SERVICE:  "Business logic — shows what this service calls and what calls it",
+  SCHEMA:   "Data schema — shows what validates against this schema",
+  MODEL:    "Database model — shows what reads/writes this table",
+  CRUD:     "Data layer — shows what services use this CRUD layer",
+  UTILITY:  "Utility — shows what this helper is used by",
+};
+
+export function DataFlowDiagram({ componentId, fileRole, userRoles = [] }: Props) {
+  const router = useRouter();
+
+  // Default view: ENDPOINT → trace, everything else → file
+  const [flowView, setFlowView] = useState<FlowView>(
+    fileRole === "ENDPOINT" ? "trace" : "file"
+  );
+  // Default mode: BA/PM → simple, everyone else → technical
+  const [flowMode, setFlowMode] = useState<FlowMode>(
+    userRoles.some((r) => ["business_analyst", "product_manager", "cxo"].includes(r))
+      ? "simple" : "technical"
+  );
+  const [traceDepth, setTraceDepth] = useState(5);
+  const [isRebuilding, setIsRebuilding] = useState(false);
+  const [isPremiumGated, setIsPremiumGated] = useState(false);
+
+  // Fetch based on view
+  const traceResult = useRequestTrace(componentId, traceDepth, flowView === "trace");
+  const egoResult = useEgocentricFlow(componentId, flowView === "file");
+
+  const isLoading = flowView === "trace" ? traceResult.isLoading : egoResult.isLoading;
+  const error = flowView === "trace" ? traceResult.error : egoResult.error;
+  const data = flowView === "trace" ? traceResult.data : egoResult.data;
+
+  // Detect premium gate from 403 response
+  useEffect(() => {
+    if (error?.status === 403) setIsPremiumGated(true);
+  }, [error]);
+
+  const mermaid = data
+    ? (flowMode === "technical" ? data.mermaid_technical : data.mermaid_simple)
+    : "";
+
+  const handleRebuild = async () => {
+    setIsRebuilding(true);
+    try {
+      await apiPost(`/code-components/${componentId}/data-flow/rebuild`, {});
+      toast.success("Diagram rebuilding — refresh in a few seconds");
+      setTimeout(() => {
+        traceResult.mutate?.();
+        egoResult.mutate?.();
+      }, 3000);
+    } catch {
+      toast.error("Rebuild failed");
+    } finally {
+      setIsRebuilding(false);
+    }
+  };
+
+  const handleNodeClick = (nodeId: string) => {
+    const numId = parseInt(nodeId, 10);
+    if (!isNaN(numId)) {
+      router.push(`/dashboard/code/${numId}`);
+    }
+  };
+
+  if (isPremiumGated) return <PremiumGateCard />;
+
+  return (
+    <div className="space-y-4">
+      {/* ── Controls row ── */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+
+        {/* View toggle (This File / Full Trace) */}
+        <div className="inline-flex rounded-lg border bg-gray-50 p-0.5">
+          {([
+            { value: "file",  label: "This File",    icon: Code2 },
+            { value: "trace", label: "Full Trace",   icon: Layers },
+          ] as const).map(({ value, label, icon: Icon }) => (
+            <button key={value} onClick={() => setFlowView(value)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-all ${
+                flowView === value
+                  ? "bg-white shadow-sm font-semibold text-indigo-700 border border-gray-200"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}>
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Mode toggle (Technical / Business) */}
+        <div className="inline-flex rounded-lg border bg-gray-50 p-0.5">
+          {([
+            { value: "technical", label: "Technical" },
+            { value: "simple",    label: "Business" },
+          ] as const).map(({ value, label }) => (
+            <button key={value} onClick={() => setFlowMode(value)}
+              className={`px-3 py-1.5 text-sm rounded-md transition-all ${
+                flowMode === value
+                  ? "bg-white shadow-sm font-semibold text-gray-800 border border-gray-200"
+                  : "text-gray-500 hover:text-gray-700"
+              }`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Trace depth (only in trace mode) */}
+        {flowView === "trace" && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Depth:</span>
+            <div className="inline-flex rounded-md border overflow-hidden">
+              {[3, 5, 8].map((d) => (
+                <button key={d} onClick={() => setTraceDepth(d)}
+                  className={`px-2.5 py-1 text-xs transition-colors ${
+                    traceDepth === d
+                      ? "bg-indigo-600 text-white"
+                      : "bg-white text-gray-600 hover:bg-gray-50"
+                  }`}>
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Rebuild button */}
+        <button onClick={handleRebuild} disabled={isRebuilding}
+          className="ml-auto flex items-center gap-1.5 text-xs text-gray-400
+                     hover:text-gray-600 disabled:opacity-50 transition-colors">
+          <RefreshCw className={`h-3.5 w-3.5 ${isRebuilding ? "animate-spin" : ""}`} />
+          {isRebuilding ? "Rebuilding..." : "Rebuild"}
+        </button>
+      </div>
+
+      {/* ── File role description (contextual hint) ── */}
+      {fileRole && ROLE_DESCRIPTIONS[fileRole] && (
+        <div className="flex items-center gap-2 rounded-lg bg-indigo-50 border border-indigo-100 px-3 py-2">
+          <Info className="h-3.5 w-3.5 text-indigo-500 flex-shrink-0" />
+          <p className="text-xs text-indigo-700">{ROLE_DESCRIPTIONS[fileRole]}</p>
+        </div>
+      )}
+
+      {/* ── Diagram area ── */}
+      {isLoading ? (
+        <div className="h-72 flex items-center justify-center rounded-xl border bg-gray-50">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
+            <p className="text-sm text-gray-500">Building data flow diagram...</p>
+          </div>
+        </div>
+      ) : error && error?.status !== 403 ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 flex items-center gap-3">
+          <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-red-700">Could not load data flow</p>
+            <p className="text-xs text-red-500 mt-0.5">
+              {error?.message || "The diagram may not be built yet. Try rebuilding."}
+            </p>
+          </div>
+        </div>
+      ) : data && mermaid ? (
+        <div className="rounded-xl border bg-white overflow-hidden shadow-sm">
+          {/* Stats bar */}
+          <div className="flex items-center gap-4 px-4 py-2 border-b bg-gray-50 text-xs text-gray-500">
+            <span><b className="text-gray-700">{data.total_nodes ?? 1}</b> components</span>
+            <span><b className="text-gray-700">{data.total_edges ?? 0}</b> connections</span>
+            {flowView === "trace" && (
+              <span><b className="text-gray-700">{data.depth}</b> levels deep</span>
+            )}
+            <span className="ml-auto text-gray-400 italic">Click any node to navigate →</span>
+          </div>
+          <div className="p-2">
+            <MermaidDiagram
+              syntax={mermaid}
+              height="480px"
+              onNodeClick={handleNodeClick}
+            />
+          </div>
+        </div>
+      ) : (
+        <div className="h-48 flex items-center justify-center rounded-xl border border-dashed bg-gray-50">
+          <div className="text-center space-y-2">
+            <GitBranch className="h-8 w-8 text-gray-300 mx-auto" />
+            <p className="text-sm text-gray-400">No flow data yet</p>
+            <button onClick={handleRebuild}
+              className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline">
+              Click to build diagram
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edge list panels (evidence section) ── */}
+      {data && (
+        <EdgeListPanel
+          edgesOut={data.edges_out ?? data.edges?.filter((e: any) => e.source_component_id === componentId) ?? []}
+          edgesIn={data.edges_in ?? data.edges?.filter((e: any) => e.target_component_id === componentId) ?? []}
+          nodes={data.nodes ?? []}
+        />
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+### Wire Into `frontend/app/dashboard/code/[id]/page.tsx`
+
+**Step 1 — Import:**
+
+```tsx
+// Add at top of file with other imports:
+import { DataFlowDiagram } from "@/components/data-flow/DataFlowDiagram";
+import { GitBranch } from "lucide-react";
+```
+
+**Step 2 — Add tab trigger** (inside `<TabsList>`, after the last existing `<TabsTrigger>`):
+
+```tsx
+<TabsTrigger
+  value="dataflow"
+  className="data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-700 h-10 px-6"
+>
+  <GitBranch className="h-4 w-4 mr-1.5" />
+  Data Flow
+</TabsTrigger>
+```
+
+**Step 3 — Add tab content** (after the last `</TabsContent>`, before closing `</Tabs>`):
+
+```tsx
+<TabsContent value="dataflow" className="space-y-4">
+  <div className="rounded-xl border bg-white p-5">
+    <div className="mb-4">
+      <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+        <GitBranch className="h-4 w-4 text-indigo-600" />
+        Request Data Flow
+      </h2>
+      <p className="text-sm text-gray-500 mt-1">
+        Visualise how requests and data flow through this file and its connected components.
+      </p>
+    </div>
+    <DataFlowDiagram
+      componentId={Number(id)}
+      fileRole={component?.structured_analysis?.file_role}
+      userRoles={currentUser?.roles}
+    />
+  </div>
+</TabsContent>
+```
+
+**Step 4 — Pass `onValueChange` to trigger lazy fetch:** The existing `onValueChange` handler on the `<Tabs>` component already handles tab activation. No additional change needed — `DataFlowDiagram` uses SWR with `enabled` flags tied to the view toggle, so data is fetched lazily.
+
+
+---
+
+## P3.9 — Admin Backfill, Verification & Phase 3 Completion Checklist
+
+**Owner:** Backend Lead  
+**Estimate:** 1 day  
+**Depends on:** P3.1–P3.8 merged  
+
+---
+
+### P3.9.1 — Admin Backfill Endpoint (already in P3.7, hardened here)
+
+The endpoint was registered in `backend/app/api/endpoints/repositories.py` under P3.7. This section hardens it with proper response schema, permission check, and component count.
+
+**File:** `backend/app/api/endpoints/repositories.py`
+
+Ensure the endpoint reads as follows (replace the stub from P3.7):
+
+```python
+from app.tasks.data_flow_tasks import backfill_data_flow_edges
+
+@router.post(
+    "/{repository_id}/backfill-data-flow",
+    status_code=202,
+    summary="Trigger data-flow edge backfill for all components in a repository",
+    tags=["Repositories"],
+)
+def trigger_data_flow_backfill(
+    repository_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant_id: int = Depends(get_tenant_id),
+):
+    """
+    Dispatches a background Celery task that builds CodeDataFlowEdge rows
+    for every already-analysed component in the repository.
+
+    Auth: must be repository owner OR a tenant admin.
+    Response: 202 Accepted with task_id and component_count.
+    """
+    # Ownership / admin guard
+    repo = crud.repository.get(db, id=repository_id)
+    if not repo or repo.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if repo.owner_id != current_user.id and current_user.role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Must be repo owner or tenant admin")
+
+    # Count components that have completed analysis (so we give an accurate ETA)
+    component_count = (
+        db.query(CodeComponent)
+        .filter(
+            CodeComponent.repository_id == repository_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "complete",
+        )
+        .count()
+    )
+
+    if component_count == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="No analysed components found. Run code analysis first.",
+        )
+
+    # Dispatch Celery task
+    task = backfill_data_flow_edges.delay(
+        repository_id=repository_id,
+        tenant_id=tenant_id,
+    )
+
+    return {
+        "task_id": task.id,
+        "component_count": component_count,
+        "message": (
+            f"Backfill started for {component_count} components. "
+            "Check task status at GET /api/v1/tasks/{task_id}/status"
+        ),
+    }
+```
+
+**Required imports** (add if not already present):
+
+```python
+from app.models.code_component import CodeComponent
+from app.tasks.data_flow_tasks import backfill_data_flow_edges
+```
+
+---
+
+### P3.9.2 — Register `data_flow_tasks` in Celery Worker
+
+**File:** `backend/app/worker.py`
+
+Find the `include=` list passed to `celery_app` and add the new task module:
+
+```python
+celery_app = Celery(
+    "dokydoc",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
+    include=[
+        "app.tasks",
+        "app.tasks.ontology_tasks",
+        "app.tasks.code_analysis_tasks",
+        "app.tasks.data_flow_tasks",   # ← ADD THIS LINE
+    ],
+)
+```
+
+---
+
+### P3.9.3 — Hook Data Flow Build into Code Analysis Pipeline
+
+**File:** `backend/app/services/code_analysis_service.py`
+
+After the step that calls ontology extraction (search for the call to `_extract_ontology_from_analysis` or `build_graph_from_code_component`), add the non-breaking data flow step:
+
+```python
+# ── Step 7: Build data-flow edges (pro/enterprise only, zero extra AI cost) ──
+try:
+    tenant = crud.tenant.get(db=db, id=tenant_id)
+    _is_premium = getattr(tenant, "tier", "free") in ("pro", "enterprise")
+    if _is_premium:
+        from app.services.data_flow_service import DataFlowService
+        DataFlowService().build_flow_for_component(
+            db=db,
+            component_id=component.id,
+            tenant_id=tenant_id,
+        )
+        self.logger.info(
+            f"Data-flow edges built for component {component.id}"
+        )
+except Exception as _dfe:
+    # NEVER let data-flow extraction break existing analysis pipeline
+    self.logger.warning(
+        f"Data-flow extraction failed for component {component.id} "
+        f"(non-fatal): {_dfe}"
+    )
+```
+
+> **Important:** This block must be inside the per-component analysis completion section, wrapped in its own `try/except`. The rest of the pipeline must continue even if this raises.
+
+---
+
+### P3.9.4 — Verification Commands
+
+Run these commands **in order** after deploying Phase 3. Each command must pass before moving to the next.
+
+#### Step 1 — Migration Applied
+```bash
+cd backend
+alembic current
+# Expected: s13a1 (head)
+
+alembic check
+# Expected: "No new upgrade operations detected."
+```
+
+#### Step 2 — Table Created
+```sql
+-- Connect to DB and run:
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_name = 'code_data_flow_edges'
+ORDER BY ordinal_position;
+
+-- Expected columns (13 total):
+-- id, tenant_id, repository_id, source_component_id, target_component_id,
+-- source_function, target_function, edge_type, data_in_description,
+-- data_out_description, human_label, external_target_name,
+-- step_index, created_at
+```
+
+#### Step 3 — CHECK Constraint on edge_type
+```sql
+SELECT constraint_name, check_clause
+FROM information_schema.check_constraints
+WHERE constraint_name LIKE '%edge_type%';
+-- Expected: one row with all valid edge type values
+```
+
+#### Step 4 — Indexes Created
+```sql
+SELECT indexname, indexdef
+FROM pg_indexes
+WHERE tablename = 'code_data_flow_edges';
+-- Expected: ix_cdf_source, ix_cdf_target, ix_cdf_tenant, ix_cdf_repo, ix_cdf_source_type
+```
+
+#### Step 5 — Model Importable
+```bash
+cd backend
+python -c "from app.models.code_data_flow_edge import CodeDataFlowEdge; print('OK')"
+python -c "from app.crud.crud_code_data_flow_edge import CRUDCodeDataFlowEdge; print('OK')"
+python -c "from app.services.data_flow_service import DataFlowService; print('OK')"
+python -c "from app.tasks.data_flow_tasks import backfill_data_flow_edges; print('OK')"
+```
+
+#### Step 6 — API Endpoints Registered
+```bash
+# Start backend locally (dev mode)
+uvicorn app.main:app --reload &
+
+# Check endpoints exist:
+curl -s http://localhost:8000/openapi.json | python3 -c "
+import json, sys
+spec = json.load(sys.stdin)
+paths = list(spec['paths'].keys())
+required = [
+    '/api/v1/code-components/{id}/data-flow',
+    '/api/v1/code-components/{id}/request-trace',
+    '/api/v1/code-components/{id}/data-flow/rebuild',
+    '/api/v1/repositories/{repository_id}/backfill-data-flow',
+]
+for p in required:
+    if p in paths:
+        print(f'✓ {p}')
+    else:
+        print(f'✗ MISSING: {p}')
+"
+```
+
+#### Step 7 — End-to-End Flow Build
+```bash
+# Pick a component that has completed analysis
+# Replace {TOKEN} and {COMPONENT_ID} with real values
+
+# 1. Trigger rebuild for single component
+curl -X POST http://localhost:8000/api/v1/code-components/{COMPONENT_ID}/data-flow/rebuild \
+  -H "Authorization: Bearer {TOKEN}" \
+  | python3 -m json.tool
+# Expected: {"task_id": "...", "message": "Rebuild started"}
+
+# Wait 5s for Celery to process, then:
+
+# 2. Fetch egocentric flow
+curl http://localhost:8000/api/v1/code-components/{COMPONENT_ID}/data-flow \
+  -H "Authorization: Bearer {TOKEN}" \
+  | python3 -m json.tool
+# Expected: {"file_role": "...", "edges_out": [...], "edges_in": [...],
+#            "mermaid_technical": "flowchart LR...", "mermaid_simple": "flowchart LR..."}
+
+# 3. Fetch request trace
+curl "http://localhost:8000/api/v1/code-components/{COMPONENT_ID}/request-trace?depth=3" \
+  -H "Authorization: Bearer {TOKEN}" \
+  | python3 -m json.tool
+# Expected: {"nodes": [...], "edges": [...], "mermaid_technical": "...", "mermaid_simple": "..."}
+```
+
+#### Step 8 — Mermaid Syntax Valid
+```bash
+# Grab mermaid_technical from request trace above, then validate:
+# Paste into https://mermaid.live — should render without errors
+# OR use mermaid CLI:
+npm install -g @mermaid-js/mermaid-cli
+echo "$(curl -s .../request-trace | jq -r '.mermaid_technical')" | mmdc -i /dev/stdin -o /tmp/diagram.svg
+# Expected: /tmp/diagram.svg created, non-zero file size
+```
+
+#### Step 9 — Premium Gate Works
+```bash
+# With a FREE tier tenant token:
+curl http://localhost:8000/api/v1/code-components/{COMPONENT_ID}/data-flow \
+  -H "Authorization: Bearer {FREE_TIER_TOKEN}" \
+  | python3 -m json.tool
+# Expected: HTTP 403
+# {
+#   "detail": {
+#     "error": "premium_required",
+#     "feature": "data_flow_diagrams",
+#     "upgrade_url": "/dashboard/settings?tab=billing"
+#   }
+# }
+```
+
+#### Step 10 — Backfill Task Runs
+```bash
+# Trigger repo-level backfill
+curl -X POST http://localhost:8000/api/v1/repositories/{REPO_ID}/backfill-data-flow \
+  -H "Authorization: Bearer {TOKEN}" \
+  | python3 -m json.tool
+# Expected: {"task_id": "...", "component_count": N, "message": "Backfill started for N components..."}
+
+# After completion check DB:
+psql $DATABASE_URL -c "
+SELECT edge_type, COUNT(*) as count
+FROM code_data_flow_edges
+WHERE repository_id = {REPO_ID}
+GROUP BY edge_type
+ORDER BY count DESC;
+"
+# Expected: rows for various edge_types (HTTP_TRIGGER, SERVICE_CALL, DB_READ, etc.)
+```
+
+#### Step 11 — Frontend Tab Renders
+```
+1. Open Chrome DevTools → Network tab
+2. Navigate to /dashboard/code/{COMPONENT_ID}
+3. Click the "Data Flow" tab
+4. Verify Network shows:
+   - GET /api/v1/code-components/{id}/request-trace → 200
+   - Response contains mermaid_technical and mermaid_simple strings
+5. Verify Mermaid diagram renders (no "Diagram render error" shown)
+6. Click a node in the diagram → verify browser navigates to /dashboard/code/{other_id}
+7. Toggle "Business View" → verify diagram re-renders with simpler labels
+8. Toggle "This File Only" → verify GET /data-flow endpoint called instead
+```
+
+#### Step 12 — Premium Gate in UI (Free Tier)
+```
+1. Log in as a free-tier tenant user
+2. Navigate to any code component
+3. Click "Data Flow" tab
+4. Verify: blurred SVG preview is shown (not the real diagram)
+5. Verify: "Upgrade to Pro" button visible and links to /dashboard/settings?tab=billing
+6. Verify: no API call is made to /data-flow or /request-trace (check Network tab)
+```
+
+---
+
+### P3.9.5 — Phase 3 New Files Summary
+
+| File | Type | Description |
+|------|------|-------------|
+| `backend/app/models/code_data_flow_edge.py` | NEW | `CodeDataFlowEdge` SQLAlchemy model |
+| `backend/alembic/versions/s13a1_code_data_flow_edges.py` | NEW | DB migration: `code_data_flow_edges` table |
+| `backend/app/crud/crud_code_data_flow_edge.py` | NEW | CRUD: get_by_source, get_by_target, get_egocentric, bulk_create, etc. |
+| `backend/app/services/data_flow_service.py` | NEW | DataFlowService: build_flow, get_request_trace, render_mermaid |
+| `backend/app/tasks/data_flow_tasks.py` | NEW | Celery tasks: backfill_data_flow_edges, rebuild_component_data_flow |
+| `backend/app/schemas/code_component.py` | MODIFIED | +DataFlowNodeSchema, DataFlowEdgeSchema, EgocentricFlowResponse, RequestTraceResponse |
+| `backend/app/api/endpoints/code_components.py` | MODIFIED | +3 endpoints: /data-flow, /request-trace, /data-flow/rebuild |
+| `backend/app/api/endpoints/repositories.py` | MODIFIED | +1 endpoint: /backfill-data-flow |
+| `backend/app/models/__init__.py` | MODIFIED | +`from .code_data_flow_edge import CodeDataFlowEdge` |
+| `backend/app/crud/__init__.py` | MODIFIED | +`from .crud_code_data_flow_edge import code_data_flow_edge` |
+| `backend/app/worker.py` | MODIFIED | +`app.tasks.data_flow_tasks` in include list |
+| `backend/app/services/code_analysis_service.py` | MODIFIED | +Step 7: data-flow edge build hook (try/except guarded) |
+| `frontend/hooks/useDataFlow.ts` | NEW | SWR hooks: useRequestTrace, useEgocentricFlow |
+| `frontend/components/data-flow/PremiumGateCard.tsx` | NEW | Blurred SVG teaser + upsell overlay |
+| `frontend/components/data-flow/EdgeListPanel.tsx` | NEW | "Calls" and "Called By" evidence panels |
+| `frontend/components/data-flow/DataFlowDiagram.tsx` | NEW | Main Data Flow tab component (orchestrates all above) |
+| `frontend/app/dashboard/code/[id]/page.tsx` | MODIFIED | +Data Flow tab trigger and content |
+
+---
+
+### P3.9.6 — Migration Chain Checkpoint
+
+After Phase 3 is merged, the Alembic migration chain must be:
+
+```
+s12a1_training_examples          ← Phase 1 (data flywheel)
+    ↓ down_revision
+s13a1_code_data_flow_edges       ← Phase 3 (THIS phase)
+    ↓ down_revision
+s14a1_atom_upload_flag           ← Phase 4 (4-engine integration)
+    ↓ down_revision
+s14b1_concept_mapping_validation_fields
+    ↓ down_revision
+s14c1_analysis_run_efficiency_fields
+    ↓ down_revision
+s15a1_tenant_industry_settings   ← Phase 5 (dynamic prompting)
+    ↓ down_revision
+s16a1_... (Phase 5B mismatches)
+...
+```
+
+**Verify before merging:**
+```bash
+alembic history --verbose | head -20
+# s13a1 must appear immediately after s12a1
+# s14a1 must list down_revision = 's13a1'
+```
+
+---
+
+### P3.9.7 — Developer Checklist (Phase 3)
+
+> Copy this checklist into your project tracking tool (Jira/Linear/GitHub Projects) and assign tasks before sprint begins.
+
+#### DB / Backend (assign to: Backend Dev 1)
+- [ ] **P3.2-DB** — Create `backend/app/models/code_data_flow_edge.py` with all fields, CHECK constraint, EDGE_LABEL_TEMPLATES, SWIMLANE_MAP
+- [ ] **P3.2-MIG** — Write `backend/alembic/versions/s13a1_code_data_flow_edges.py` with all indexes, set `down_revision='s12a1'`
+- [ ] **P3.2-REG** — Add `from .code_data_flow_edge import CodeDataFlowEdge` to `backend/app/models/__init__.py`
+- [ ] **P3.2-VER** — Run `alembic upgrade s13a1` locally, run all verification commands in P3.9.4 Steps 1–4
+- [ ] **P3.3-CRUD** — Write `backend/app/crud/crud_code_data_flow_edge.py` with 8 methods
+- [ ] **P3.3-REG** — Add `from .crud_code_data_flow_edge import code_data_flow_edge` to `backend/app/crud/__init__.py`
+
+#### Service Layer (assign to: Backend Dev 2)
+- [ ] **P3.4-SVC** — Write `backend/app/services/data_flow_service.py` (DataFlowService with 3 public methods + all private helpers)
+- [ ] **P3.1-PROMPT** — Edit `backend/app/services/ai/prompt_manager.py`: add `file_role`, `backed_by_model`, `model_definition`, `outbound_calls` fields to ENHANCED_SEMANTIC_ANALYSIS prompt (additive only — never remove existing fields)
+- [ ] **P3.5-HOOK** — Edit `backend/app/services/code_analysis_service.py`: add Step 7 data-flow hook (copy snippet from P3.9.3 exactly)
+- [ ] **P3.6-TASK** — Write `backend/app/tasks/data_flow_tasks.py` with 2 Celery tasks
+- [ ] **P3.6-REG** — Add `app.tasks.data_flow_tasks` to include list in `backend/app/worker.py`
+
+#### API Layer (assign to: Backend Dev 1 or 2)
+- [ ] **P3.7-SCH** — Add 4 new Pydantic schemas to `backend/app/schemas/code_component.py`
+- [ ] **P3.7-EP1** — Add `GET /{id}/data-flow` endpoint to `backend/app/api/endpoints/code_components.py`
+- [ ] **P3.7-EP2** — Add `GET /{id}/request-trace` endpoint
+- [ ] **P3.7-EP3** — Add `POST /{id}/data-flow/rebuild` endpoint
+- [ ] **P3.7-EP4** — Add `POST /{repository_id}/backfill-data-flow` to `backend/app/api/endpoints/repositories.py` (harden existing stub from P3.9.1)
+- [ ] **P3.7-VER** — Run all API verification commands in P3.9.4 Steps 5–10
+
+#### Frontend (assign to: Frontend Dev)
+- [ ] **P3.8-HOOK** — Write `frontend/hooks/useDataFlow.ts` with useRequestTrace + useEgocentricFlow (SWR-based)
+- [ ] **P3.8-GATE** — Write `frontend/components/data-flow/PremiumGateCard.tsx` (blurred SVG + upsell)
+- [ ] **P3.8-EDGE** — Write `frontend/components/data-flow/EdgeListPanel.tsx` (Calls + Called By panels)
+- [ ] **P3.8-MAIN** — Write `frontend/components/data-flow/DataFlowDiagram.tsx` (main orchestrator)
+- [ ] **P3.8-WIRE** — Modify `frontend/app/dashboard/code/[id]/page.tsx`: add import, TabsTrigger, TabsContent
+- [ ] **P3.8-VER** — Manual QA using verification steps in P3.9.4 Steps 11–12
+
+#### QA Sign-Off (assign to: QA Engineer)
+- [ ] **QA-E2E** — Run all 12 verification steps in P3.9.4
+- [ ] **QA-MERMAID** — Validate generated Mermaid syntax at mermaid.live for 5 different component types (endpoint, service, schema, model, CRUD)
+- [ ] **QA-CLICK** — Verify node click navigation works for each swimlane category
+- [ ] **QA-MODES** — Verify technical ↔ business toggle re-renders with correct labels
+- [ ] **QA-VIEWS** — Verify trace ↔ file-only toggle calls correct API endpoint
+- [ ] **QA-DEPTH** — Verify depth selector (3/5/8) passes correct `?depth=N` param
+- [ ] **QA-FREE** — Verify free-tier users see blurred gate and no API calls made
+- [ ] **QA-PREMIUM** — Verify pro-tier users see full diagram with all controls
+- [ ] **QA-MOBILE** — Verify diagram and controls are usable on 375px mobile viewport
+- [ ] **QA-REBUILD** — Click "Rebuild" button → verify task dispatched → diagram refreshes after 3s polling
+- [ ] **QA-NONBREAK** — Verify existing tabs (Analysis, Graph, Domains, System, Branches, Synthesis) still load correctly after adding Data Flow tab
+- [ ] **QA-PIPELINE** — Analyze a fresh code component (one not analyzed before) → verify data-flow edges appear in DB automatically (Step 7 hook)
+
+---
+
+### P3.9.8 — What Does NOT Change in Phase 3
+
+The following existing code is **untouched** by Phase 3. Developers must not modify these:
+
+| Component | Reason |
+|-----------|--------|
+| `OntologyConcept` / `OntologyRelationship` tables | Not touched — data flow is a separate edge store |
+| `_extract_ontology_from_analysis()` in `business_ontology_service.py` | Completely separate from data flow extraction |
+| All existing validation endpoints | Unchanged |
+| All existing ontology endpoints | Unchanged |
+| `structured_analysis` JSON schema in existing records | New fields are additive and optional |
+| `MermaidDiagram.tsx` component | Used as-is — no modifications needed |
+| All existing `code_components` endpoints | New endpoints are additional, not replacing existing |
+| Existing Celery task queue configuration | Only adding a new include module, not changing queue settings |
+
+---
+
+### P3.9.9 — Rollback Plan
+
+If Phase 3 causes a production issue:
+
+**Backend rollback (zero data loss):**
+```bash
+# 1. Revert worker.py to remove data_flow_tasks from include list
+# 2. Revert code_analysis_service.py Step 7 hook
+# 3. Revert code_components.py (remove 3 new endpoints)
+# 4. Revert repositories.py (remove backfill endpoint)
+# 5. Roll back migration:
+alembic downgrade s12a1
+# This drops code_data_flow_edges table — acceptable because it's new data only
+```
+
+**Frontend rollback:**
+```bash
+# Remove DataFlowDiagram tab from code/[id]/page.tsx
+# Delete data-flow component directory
+# No user data is affected
+```
+
+**Data safety:** The `code_data_flow_edges` table contains only derived data (computed from `structured_analysis`). Dropping it during rollback causes zero business data loss — it can be rebuilt at any time via the backfill endpoint.
+
+---
+
+## Phase 3 — Sprint Placement & Integration Points
+
+### When to Execute Phase 3
+
+Phase 3 should be executed as a **parallel track in Sprint 6**, alongside Phase 12 (Performance). It has no dependency on Phase 4 or 5, and Phase 3's prompt additions (P3.1 new fields) are a prerequisite for new code analyses from Phase 4 onwards.
+
+```
+Sprint 4 (Weeks 7-8):   Phase 4 (4-Engine Integration)
+Sprint 5 (Weeks 9-10):  Phase 5 (Dynamic Prompting) + Phase 11 (Auto-Docs)
+Sprint 6 (Weeks 11-12): Phase 3 (Data Flow Diagrams) ← HERE
+                         Phase 12 (Performance) ← parallel
+```
+
+**Why Sprint 6?**  
+1. Phase 3 benefits from Phase 4's BOEContext data (richer structured_analysis) — not hard-required but improves diagram quality
+2. Phase 5 adds industry context to the analysis prompt — same time prompt is enhanced for data flow fields (P3.1 bundled)  
+3. Phase 12 adds DB indexes including `code_data_flow_edges` indexes — cleanest if done together
+
+**P3.1 Prompt Enhancement — Bundle with Phase 5:**  
+The 4 new JSON output fields (`file_role`, `backed_by_model`, `model_definition`, `outbound_calls`) in the ENHANCED_SEMANTIC_ANALYSIS prompt (P3.1) should be added **in the same PR** as Phase 5's dynamic prompting changes to `prompt_manager.py`. This avoids two PRs touching the same file and simplifies review.
+
+---
+
+## Phase 3 — Summary for Product & Stakeholders
+
+**What it delivers:**
+
+> **"For every API endpoint, service, or data model in your codebase — DokyDoc shows you exactly how data flows through it, from the entry point all the way to the database and external services. Click any node to jump directly to that file's analysis. Share the diagram with your BA or PM using 'Business View' — they'll understand the system without reading code."**
+
+**Business Value:**
+- **Zero extra AI cost** — 100% deterministic, built from existing `structured_analysis` data
+- **Premium gate** — creates a natural upgrade path from free → pro for existing users
+- **Non-breaking** — wrapped in try/except, no existing features affected
+- **Clickable navigation** — deepens engagement with code analysis pages
+- **Two modes** — Technical for developers, Business for BAs/PMs/CTOs
+
+**Metrics to track post-launch:**
+- Data Flow tab activation rate (% of code component page views that click the tab)
+- Free → pro conversion rate for users who hit the premium gate
+- Diagram render error rate (track via `setError` in MermaidDiagram)
+- Rebuild button click rate (signal that auto-build is not working well)
+- Node click-through rate (are users navigating via the diagram?)
+
