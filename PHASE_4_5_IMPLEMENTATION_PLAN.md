@@ -7976,3 +7976,4587 @@ curl /api/v1/validation/{document_id}/certificate
 - **No cascade deletes** — `SET NULL` on FK deletion prevents sign-off records from disappearing if document version is removed
 - **Audit log** — every sign-off writes an audit event for compliance evidence
 
+
+---
+
+## Phase 5C — Workflow Completeness: End-to-End Actor Journeys
+
+### Strategic Context
+
+Phase 5B delivered validation accuracy and enterprise controls. Phase 5C completes the **end-to-end actor journeys** — every step a Business Analyst, Developer, QA Engineer, Tech Lead, and CTO needs to accomplish in DokyDoc without leaving the platform.
+
+Nine capabilities are missing from the current plan to make the full workflow operational:
+
+| Task | Capability | Primary Actor |
+|------|-----------|---------------|
+| P5C-01 | Smart File Suggestion Engine | BA / Developer |
+| P5C-02 | Cross-Role Upload Request Notification | BA → Tech Lead |
+| P5C-03 | Request Clarification Workflow | BA ↔ Developer |
+| P5C-04 | UAT Checklist Auto-generation + QA Sign-off | BA / QA |
+| P5C-05 | Auto-generated Test Suite Download | QA |
+| P5C-06 | CI Test Result Webhook → Runtime Mismatch | QA / CI |
+| P5C-07 | AI-Suggested Fix per Mismatch | Developer |
+| P5C-08 | Compliance Score Trend / Time Series | Tech Lead |
+| P5C-09 | Cross-Project Aggregate Compliance Dashboard | CTO |
+
+### Migration Chain (Phase 5C)
+
+```
+s16f1  (Phase 5B baseline — brd_sign_offs)
+  └── s17a1_file_suggestions          (P5C-01)
+       └── s17b1_mismatch_clarifications  (P5C-03)
+            └── s17c1_uat_checklist        (P5C-04)
+                 └── s17d1_compliance_snapshots  (P5C-08)
+                      └── s17e1_ci_webhook_config  (P5C-06)
+```
+
+---
+
+## P5C-01 — Smart File Suggestion Engine
+
+**Priority:** P0 — Core workflow blocker. Without this, the BA cannot guide the developer on what to upload, and atoms remain unvalidated.
+**Complexity:** HIGH — Requires AI analysis of atom content to extract code identifiers.
+**Risk:** MEDIUM — Gemini call is non-blocking; suggestions are advisory only.
+
+### Why This Exists
+
+**BA Step 4** of the workflow: after atomization, DokyDoc shows "47 atoms extracted. Missing coverage: Upload `payment_service.py` and `fd_service.py` to validate 14 of these atoms."
+
+Currently, after atomization completes, the BA sees a list of atoms but **no guidance** on which code files to upload. The developer is asked to "upload some files" with no direction. This causes:
+- Developers uploading the wrong files
+- Atoms never getting validated because the right file was never uploaded
+- BA-developer back-and-forth via Slack to figure out what to upload
+
+The fix: after atomization, run a second Gemini pass that reads all atoms and extracts **code entity names** (service class names, file names, module names, function names) referenced in the atom content. Map these to likely file paths.
+
+### DB Changes
+
+**New table: `file_suggestions`**
+
+**New migration: `backend/alembic/versions/s17a1_file_suggestions.py`**
+
+```python
+# backend/alembic/versions/s17a1_file_suggestions.py
+"""Add file_suggestions table and atom testability field
+
+Revision ID: s17a1
+Revises: s16f1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY
+
+revision = 's17a1'
+down_revision = 's16f1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    # 1. New table: file_suggestions
+    op.create_table(
+        'file_suggestions',
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
+        sa.Column('document_id', sa.Integer, sa.ForeignKey('documents.id', ondelete='CASCADE'), nullable=False, index=True),
+        # Suggested filename or path (e.g. "payment_service.py")
+        sa.Column('suggested_filename', sa.String(500), nullable=False),
+        # Why this file was suggested — human-readable reason
+        sa.Column('reason', sa.Text, nullable=False),
+        # Which atoms reference this file (array of atom DB ids)
+        sa.Column('atom_ids', ARRAY(sa.Integer), nullable=False, server_default='{}'),
+        # How many atoms this file would cover
+        sa.Column('atom_count', sa.Integer, nullable=False, default=0),
+        # Whether the file has been uploaded already (FK to code_components)
+        sa.Column('fulfilled_by_component_id', sa.Integer,
+                  sa.ForeignKey('code_components.id', ondelete='SET NULL'), nullable=True),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index('ix_file_suggestions_document_id', 'file_suggestions', ['document_id'])
+
+    # 2. Add testability field to requirement_atoms
+    # Values: "static" (AI can validate), "runtime" (needs live test), "manual" (needs human UAT)
+    op.add_column(
+        'requirement_atoms',
+        sa.Column('testability', sa.String(20), nullable=True)
+    )
+    # Add suggested_files summary JSONB to documents table
+    op.add_column(
+        'documents',
+        sa.Column('file_suggestion_summary', JSONB, nullable=True)
+    )
+
+
+def downgrade():
+    op.drop_column('documents', 'file_suggestion_summary')
+    op.drop_column('requirement_atoms', 'testability')
+    op.drop_table('file_suggestions')
+```
+
+### Backend — New Model `FileSuggestion`
+
+**New file: `backend/app/models/file_suggestion.py`**
+
+```python
+# backend/app/models/file_suggestion.py
+from typing import Optional
+from datetime import datetime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import ARRAY
+from app.db.base_class import Base
+
+
+class FileSuggestion(Base):
+    """
+    AI-generated suggestion of which code files to upload to cover BRD atoms.
+    Created after atomization completes. Marked fulfilled when the file is uploaded.
+    """
+    __tablename__ = "file_suggestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suggested_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    atom_ids: Mapped[list] = mapped_column(ARRAY(Integer), nullable=False, default=list)
+    atom_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fulfilled_by_component_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("code_components.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+```
+
+**Add to `backend/app/models/__init__.py`:**
+
+```python
+from .file_suggestion import FileSuggestion  # noqa: F401
+```
+
+**Add to `backend/app/db/base.py`** (import all models):
+
+```python
+from app.models.file_suggestion import FileSuggestion  # noqa: F401
+```
+
+### Backend — Gemini Prompt for File Suggestion
+
+**Add to `backend/app/services/ai/gemini.py`** (after existing `_ATOM_TYPE_INSTRUCTIONS`):
+
+```python
+_FILE_SUGGESTION_PROMPT = """
+You are a code architecture assistant. Given a list of BRD requirement atoms,
+identify which Python/TypeScript/Go source files a developer would need to upload
+for automated validation of these requirements.
+
+For each suggested file:
+- Extract CLASS NAMES, SERVICE NAMES, FUNCTION NAMES, or MODULE NAMES mentioned in the atoms
+- Map them to likely filenames using these conventions:
+  * PaymentService → payment_service.py or paymentService.ts
+  * fd_rate, fd_product → fd_service.py or fixed_deposit_service.py
+  * "POST /api/v1/loans" → loan_router.py or loans.py
+  * Database migration values → look for "migration" or "alembic" mentions
+
+Return ONLY valid JSON with this exact structure:
+{
+  "suggestions": [
+    {
+      "filename": "payment_service.py",
+      "reason": "Atoms REQ-004, REQ-007 reference PaymentService and payment processing logic",
+      "atom_ids": ["REQ-004", "REQ-007"],
+      "atom_count": 2,
+      "confidence": "high"
+    }
+  ]
+}
+
+Rules:
+- Maximum 8 file suggestions
+- Only suggest files that would materially improve atom coverage
+- If atom references a specific HTTP endpoint, suggest the router file
+- confidence: "high" (filename explicitly mentioned), "medium" (class/service implied), "low" (indirect reference)
+- Do NOT suggest config files, __init__.py, or test files
+"""
+
+
+async def call_gemini_for_file_suggestions(
+    atoms: list[dict],
+    model: str = "gemini-2.0-flash",
+) -> list[dict]:
+    """
+    Analyze atom content to suggest which code files should be uploaded.
+    Returns list of suggestion dicts matching _FILE_SUGGESTION_PROMPT schema.
+    """
+    import google.generativeai as genai
+    from app.core.config import settings
+
+    if not atoms:
+        return []
+
+    atom_summary = "\n".join(
+        f"- [{a['atom_id']}] ({a['atom_type']}) {a['content']}"
+        for a in atoms[:60]  # Cap at 60 atoms to stay within token limit
+    )
+    prompt = f"{_FILE_SUGGESTION_PROMPT}\n\nATOMS:\n{atom_summary}"
+
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel(model)
+    response = model_client.generate_content(
+        prompt,
+        generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
+    )
+    import json
+    data = json.loads(response.text)
+    return data.get("suggestions", [])
+```
+
+### Backend — Service: `FileSuggestionService`
+
+**New file: `backend/app/services/file_suggestion_service.py`**
+
+```python
+# backend/app/services/file_suggestion_service.py
+"""
+FileSuggestionService — analyses atom content post-atomization to suggest
+which code files a developer should upload for validation coverage.
+"""
+from sqlalchemy.orm import Session
+from app.core.logging import get_logger
+from app.models.file_suggestion import FileSuggestion
+from app.crud.crud_requirement_atom import requirement_atom as crud_atom
+
+logger = get_logger("file_suggestion_service")
+
+
+class FileSuggestionService:
+
+    async def generate_and_store(
+        self,
+        db: Session,
+        *,
+        document_id: int,
+        tenant_id: int,
+    ) -> list[FileSuggestion]:
+        """
+        Called after atomization completes. Fetches all atoms for the document,
+        calls Gemini to suggest files, stores results, returns list.
+        """
+        from app.services.ai.gemini import call_gemini_for_file_suggestions
+
+        # Fetch atoms
+        atoms = db.query(
+            __import__('app.models.requirement_atom', fromlist=['RequirementAtom']).RequirementAtom
+        ).filter_by(document_id=document_id, tenant_id=tenant_id).all()
+
+        if not atoms:
+            return []
+
+        atom_dicts = [
+            {"atom_id": a.atom_id, "atom_type": a.atom_type, "content": a.content}
+            for a in atoms
+        ]
+
+        try:
+            suggestions = await call_gemini_for_file_suggestions(atom_dicts)
+        except Exception as e:
+            logger.warning(f"File suggestion Gemini call failed: {e}")
+            return []
+
+        # Build atom_id→DB id map
+        atom_id_to_db_id = {a.atom_id: a.id for a in atoms}
+
+        # Delete existing suggestions for this document (re-atomization case)
+        db.query(FileSuggestion).filter_by(document_id=document_id, tenant_id=tenant_id).delete()
+
+        stored = []
+        for s in suggestions:
+            db_ids = [atom_id_to_db_id[aid] for aid in s.get("atom_ids", []) if aid in atom_id_to_db_id]
+            obj = FileSuggestion(
+                tenant_id=tenant_id,
+                document_id=document_id,
+                suggested_filename=s["filename"],
+                reason=s["reason"],
+                atom_ids=db_ids,
+                atom_count=len(db_ids),
+            )
+            db.add(obj)
+            stored.append(obj)
+
+        db.commit()
+
+        # Store summary JSON on the document itself for fast dashboard access
+        from app.models.document import Document
+        doc = db.get(Document, document_id)
+        if doc:
+            doc.file_suggestion_summary = {
+                "total_suggestions": len(stored),
+                "filenames": [s.suggested_filename for s in stored],
+                "uncovered_atom_count": sum(s.atom_count for s in stored),
+            }
+            db.add(doc)
+            db.commit()
+
+        logger.info(f"Generated {len(stored)} file suggestions for document {document_id}")
+        return stored
+
+
+file_suggestion_service = FileSuggestionService()
+```
+
+### Backend — Trigger After Atomization
+
+**In `backend/app/tasks/document_pipeline.py`**, after `atomize_document` succeeds and emits the `analysis_complete` notification (around line 150), add:
+
+```python
+# PHASE 5C: After atomization — suggest code files to upload
+try:
+    import asyncio
+    from app.services.file_suggestion_service import file_suggestion_service
+    asyncio.run(
+        file_suggestion_service.generate_and_store(
+            db=db,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+        )
+    )
+except Exception as e:
+    logger.warning(f"File suggestion generation failed (non-fatal): {e}")
+```
+
+### Backend — Mark Suggestion Fulfilled on Code Upload
+
+**In `backend/app/tasks/code_analysis_tasks.py`**, after a new code component is created/linked, add:
+
+```python
+# PHASE 5C: Check if this upload fulfills any file suggestions
+try:
+    from app.models.file_suggestion import FileSuggestion
+    filename = component.file_path.split("/")[-1]  # e.g. "payment_service.py"
+    pending = db.query(FileSuggestion).filter(
+        FileSuggestion.document_id == document_id,
+        FileSuggestion.tenant_id == tenant_id,
+        FileSuggestion.fulfilled_by_component_id == None,
+        FileSuggestion.suggested_filename.ilike(f"%{filename}%"),
+    ).all()
+    for suggestion in pending:
+        suggestion.fulfilled_by_component_id = component.id
+    db.commit()
+except Exception as e:
+    logger.warning(f"File suggestion fulfillment mark failed (non-fatal): {e}")
+```
+
+### Backend — API Endpoint
+
+**Add to `backend/app/api/endpoints/documents.py`:**
+
+```python
+# GET /documents/{document_id}/file-suggestions
+@router.get("/{document_id}/file-suggestions")
+def get_file_suggestions(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return AI-generated suggestions of which code files to upload
+    to maximize validation coverage for this document's atoms.
+    """
+    from app.models.file_suggestion import FileSuggestion
+
+    suggestions = db.query(FileSuggestion).filter(
+        FileSuggestion.document_id == document_id,
+        FileSuggestion.tenant_id == current_user.tenant_id,
+    ).order_by(FileSuggestion.atom_count.desc()).all()
+
+    return {
+        "document_id": document_id,
+        "suggestions": [
+            {
+                "id": s.id,
+                "filename": s.suggested_filename,
+                "reason": s.reason,
+                "atom_count": s.atom_count,
+                "is_fulfilled": s.fulfilled_by_component_id is not None,
+                "fulfilled_by_component_id": s.fulfilled_by_component_id,
+            }
+            for s in suggestions
+        ],
+        "total_unfulfilled": sum(1 for s in suggestions if not s.fulfilled_by_component_id),
+        "uncovered_atoms": sum(s.atom_count for s in suggestions if not s.fulfilled_by_component_id),
+    }
+```
+
+### Frontend — File Suggestion Banner on Document Page
+
+**In the document detail page** (wherever atom count is displayed), add a `FileSuggestionBanner` component:
+
+**New file: `frontend/components/documents/FileSuggestionBanner.tsx`**
+
+```tsx
+// frontend/components/documents/FileSuggestionBanner.tsx
+import { useState } from "react";
+import { Upload, X, CheckCircle, AlertTriangle } from "lucide-react";
+import { useSuggestions } from "@/hooks/useFileSuggestions";
+
+interface Props {
+  documentId: number;
+  onRequestUpload: () => void;  // opens the upload modal
+}
+
+export function FileSuggestionBanner({ documentId, onRequestUpload }: Props) {
+  const { suggestions, isLoading } = useSuggestions(documentId);
+  const [dismissed, setDismissed] = useState(false);
+
+  const unfulfilled = suggestions?.filter((s) => !s.is_fulfilled) ?? [];
+
+  if (isLoading || dismissed || unfulfilled.length === 0) return null;
+
+  const uncoveredAtoms = unfulfilled.reduce((sum, s) => sum + s.atom_count, 0);
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 mb-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-amber-800">
+              {uncoveredAtoms} atoms need code files to be validated
+            </p>
+            <p className="text-xs text-amber-700 mt-1">
+              Upload these files to enable automated validation:
+            </p>
+            <ul className="mt-2 space-y-1">
+              {unfulfilled.map((s) => (
+                <li key={s.id} className="flex items-center gap-2 text-xs text-amber-800">
+                  <span className="font-mono bg-amber-100 px-1.5 py-0.5 rounded">
+                    {s.filename}
+                  </span>
+                  <span className="text-amber-600">— {s.atom_count} atoms · {s.reason}</span>
+                </li>
+              ))}
+            </ul>
+            <button
+              onClick={onRequestUpload}
+              className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white text-xs rounded-md hover:bg-amber-700 transition-colors"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              Upload these files
+            </button>
+          </div>
+        </div>
+        <button onClick={() => setDismissed(true)} className="text-amber-400 hover:text-amber-600">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+**New hook: `frontend/hooks/useFileSuggestions.ts`**
+
+```typescript
+// frontend/hooks/useFileSuggestions.ts
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+
+export function useSuggestions(documentId: number) {
+  const { data, isLoading, mutate } = useSWR(
+    documentId ? `/documents/${documentId}/file-suggestions` : null,
+    apiGet,
+    { refreshInterval: 30_000 }  // poll every 30s to detect fulfillment
+  );
+  return { suggestions: data?.suggestions ?? [], isLoading, mutate };
+}
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s17a1
+
+# 2. Verify columns and table
+psql -c "\d file_suggestions"
+psql -c "\d requirement_atoms" | grep testability
+psql -c "\d documents" | grep file_suggestion
+
+# 3. Upload a BRD document and wait for atomization to complete
+# Then check suggestions were generated:
+psql -c "SELECT suggested_filename, atom_count, reason FROM file_suggestions WHERE document_id=1"
+
+# 4. Test the API endpoint
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/documents/1/file-suggestions
+# Expected: { "suggestions": [...], "total_unfulfilled": 3, "uncovered_atoms": 14 }
+
+# 5. Upload one of the suggested files, then re-check:
+# fulfilled_by_component_id should be set for that suggestion
+psql -c "SELECT suggested_filename, fulfilled_by_component_id FROM file_suggestions WHERE document_id=1"
+```
+
+### Risk Assessment
+- **Gemini call is async + non-blocking** — wrapped in try/except; atomization never fails because of this
+- **Re-atomization safe** — old suggestions are deleted before new ones are written
+- **Token limit** — capped at 60 atoms per Gemini call; large BRDs truncated with warning
+- **Fulfillment match** — uses `ilike "%filename%"` which is fuzzy; unlikely to create false positives
+
+
+---
+
+## P5C-02 — Cross-Role Upload Request Notification (BA → Tech Lead)
+
+**Priority:** P1 — Without this, the BA has no way to formally request developers to upload specific files.
+**Complexity:** LOW — Uses the existing notification infrastructure.
+**Risk:** LOW — Sends in-app notifications only; no external side effects.
+
+### Why This Exists
+
+**BA Step 5** of the workflow: "BA shares link with tech lead: 'Please upload these files'."
+
+Currently, the BA must manually copy a URL and send it through Slack/email. DokyDoc has no built-in way for the BA to say "hey tech lead, these 3 files need uploading". The P5C-01 banner tells the BA what's needed — P5C-02 lets them act on it with one click.
+
+The feature: a "Request Code Upload" button on the document page that opens a modal letting BA select target users (by role) and customize a message. On submit, in-app notifications are sent to those users with a direct link to the document and the list of suggested files.
+
+### No New DB Changes
+
+This uses the existing `notifications` table and `notification_service`. No migration needed.
+
+The only model touch is adding a new `notification_type = "upload_request"` string — this is just a value, not a schema change.
+
+### Backend — New Endpoint
+
+**Add to `backend/app/api/endpoints/documents.py`:**
+
+```python
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class UploadRequestBody(BaseModel):
+    user_ids: List[int]                    # specific user IDs to notify
+    message: Optional[str] = None          # optional custom message from BA
+    suggested_filenames: List[str] = []    # pre-filled from P5C-01 suggestions
+
+
+@router.post("/{document_id}/request-uploads", status_code=202)
+def request_code_uploads(
+    document_id: int,
+    body: UploadRequestBody,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    BA triggers: notify specified users that they need to upload code files
+    for validation of this document. Uses existing notification_service.
+    """
+    from app.services.notification_service import notify
+    from app.models.document import Document
+
+    doc = db.get(Document, document_id)
+    if not doc or doc.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    filenames_str = ", ".join(body.suggested_filenames) if body.suggested_filenames else "relevant code files"
+    custom_msg = body.message or ""
+    base_msg = (
+        f"{current_user.full_name or current_user.email} has requested that you upload "
+        f"{filenames_str} for BRD validation of '{doc.title}'."
+    )
+    full_message = f"{base_msg} {custom_msg}".strip()
+
+    # Validate user_ids belong to same tenant
+    from app.models.user import User
+    valid_users = db.query(User).filter(
+        User.id.in_(body.user_ids),
+        User.tenant_id == current_user.tenant_id,
+        User.is_active == True,
+    ).all()
+    valid_ids = {u.id for u in valid_users}
+
+    notified = []
+    for user_id in body.user_ids:
+        if user_id not in valid_ids:
+            continue
+        notify(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            user_id=user_id,
+            notification_type="upload_request",
+            title=f"Code upload requested for '{doc.title}'",
+            message=full_message,
+            resource_type="document",
+            resource_id=document_id,
+            details={
+                "requested_by_user_id": current_user.id,
+                "requested_by_name": current_user.full_name or current_user.email,
+                "suggested_filenames": body.suggested_filenames,
+                "document_title": doc.title,
+            },
+        )
+        notified.append(user_id)
+
+    return {
+        "notified_user_ids": notified,
+        "message": f"Upload request sent to {len(notified)} user(s)",
+    }
+
+
+@router.get("/{document_id}/team-members")
+def get_document_team_members(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return all active users in the tenant so the BA can select who to notify.
+    Sorted by role (tech_lead first, then developer, then others).
+    """
+    from app.models.user import User
+
+    users = db.query(User).filter(
+        User.tenant_id == current_user.tenant_id,
+        User.is_active == True,
+        User.id != current_user.id,  # exclude self
+    ).all()
+
+    def role_sort_key(u):
+        roles = u.roles or []
+        if "tech_lead" in roles: return 0
+        if "developer" in roles: return 1
+        return 2
+
+    users.sort(key=role_sort_key)
+
+    return {
+        "team_members": [
+            {
+                "id": u.id,
+                "name": u.full_name or u.email,
+                "email": u.email,
+                "roles": u.roles,
+            }
+            for u in users
+        ]
+    }
+```
+
+### Frontend — "Request Code Upload" Modal
+
+**New file: `frontend/components/documents/RequestUploadModal.tsx`**
+
+```tsx
+// frontend/components/documents/RequestUploadModal.tsx
+import { useState } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { useTeamMembers } from "@/hooks/useTeamMembers";
+import { apiPost } from "@/lib/api";
+import { toast } from "sonner";
+
+interface Props {
+  open: boolean;
+  onClose: () => void;
+  documentId: number;
+  suggestedFilenames: string[];
+}
+
+export function RequestUploadModal({ open, onClose, documentId, suggestedFilenames }: Props) {
+  const { teamMembers } = useTeamMembers(documentId);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const toggle = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const handleSend = async () => {
+    if (selectedIds.size === 0) return;
+    setSending(true);
+    try {
+      await apiPost(`/documents/${documentId}/request-uploads`, {
+        user_ids: Array.from(selectedIds),
+        message,
+        suggested_filenames: suggestedFilenames,
+      });
+      toast.success(`Upload request sent to ${selectedIds.size} team member(s)`);
+      onClose();
+    } catch {
+      toast.error("Failed to send request");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  // Pre-select tech leads automatically
+  useState(() => {
+    const techLeadIds = teamMembers
+      .filter((m) => m.roles?.includes("tech_lead"))
+      .map((m) => m.id);
+    setSelectedIds(new Set(techLeadIds));
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onClose}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Request Code Upload</DialogTitle>
+        </DialogHeader>
+
+        {suggestedFilenames.length > 0 && (
+          <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs">
+            <p className="font-medium text-amber-800 mb-1">Files needed:</p>
+            {suggestedFilenames.map((f) => (
+              <code key={f} className="block text-amber-700">{f}</code>
+            ))}
+          </div>
+        )}
+
+        <div className="space-y-2 max-h-48 overflow-y-auto">
+          <p className="text-xs font-medium text-gray-500">Select recipients:</p>
+          {teamMembers.map((member) => (
+            <label key={member.id} className="flex items-center gap-2 cursor-pointer py-1">
+              <Checkbox
+                checked={selectedIds.has(member.id)}
+                onCheckedChange={() => toggle(member.id)}
+              />
+              <span className="text-sm">{member.name}</span>
+              <span className="text-xs text-gray-400 ml-auto">
+                {member.roles?.join(", ")}
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <Textarea
+          placeholder="Optional: add a note for your team..."
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          rows={2}
+          className="text-sm"
+        />
+
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose} size="sm">Cancel</Button>
+          <Button
+            onClick={handleSend}
+            disabled={selectedIds.size === 0 || sending}
+            size="sm"
+          >
+            {sending ? "Sending..." : `Send to ${selectedIds.size} member(s)`}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+**New hook: `frontend/hooks/useTeamMembers.ts`**
+
+```typescript
+// frontend/hooks/useTeamMembers.ts
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+
+export function useTeamMembers(documentId: number) {
+  const { data, isLoading } = useSWR(
+    documentId ? `/documents/${documentId}/team-members` : null,
+    apiGet
+  );
+  return { teamMembers: data?.team_members ?? [], isLoading };
+}
+```
+
+**Wire the modal into the document page** — in the document detail page component, add:
+
+```tsx
+// Where FileSuggestionBanner is rendered:
+const [requestModalOpen, setRequestModalOpen] = useState(false);
+const { suggestions } = useSuggestions(documentId);
+const unfulfilledNames = suggestions.filter(s => !s.is_fulfilled).map(s => s.filename);
+
+<FileSuggestionBanner
+  documentId={documentId}
+  onRequestUpload={() => setRequestModalOpen(true)}
+/>
+
+<RequestUploadModal
+  open={requestModalOpen}
+  onClose={() => setRequestModalOpen(false)}
+  documentId={documentId}
+  suggestedFilenames={unfulfilledNames}
+/>
+```
+
+### Notification Display (Developer receives)
+
+In the developer's notification bell, the `upload_request` type notification renders as:
+
+```tsx
+// In frontend/components/notifications/NotificationItem.tsx
+// Add case for upload_request:
+case "upload_request": {
+  const { suggested_filenames, document_title, requested_by_name } = notification.details ?? {};
+  return (
+    <div className="text-sm">
+      <span className="font-medium">{requested_by_name}</span> needs you to upload{" "}
+      <span className="font-mono text-xs bg-gray-100 px-1">
+        {suggested_filenames?.join(", ") || "code files"}
+      </span>{" "}
+      for validation of <span className="font-medium">'{document_title}'</span>.
+      <a
+        href={`/documents/${notification.resource_id}`}
+        className="block mt-1 text-blue-600 text-xs hover:underline"
+      >
+        Open document →
+      </a>
+    </div>
+  );
+}
+```
+
+### Test Commands
+
+```bash
+# 1. As BA — get team members
+curl -H "Authorization: Bearer $BA_TOKEN" \
+  http://localhost:8000/api/v1/documents/1/team-members
+# Expected: list of users with roles
+
+# 2. Send upload request
+curl -X POST -H "Authorization: Bearer $BA_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8000/api/v1/documents/1/request-uploads \
+  -d '{"user_ids": [3, 5], "suggested_filenames": ["payment_service.py", "fd_service.py"],
+       "message": "Needed for sprint 12 validation"}'
+# Expected: { "notified_user_ids": [3, 5], "message": "Upload request sent to 2 user(s)" }
+
+# 3. Verify notifications created for those users
+psql -c "SELECT user_id, notification_type, title FROM notifications ORDER BY id DESC LIMIT 3"
+```
+
+### Risk Assessment
+- **Tenant isolation** — user_ids are validated against same tenant; cross-tenant notification impossible
+- **Self-notification guard** — sender excluded from valid recipients
+- **No new DB schema** — uses existing notifications table; zero migration risk
+- **Non-blocking** — notification failures are caught silently by `notify()`
+
+
+---
+
+## P5C-03 — Request Clarification Workflow (BA ↔ Developer)
+
+**Priority:** P1 — Covers BA Step 8 "ambiguous mismatch → notifies developer", which today has no mechanism.
+**Complexity:** MEDIUM — Requires new table, two endpoints, notifications both directions.
+**Risk:** LOW — New table, doesn't modify existing mismatch logic.
+
+### Why This Exists
+
+**BA Step 8:** "1 mismatch is ambiguous → click 'Request Clarification' → notifies developer."
+
+Currently the BA has only two choices: Create Jira Ticket or Mark False Positive. When a mismatch is unclear — it might be a real bug, or it might be the AI misreading the code — there is no way to ask the developer "can you check this?". The BA must step outside DokyDoc (Slack, email) to get an answer, breaking the workflow.
+
+The fix: a third mismatch action "Request Clarification" that opens a lightweight Q&A thread. The BA writes a question → developer is notified → developer writes an answer → BA is notified → BA can then act (Create Jira or Mark False Positive).
+
+### DB Changes
+
+**New table: `mismatch_clarifications`**
+
+**New migration: `backend/alembic/versions/s17b1_mismatch_clarifications.py`**
+
+```python
+# backend/alembic/versions/s17b1_mismatch_clarifications.py
+"""Add mismatch_clarifications table
+
+Revision ID: s17b1
+Revises: s17a1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's17b1'
+down_revision = 's17a1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'mismatch_clarifications',
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
+        sa.Column('mismatch_id', sa.Integer,
+                  sa.ForeignKey('mismatches.id', ondelete='CASCADE'),
+                  nullable=False, index=True),
+        # Who asked the question (BA)
+        sa.Column('requested_by_user_id', sa.Integer,
+                  sa.ForeignKey('users.id'), nullable=False),
+        # Who is expected to answer (developer/tech lead)
+        sa.Column('assignee_user_id', sa.Integer,
+                  sa.ForeignKey('users.id'), nullable=True),
+        # The question from BA
+        sa.Column('question', sa.Text, nullable=False),
+        # The answer from developer (null until answered)
+        sa.Column('answer', sa.Text, nullable=True),
+        # Lifecycle: open → answered → closed
+        sa.Column('status', sa.String(20), nullable=False, server_default='open'),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+        sa.Column('answered_at', sa.DateTime, nullable=True),
+        sa.Column('closed_at', sa.DateTime, nullable=True),
+    )
+    op.create_index('ix_mismatch_clarifications_mismatch_id', 'mismatch_clarifications', ['mismatch_id'])
+
+    # Add CHECK constraint for status
+    op.create_check_constraint(
+        'ck_clarification_status',
+        'mismatch_clarifications',
+        "status IN ('open', 'answered', 'closed')"
+    )
+
+
+def downgrade():
+    op.drop_table('mismatch_clarifications')
+```
+
+### Backend — New Model
+
+**New file: `backend/app/models/mismatch_clarification.py`**
+
+```python
+# backend/app/models/mismatch_clarification.py
+from typing import Optional
+from datetime import datetime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, CheckConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.base_class import Base
+
+if TYPE_CHECKING:
+    from .user import User
+    from .mismatch import Mismatch
+
+
+class MismatchClarification(Base):
+    """
+    A clarification request attached to a mismatch.
+    BA asks a question → developer answers → BA closes.
+    """
+    __tablename__ = "mismatch_clarifications"
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'answered', 'closed')", name="ck_clarification_status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    mismatch_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("mismatches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    requested_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    assignee_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    answered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    requester: Mapped["User"] = relationship("User", foreign_keys=[requested_by_user_id])
+    assignee: Mapped[Optional["User"]] = relationship("User", foreign_keys=[assignee_user_id])
+```
+
+**Add to `backend/app/models/__init__.py`:**
+
+```python
+from .mismatch_clarification import MismatchClarification  # noqa: F401
+```
+
+### Backend — CRUD
+
+**New file: `backend/app/crud/crud_mismatch_clarification.py`**
+
+```python
+# backend/app/crud/crud_mismatch_clarification.py
+from datetime import datetime
+from sqlalchemy.orm import Session
+from app.models.mismatch_clarification import MismatchClarification
+
+
+class CRUDMismatchClarification:
+
+    def create(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        mismatch_id: int,
+        requested_by_user_id: int,
+        assignee_user_id: int | None,
+        question: str,
+    ) -> MismatchClarification:
+        if len(question.strip()) < 10:
+            raise ValueError("Question must be at least 10 characters")
+        obj = MismatchClarification(
+            tenant_id=tenant_id,
+            mismatch_id=mismatch_id,
+            requested_by_user_id=requested_by_user_id,
+            assignee_user_id=assignee_user_id,
+            question=question.strip(),
+            status="open",
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    def answer(
+        self,
+        db: Session,
+        *,
+        clarification_id: int,
+        tenant_id: int,
+        answering_user_id: int,
+        answer: str,
+    ) -> MismatchClarification:
+        obj = db.query(MismatchClarification).filter(
+            MismatchClarification.id == clarification_id,
+            MismatchClarification.tenant_id == tenant_id,
+            MismatchClarification.status == "open",
+        ).first()
+        if not obj:
+            raise ValueError("Clarification not found or already answered")
+        if len(answer.strip()) < 5:
+            raise ValueError("Answer must be at least 5 characters")
+        obj.answer = answer.strip()
+        obj.status = "answered"
+        obj.answered_at = datetime.utcnow()
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    def close(
+        self,
+        db: Session,
+        *,
+        clarification_id: int,
+        tenant_id: int,
+        closing_user_id: int,
+    ) -> MismatchClarification:
+        obj = db.query(MismatchClarification).filter(
+            MismatchClarification.id == clarification_id,
+            MismatchClarification.tenant_id == tenant_id,
+        ).first()
+        if not obj:
+            raise ValueError("Clarification not found")
+        obj.status = "closed"
+        obj.closed_at = datetime.utcnow()
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    def get_by_mismatch(
+        self,
+        db: Session,
+        *,
+        mismatch_id: int,
+        tenant_id: int,
+    ) -> list[MismatchClarification]:
+        return db.query(MismatchClarification).filter(
+            MismatchClarification.mismatch_id == mismatch_id,
+            MismatchClarification.tenant_id == tenant_id,
+        ).order_by(MismatchClarification.created_at.asc()).all()
+
+
+crud_mismatch_clarification = CRUDMismatchClarification()
+```
+
+### Backend — API Endpoints
+
+**Add to `backend/app/api/endpoints/validation.py`:**
+
+```python
+from app.crud.crud_mismatch_clarification import crud_mismatch_clarification
+from app.models.mismatch_clarification import MismatchClarification
+
+
+class ClarificationRequest(BaseModel):
+    question: str                          # min 10 chars
+    assignee_user_id: Optional[int] = None  # developer/tech lead to notify
+
+
+class ClarificationAnswer(BaseModel):
+    answer: str                            # min 5 chars
+
+
+# POST /validation/mismatches/{id}/clarification
+@router.post("/mismatches/{mismatch_id}/clarification", status_code=201)
+def request_clarification(
+    mismatch_id: int,
+    body: ClarificationRequest,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    BA requests clarification from developer on an ambiguous mismatch.
+    Creates a clarification record and notifies the assignee.
+    """
+    from app.services.notification_service import notify
+    from app.models.mismatch import Mismatch
+
+    mismatch = db.query(Mismatch).filter(
+        Mismatch.id == mismatch_id,
+        Mismatch.tenant_id == current_user.tenant_id,
+    ).first()
+    if not mismatch:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    try:
+        clarification = crud_mismatch_clarification.create(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            mismatch_id=mismatch_id,
+            requested_by_user_id=current_user.id,
+            assignee_user_id=body.assignee_user_id,
+            question=body.question,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # Notify the assignee if specified; otherwise notify code component owner
+    notify_user_id = body.assignee_user_id or mismatch.owner_id
+    if notify_user_id:
+        notify(
+            db=db,
+            tenant_id=current_user.tenant_id,
+            user_id=notify_user_id,
+            notification_type="clarification_requested",
+            title=f"Clarification requested on mismatch #{mismatch_id}",
+            message=(
+                f"{current_user.full_name or current_user.email} has a question: "
+                f"{body.question[:200]}"
+            ),
+            resource_type="mismatch",
+            resource_id=mismatch_id,
+            details={
+                "clarification_id": clarification.id,
+                "question": body.question,
+                "requested_by": current_user.email,
+            },
+        )
+
+    return {
+        "clarification_id": clarification.id,
+        "status": "open",
+        "message": "Clarification request created and developer notified",
+    }
+
+
+# POST /validation/mismatches/{id}/clarification/{cid}/answer
+@router.post("/mismatches/{mismatch_id}/clarification/{clarification_id}/answer")
+def answer_clarification(
+    mismatch_id: int,
+    clarification_id: int,
+    body: ClarificationAnswer,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Developer answers a clarification question. Notifies the BA who asked.
+    """
+    from app.services.notification_service import notify
+
+    try:
+        clarification = crud_mismatch_clarification.answer(
+            db=db,
+            clarification_id=clarification_id,
+            tenant_id=current_user.tenant_id,
+            answering_user_id=current_user.id,
+            answer=body.answer,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # Notify the BA who asked
+    notify(
+        db=db,
+        tenant_id=current_user.tenant_id,
+        user_id=clarification.requested_by_user_id,
+        notification_type="clarification_answered",
+        title=f"Clarification answered on mismatch #{mismatch_id}",
+        message=(
+            f"{current_user.full_name or current_user.email} answered: "
+            f"{body.answer[:200]}"
+        ),
+        resource_type="mismatch",
+        resource_id=mismatch_id,
+        details={
+            "clarification_id": clarification.id,
+            "answer": body.answer,
+            "answered_by": current_user.email,
+        },
+    )
+
+    return {
+        "clarification_id": clarification.id,
+        "status": "answered",
+        "answer": clarification.answer,
+    }
+
+
+# GET /validation/mismatches/{id}/clarifications
+@router.get("/mismatches/{mismatch_id}/clarifications")
+def get_clarifications(
+    mismatch_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """Return all clarification threads for a mismatch."""
+    items = crud_mismatch_clarification.get_by_mismatch(
+        db=db,
+        mismatch_id=mismatch_id,
+        tenant_id=current_user.tenant_id,
+    )
+    return {
+        "mismatch_id": mismatch_id,
+        "clarifications": [
+            {
+                "id": c.id,
+                "question": c.question,
+                "answer": c.answer,
+                "status": c.status,
+                "requested_by_user_id": c.requested_by_user_id,
+                "assignee_user_id": c.assignee_user_id,
+                "created_at": c.created_at.isoformat(),
+                "answered_at": c.answered_at.isoformat() if c.answered_at else None,
+            }
+            for c in items
+        ],
+    }
+```
+
+### Frontend — Clarification Panel on Mismatch Card
+
+**New file: `frontend/components/validation/MismatchClarificationPanel.tsx`**
+
+```tsx
+// frontend/components/validation/MismatchClarificationPanel.tsx
+import { useState } from "react";
+import { MessageSquare, Send, CheckCircle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { useClarifications } from "@/hooks/useClarifications";
+import { apiPost } from "@/lib/api";
+import { toast } from "sonner";
+
+interface Props {
+  mismatchId: number;
+  teamMembers: { id: number; name: string; roles: string[] }[];
+}
+
+export function MismatchClarificationPanel({ mismatchId, teamMembers }: Props) {
+  const { clarifications, mutate } = useClarifications(mismatchId);
+  const [open, setOpen] = useState(false);
+  const [question, setQuestion] = useState("");
+  const [assigneeId, setAssigneeId] = useState<number | null>(null);
+  const [sending, setSending] = useState(false);
+
+  const handleAsk = async () => {
+    if (question.trim().length < 10) {
+      toast.error("Question must be at least 10 characters");
+      return;
+    }
+    setSending(true);
+    try {
+      await apiPost(`/validation/mismatches/${mismatchId}/clarification`, {
+        question,
+        assignee_user_id: assigneeId,
+      });
+      toast.success("Clarification request sent");
+      setQuestion("");
+      setOpen(false);
+      mutate();
+    } catch {
+      toast.error("Failed to send clarification request");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const openCount = clarifications.filter((c) => c.status === "open").length;
+
+  return (
+    <div className="border-t pt-3 mt-3">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
+      >
+        <MessageSquare className="h-4 w-4" />
+        Request Clarification
+        {openCount > 0 && (
+          <span className="ml-1 px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">
+            {openCount} open
+          </span>
+        )}
+      </button>
+
+      {/* Existing clarification threads */}
+      {clarifications.map((c) => (
+        <div key={c.id} className="mt-3 rounded-md border border-gray-200 p-3 text-xs space-y-2">
+          <div className="flex items-start gap-2">
+            <MessageSquare className="h-3.5 w-3.5 text-blue-500 mt-0.5" />
+            <div>
+              <span className="font-medium text-gray-700">Question: </span>
+              <span className="text-gray-600">{c.question}</span>
+            </div>
+          </div>
+          {c.answer ? (
+            <div className="flex items-start gap-2 pl-4">
+              <CheckCircle className="h-3.5 w-3.5 text-green-500 mt-0.5" />
+              <div>
+                <span className="font-medium text-gray-700">Answer: </span>
+                <span className="text-gray-600">{c.answer}</span>
+              </div>
+            </div>
+          ) : (
+            <p className="pl-4 text-gray-400 italic">Awaiting developer response...</p>
+          )}
+          <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-medium ${
+            c.status === "answered" ? "bg-green-100 text-green-700" :
+            c.status === "open" ? "bg-blue-100 text-blue-700" :
+            "bg-gray-100 text-gray-500"
+          }`}>
+            {c.status}
+          </span>
+        </div>
+      ))}
+
+      {/* New question form */}
+      {open && (
+        <div className="mt-3 space-y-2">
+          <select
+            value={assigneeId ?? ""}
+            onChange={(e) => setAssigneeId(e.target.value ? Number(e.target.value) : null)}
+            className="w-full text-xs border rounded p-1.5"
+          >
+            <option value="">— Select developer to notify —</option>
+            {teamMembers.map((m) => (
+              <option key={m.id} value={m.id}>{m.name} ({m.roles?.join(", ")})</option>
+            ))}
+          </select>
+          <Textarea
+            placeholder="What do you need clarified? (min 10 chars)"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            rows={3}
+            className="text-xs"
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button size="sm" onClick={handleAsk} disabled={sending}>
+              <Send className="h-3.5 w-3.5 mr-1" />
+              {sending ? "Sending..." : "Ask Developer"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**New hook: `frontend/hooks/useClarifications.ts`**
+
+```typescript
+// frontend/hooks/useClarifications.ts
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+
+export function useClarifications(mismatchId: number) {
+  const { data, isLoading, mutate } = useSWR(
+    mismatchId ? `/validation/mismatches/${mismatchId}/clarifications` : null,
+    apiGet
+  );
+  return {
+    clarifications: data?.clarifications ?? [],
+    isLoading,
+    mutate,
+  };
+}
+```
+
+**Wire into mismatch card** — in whatever component renders a mismatch card, add at the bottom alongside the False Positive and Create Jira buttons:
+
+```tsx
+<MismatchClarificationPanel
+  mismatchId={mismatch.id}
+  teamMembers={teamMembers}
+/>
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s17b1
+
+# 2. Verify table
+psql -c "\d mismatch_clarifications"
+
+# 3. Create clarification as BA
+curl -X POST -H "Authorization: Bearer $BA_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8000/api/v1/validation/mismatches/5/clarification \
+  -d '{"question": "Is the FD rate calculated before or after tax?", "assignee_user_id": 3}'
+# Expected: { "clarification_id": 1, "status": "open" }
+
+# 4. Verify notification sent to developer
+psql -c "SELECT notification_type, title, user_id FROM notifications ORDER BY id DESC LIMIT 1"
+
+# 5. Developer answers
+curl -X POST -H "Authorization: Bearer $DEV_TOKEN" \
+  http://localhost:8000/api/v1/validation/mismatches/5/clarification/1/answer \
+  -d '{"answer": "The rate is pre-tax; post-tax calculation is in the tax_service.py"}'
+# Expected: { "status": "answered" }
+
+# 6. Verify BA gets notified
+psql -c "SELECT notification_type, user_id FROM notifications ORDER BY id DESC LIMIT 1"
+
+# 7. Fetch all clarifications
+curl -H "Authorization: Bearer $BA_TOKEN" \
+  http://localhost:8000/api/v1/validation/mismatches/5/clarifications
+```
+
+### Risk Assessment
+- **Cascade delete** — `ON DELETE CASCADE` on `mismatch_id` FK; clarifications auto-deleted if mismatch removed
+- **Status CHECK constraint** — enforced at DB layer; prevents invalid status values
+- **Minimum length validation** — question ≥10 chars, answer ≥5 chars enforced in CRUD
+- **Assignee validation** — assignee_user_id is optional; defaults to mismatch owner_id if unset
+- **Notification failure** — `notify()` is already wrapped in try/except; never blocks the main action
+
+
+---
+
+## P5C-04 — UAT Checklist Auto-generation + QA Sign-off
+
+**Priority:** P1 — Covers BA Steps 11-12 and QA Steps 7-8. Without this, "manual UAT" has no tracking surface inside DokyDoc.
+**Complexity:** MEDIUM — New table, classification logic in atomization prompt, new UI tab.
+**Risk:** LOW — Additive; doesn't change validation engine.
+
+### Why This Exists
+
+**BA Step 11:** "Opens UAT checklist (auto-generated from atoms)."
+**BA Step 12:** "Does UAT on the 9 behavioral requirements DokyDoc couldn't verify."
+**QA Step 7:** "Focuses manual effort on behavioral tests, UX, edge cases (the 9 atoms DokyDoc couldn't auto-test)."
+**QA Step 8:** "Signs off each manual check in DokyDoc UAT checklist."
+
+DokyDoc can auto-validate API contracts, DB values, and business rules. But some requirements — user experience flows, behavioral edge cases, performance under real load — need a human. There is currently no way to:
+1. Know WHICH atoms need manual testing
+2. Track whether manual testing was done
+3. Close the loop between QA sign-off and BRD compliance
+
+The fix: atoms get a `testability` field (`static` / `runtime` / `manual`) assigned during atomization. A UAT checklist is auto-generated from `manual` atoms. QA or BA checks them off with notes. This data feeds into the compliance score.
+
+### DB Changes
+
+The `testability` column on `requirement_atoms` was already added in migration `s17a1` (P5C-01).
+
+**New table: `uat_checklist_items`**
+
+**New migration: `backend/alembic/versions/s17c1_uat_checklist.py`**
+
+```python
+# backend/alembic/versions/s17c1_uat_checklist.py
+"""Add uat_checklist_items table
+
+Revision ID: s17c1
+Revises: s17b1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's17c1'
+down_revision = 's17b1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'uat_checklist_items',
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
+        sa.Column('document_id', sa.Integer,
+                  sa.ForeignKey('documents.id', ondelete='CASCADE'),
+                  nullable=False, index=True),
+        # The atom this checklist item tests
+        sa.Column('atom_id', sa.Integer,
+                  sa.ForeignKey('requirement_atoms.id', ondelete='CASCADE'),
+                  nullable=False),
+        # Who completed this manual check (null = not yet checked)
+        sa.Column('checked_by_user_id', sa.Integer,
+                  sa.ForeignKey('users.id'), nullable=True),
+        sa.Column('checked_at', sa.DateTime, nullable=True),
+        # QA/BA notes about how they tested it and what they found
+        sa.Column('notes', sa.Text, nullable=True),
+        # Result: pass / fail / blocked
+        sa.Column('result', sa.String(20), nullable=True),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index('ix_uat_checklist_document_id', 'uat_checklist_items', ['document_id'])
+    op.create_check_constraint(
+        'ck_uat_result',
+        'uat_checklist_items',
+        "result IS NULL OR result IN ('pass', 'fail', 'blocked')"
+    )
+
+
+def downgrade():
+    op.drop_table('uat_checklist_items')
+```
+
+### Backend — New Model
+
+**New file: `backend/app/models/uat_checklist_item.py`**
+
+```python
+# backend/app/models/uat_checklist_item.py
+from typing import Optional
+from datetime import datetime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, CheckConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.base_class import Base
+
+
+class UATChecklistItem(Base):
+    """
+    One manual UAT test item, linked to a 'manual' testability atom.
+    Created automatically after atomization. QA/BA checks off with result + notes.
+    """
+    __tablename__ = "uat_checklist_items"
+    __table_args__ = (
+        CheckConstraint(
+            "result IS NULL OR result IN ('pass', 'fail', 'blocked')",
+            name="ck_uat_result"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    atom_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("requirement_atoms.id", ondelete="CASCADE"), nullable=False
+    )
+    checked_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    atom: Mapped["RequirementAtom"] = relationship("RequirementAtom")
+```
+
+**Add to `backend/app/models/__init__.py`:**
+
+```python
+from .uat_checklist_item import UATChecklistItem  # noqa: F401
+```
+
+### Backend — Testability Classification in Atomization Prompt
+
+**In `backend/app/services/ai/gemini.py`**, in `call_gemini_for_atomization`, the atomization JSON schema gains a new field:
+
+**Current schema returned per atom:**
+```json
+{ "atom_id": "REQ-001", "atom_type": "...", "content": "...", "criticality": "..." }
+```
+
+**Updated schema (add `testability` field to the prompt instruction):**
+
+```python
+# In the atomization prompt, add this to the atom extraction instruction:
+_ATOMIZATION_TESTABILITY_INSTRUCTION = """
+For each atom, also set the "testability" field:
+- "static": Can be verified by reading code (API contracts, DB values, calculations, field validations,
+  class existence, method signatures, constants). DokyDoc can auto-validate these.
+- "runtime": Requires executing the code (response time, memory usage, concurrent user load,
+  retry behavior, timeout handling). Can be validated by automated integration/load tests.
+- "manual": Requires human judgment (UX workflows, user experience quality, accessibility,
+  visual design, business process correctness that depends on real-world context,
+  edge cases with ambiguous expected output). DokyDoc CANNOT auto-validate these.
+
+Classify conservatively: if in doubt whether static validation would catch it, classify as "manual".
+"""
+```
+
+**In `create_atoms_bulk` in `backend/app/crud/crud_requirement_atom.py`**, accept `testability` underscore key:
+
+```python
+# Current line handles _atom_type, _criticality etc. Add:
+atom_obj.testability = atom_data.get("_testability") or atom_data.get("testability") or "manual"
+```
+
+### Backend — Auto-create Checklist After Atomization
+
+**In `backend/app/tasks/document_pipeline.py`**, after `file_suggestion_service.generate_and_store()` (P5C-01 hook), add:
+
+```python
+# PHASE 5C: Auto-create UAT checklist for manual-testability atoms
+try:
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.uat_checklist_item import UATChecklistItem
+
+    # Delete stale checklist items for this document
+    db.query(UATChecklistItem).filter_by(
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+    ).delete()
+
+    manual_atoms = db.query(RequirementAtom).filter(
+        RequirementAtom.document_id == document.id,
+        RequirementAtom.tenant_id == document.tenant_id,
+        RequirementAtom.testability == "manual",
+    ).all()
+
+    for atom in manual_atoms:
+        db.add(UATChecklistItem(
+            tenant_id=document.tenant_id,
+            document_id=document.id,
+            atom_id=atom.id,
+        ))
+    db.commit()
+    logger.info(f"Created {len(manual_atoms)} UAT checklist items for document {document.id}")
+except Exception as e:
+    logger.warning(f"UAT checklist creation failed (non-fatal): {e}")
+```
+
+### Backend — API Endpoints
+
+**Add to `backend/app/api/endpoints/validation.py`:**
+
+```python
+from app.models.uat_checklist_item import UATChecklistItem
+from app.models.requirement_atom import RequirementAtom
+
+
+class UATCheckBody(BaseModel):
+    result: str               # "pass" | "fail" | "blocked"
+    notes: Optional[str] = None
+
+
+# GET /validation/{document_id}/uat-checklist
+@router.get("/{document_id}/uat-checklist")
+def get_uat_checklist(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return all UAT checklist items for a document (manual-testability atoms only).
+    Shows which have been checked and which are still pending.
+    """
+    items = (
+        db.query(UATChecklistItem, RequirementAtom)
+        .join(RequirementAtom, UATChecklistItem.atom_id == RequirementAtom.id)
+        .filter(
+            UATChecklistItem.document_id == document_id,
+            UATChecklistItem.tenant_id == current_user.tenant_id,
+        )
+        .all()
+    )
+
+    total = len(items)
+    checked = sum(1 for item, _ in items if item.result is not None)
+    passed = sum(1 for item, _ in items if item.result == "pass")
+    failed = sum(1 for item, _ in items if item.result == "fail")
+
+    return {
+        "document_id": document_id,
+        "summary": {
+            "total": total,
+            "checked": checked,
+            "pending": total - checked,
+            "passed": passed,
+            "failed": failed,
+            "completion_pct": round(checked / total * 100) if total > 0 else 0,
+        },
+        "items": [
+            {
+                "id": item.id,
+                "atom_id": atom.atom_id,
+                "atom_type": atom.atom_type,
+                "content": atom.content,
+                "criticality": atom.criticality,
+                "result": item.result,
+                "notes": item.notes,
+                "checked_by_user_id": item.checked_by_user_id,
+                "checked_at": item.checked_at.isoformat() if item.checked_at else None,
+            }
+            for item, atom in items
+        ],
+    }
+
+
+# POST /validation/{document_id}/uat-checklist/{item_id}/check
+@router.post("/{document_id}/uat-checklist/{item_id}/check")
+def check_uat_item(
+    document_id: int,
+    item_id: int,
+    body: UATCheckBody,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    BA or QA marks a UAT checklist item as pass/fail/blocked with notes.
+    """
+    if body.result not in ("pass", "fail", "blocked"):
+        raise HTTPException(status_code=422, detail="result must be pass, fail, or blocked")
+
+    item = db.query(UATChecklistItem).filter(
+        UATChecklistItem.id == item_id,
+        UATChecklistItem.document_id == document_id,
+        UATChecklistItem.tenant_id == current_user.tenant_id,
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="UAT checklist item not found")
+
+    item.result = body.result
+    item.notes = body.notes
+    item.checked_by_user_id = current_user.id
+    item.checked_at = datetime.utcnow()
+    db.add(item)
+    db.commit()
+
+    return {
+        "id": item_id,
+        "result": body.result,
+        "checked_at": item.checked_at.isoformat(),
+        "message": f"UAT item marked as {body.result}",
+    }
+```
+
+### Frontend — UAT Checklist Tab on Validation Panel
+
+**New file: `frontend/components/validation/UATChecklist.tsx`**
+
+```tsx
+// frontend/components/validation/UATChecklist.tsx
+import { useState } from "react";
+import { CheckCircle, XCircle, MinusCircle, Clock } from "lucide-react";
+import { useUATChecklist } from "@/hooks/useUATChecklist";
+import { apiPost } from "@/lib/api";
+import { toast } from "sonner";
+
+const RESULT_CONFIG = {
+  pass: { icon: CheckCircle, color: "text-green-600", bg: "bg-green-50", label: "Pass" },
+  fail: { icon: XCircle, color: "text-red-600", bg: "bg-red-50", label: "Fail" },
+  blocked: { icon: MinusCircle, color: "text-amber-600", bg: "bg-amber-50", label: "Blocked" },
+};
+
+interface Props {
+  documentId: number;
+}
+
+export function UATChecklist({ documentId }: Props) {
+  const { checklist, isLoading, mutate } = useUATChecklist(documentId);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [notes, setNotes] = useState<Record<number, string>>({});
+
+  const handleCheck = async (itemId: number, result: "pass" | "fail" | "blocked") => {
+    try {
+      await apiPost(`/validation/${documentId}/uat-checklist/${itemId}/check`, {
+        result,
+        notes: notes[itemId] || null,
+      });
+      toast.success(`Marked as ${result}`);
+      mutate();
+    } catch {
+      toast.error("Failed to update UAT item");
+    }
+  };
+
+  if (isLoading) return <div className="text-sm text-gray-400 p-4">Loading UAT checklist...</div>;
+
+  const { summary, items } = checklist;
+
+  return (
+    <div className="space-y-4">
+      {/* Summary bar */}
+      <div className="grid grid-cols-4 gap-3">
+        {[
+          { label: "Total", value: summary?.total, color: "text-gray-700" },
+          { label: "Pending", value: summary?.pending, color: "text-amber-600" },
+          { label: "Passed", value: summary?.passed, color: "text-green-600" },
+          { label: "Failed", value: summary?.failed, color: "text-red-600" },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="text-center rounded-lg border p-3">
+            <div className={`text-2xl font-bold ${color}`}>{value ?? 0}</div>
+            <div className="text-xs text-gray-500">{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Progress bar */}
+      <div className="space-y-1">
+        <div className="flex justify-between text-xs text-gray-500">
+          <span>UAT Progress</span>
+          <span>{summary?.completion_pct ?? 0}% complete</span>
+        </div>
+        <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-green-500 rounded-full transition-all"
+            style={{ width: `${summary?.completion_pct ?? 0}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Checklist items */}
+      <div className="space-y-2">
+        {items?.map((item) => (
+          <div
+            key={item.id}
+            className={`border rounded-lg p-3 cursor-pointer hover:bg-gray-50 transition-colors ${
+              item.result ? RESULT_CONFIG[item.result as keyof typeof RESULT_CONFIG].bg : ""
+            }`}
+            onClick={() => setExpanded(expanded === item.id ? null : item.id)}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2 min-w-0">
+                {item.result ? (
+                  (() => {
+                    const cfg = RESULT_CONFIG[item.result as keyof typeof RESULT_CONFIG];
+                    return <cfg.icon className={`h-4 w-4 mt-0.5 flex-shrink-0 ${cfg.color}`} />;
+                  })()
+                ) : (
+                  <Clock className="h-4 w-4 mt-0.5 text-gray-400 flex-shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-mono text-gray-500">{item.atom_id}</span>
+                    <span className="text-xs px-1.5 py-0.5 bg-gray-100 rounded">{item.atom_type}</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      item.criticality === "critical" ? "bg-red-100 text-red-700" :
+                      item.criticality === "high" ? "bg-orange-100 text-orange-700" :
+                      "bg-gray-100 text-gray-600"
+                    }`}>
+                      {item.criticality}
+                    </span>
+                  </div>
+                  <p className="text-sm text-gray-700 mt-1 line-clamp-2">{item.content}</p>
+                </div>
+              </div>
+            </div>
+
+            {expanded === item.id && (
+              <div className="mt-3 pt-3 border-t space-y-2" onClick={(e) => e.stopPropagation()}>
+                <textarea
+                  placeholder="Testing notes (optional)..."
+                  value={notes[item.id] || item.notes || ""}
+                  onChange={(e) => setNotes((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                  className="w-full text-xs border rounded p-2 h-16 resize-none"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleCheck(item.id, "pass")}
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+                  >
+                    <CheckCircle className="h-3.5 w-3.5" /> Pass
+                  </button>
+                  <button
+                    onClick={() => handleCheck(item.id, "fail")}
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-red-600 text-white text-xs rounded hover:bg-red-700"
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> Fail
+                  </button>
+                  <button
+                    onClick={() => handleCheck(item.id, "blocked")}
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-amber-500 text-white text-xs rounded hover:bg-amber-600"
+                  >
+                    <MinusCircle className="h-3.5 w-3.5" /> Blocked
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+**New hook: `frontend/hooks/useUATChecklist.ts`**
+
+```typescript
+// frontend/hooks/useUATChecklist.ts
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+
+export function useUATChecklist(documentId: number) {
+  const { data, isLoading, mutate } = useSWR(
+    documentId ? `/validation/${documentId}/uat-checklist` : null,
+    apiGet
+  );
+  return { checklist: data ?? { summary: {}, items: [] }, isLoading, mutate };
+}
+```
+
+**Wire UAT Checklist as a tab on the validation panel** — in the validation panel component, add:
+
+```tsx
+// In the tab list (alongside "Mismatches", "Coverage Matrix"):
+<TabsTrigger value="uat">
+  UAT Checklist
+  {checklist.summary?.pending > 0 && (
+    <span className="ml-1 px-1.5 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">
+      {checklist.summary.pending}
+    </span>
+  )}
+</TabsTrigger>
+
+// In the tab content:
+<TabsContent value="uat">
+  <UATChecklist documentId={documentId} />
+</TabsContent>
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s17c1
+
+# 2. Verify table
+psql -c "\d uat_checklist_items"
+psql -c "\d requirement_atoms" | grep testability
+
+# 3. After uploading a BRD document, check testability was assigned
+psql -c "SELECT atom_id, atom_type, testability FROM requirement_atoms WHERE document_id=1 LIMIT 10"
+
+# 4. Check UAT checklist items were auto-created
+psql -c "SELECT COUNT(*) FROM uat_checklist_items WHERE document_id=1"
+
+# 5. Test API
+curl -H "Authorization: Bearer $QA_TOKEN" \
+  http://localhost:8000/api/v1/validation/1/uat-checklist
+# Expected: { "summary": { "total": 9, "pending": 9, "passed": 0 }, "items": [...] }
+
+# 6. Check off an item
+curl -X POST -H "Authorization: Bearer $QA_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8000/api/v1/validation/1/uat-checklist/3/check \
+  -d '{"result": "pass", "notes": "Tested manually on staging, works correctly"}'
+# Expected: { "result": "pass", "checked_at": "..." }
+
+# 7. Verify completion percentage updated
+curl -H "Authorization: Bearer $QA_TOKEN" \
+  http://localhost:8000/api/v1/validation/1/uat-checklist | jq .summary
+```
+
+### Risk Assessment
+- **Re-atomization safe** — checklist items are deleted + recreated on each atomization
+- **Cascade delete** — `ON DELETE CASCADE` on both `document_id` and `atom_id` FKs
+- **Result CHECK constraint** — enforced at DB layer (`pass / fail / blocked` only)
+- **Testability default** — atoms without `testability` field default to `"manual"` (conservative)
+- **Sign-off integration** — P5B-12 BA sign-off can optionally check if UAT checklist is 100% complete before allowing sign-off (extend the pre-check in P5B-12's sign-off endpoint)
+
+
+---
+
+## P5C-05 — Auto-generated Test Suite Download
+
+**Priority:** P1 — Covers QA Steps 3-4: "Downloads generated test suite and drops into CI pipeline."
+**Complexity:** HIGH — Gemini generates code (pytest files) rather than JSON; requires zip packaging.
+**Risk:** MEDIUM — Generated tests are advisory; QA reviews before running. No production DB writes.
+
+### Why This Exists
+
+**QA Step 3:** "Downloads generated test suite: `test_fd_contract.py`, `test_fd_integration.py`, `test_fd_values.py`."
+**QA Step 4:** "Drops test files into CI pipeline (GitHub Actions)."
+
+Currently QA must write all tests by hand. Each BRD atom that is `testability = "static"` or `"runtime"` can have a pytest test generated from it automatically. This saves QA significant time for contract tests (does the endpoint exist? does it return the right status? does the field accept/reject edge case values?).
+
+The feature: QA clicks "Generate Test Suite" on the validation panel → Gemini generates one pytest test function per atom → DokyDoc packages them into a `.zip` → QA downloads.
+
+### No New DB Changes
+
+No new table needed. Uses existing:
+- `requirement_atoms` (with `testability` field from P5C-01/P5C-04)
+- `documents` (for document context)
+
+One JSONB field added to documents for caching generated tests:
+
+```python
+# Add to existing s17a1 migration OR add a column directly:
+# documents.last_test_suite_generated_at  (DateTime, nullable)
+# Store generated test content as a Celery task artifact; don't store in DB (too large)
+```
+
+No migration needed beyond s17a1's `testability` column. The test generation is stateless — triggered on demand, result returned as a file download.
+
+### Backend — Gemini Prompt for Test Generation
+
+**Add to `backend/app/services/ai/gemini.py`:**
+
+```python
+_TEST_GENERATION_PROMPT_TEMPLATE = """
+You are a senior Python QA engineer. Generate a pytest test function for the following BRD requirement atom.
+
+ATOM:
+  ID: {atom_id}
+  Type: {atom_type}
+  Content: {content}
+  Criticality: {criticality}
+  Testability: {testability}
+
+GUIDELINES BY ATOM TYPE:
+- API_CONTRACT: Test the HTTP endpoint exists, returns correct status code, and validates response schema.
+  Use httpx or requests. Mock authentication. Assert response fields.
+- BUSINESS_RULE: Test the calculation/condition with valid and boundary inputs. Pure function tests.
+  Include happy path, edge cases (min/max values), and invalid inputs.
+- DATA_CONSTRAINT: Test field validation — valid values pass, invalid values fail (400 or validation error).
+- FUNCTIONAL_REQUIREMENT: Test that the system capability exists and produces expected output.
+- ERROR_SCENARIO: Test that the error case is handled correctly — verify error code and message.
+- INTEGRATION_POINT: Test the integration call is made with correct parameters (use mocks/patches).
+- SECURITY_REQUIREMENT: Test that unauthorized access returns 401/403. Test that sensitive data is not exposed.
+- NFR: Test performance — use time.time() to assert operation completes within the SLA.
+- WORKFLOW_STEP: Test that the workflow step transitions correctly (mock external dependencies).
+
+RULES:
+1. Generate EXACTLY ONE pytest function named test_{atom_id_snake}_{short_description}
+2. Include clear ARRANGE/ACT/ASSERT comments
+3. If HTTP endpoint test: use BASE_URL env var: BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000")
+4. Include realistic test data based on the BRD content
+5. Add a docstring quoting the original BRD requirement
+6. For "runtime" testability: add a pytest.mark.integration marker
+7. DO NOT import from the source code directly — test via HTTP or public interface
+8. Keep the function under 50 lines
+
+Return ONLY the Python code for the test function, no markdown fences.
+"""
+
+
+async def call_gemini_for_test_generation(
+    atom: dict,
+    model: str = "gemini-2.0-flash",
+) -> str:
+    """
+    Generate a pytest test function for a single BRD atom.
+    Returns raw Python code string.
+    """
+    import google.generativeai as genai
+    from app.core.config import settings
+
+    prompt = _TEST_GENERATION_PROMPT_TEMPLATE.format(
+        atom_id=atom["atom_id"],
+        atom_type=atom["atom_type"],
+        content=atom["content"],
+        criticality=atom.get("criticality", "standard"),
+        testability=atom.get("testability", "static"),
+    )
+
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel(model)
+    response = model_client.generate_content(
+        prompt,
+        generation_config={"temperature": 0.2},
+    )
+    return response.text.strip()
+```
+
+### Backend — Test Suite Generation Service
+
+**New file: `backend/app/services/test_suite_service.py`**
+
+```python
+# backend/app/services/test_suite_service.py
+"""
+TestSuiteService — generates downloadable pytest test files from BRD atoms.
+
+Atoms classified as "static" or "runtime" testability get test functions.
+Tests are grouped into files by atom_type and returned as an in-memory zip.
+"""
+import io
+import zipfile
+from sqlalchemy.orm import Session
+from app.core.logging import get_logger
+from app.models.requirement_atom import RequirementAtom
+
+logger = get_logger("test_suite_service")
+
+# Group atom types into test files
+_FILE_GROUPS = {
+    "test_contracts.py": ["API_CONTRACT", "INTEGRATION_POINT"],
+    "test_business_rules.py": ["BUSINESS_RULE", "DATA_CONSTRAINT"],
+    "test_functional.py": ["FUNCTIONAL_REQUIREMENT", "WORKFLOW_STEP"],
+    "test_security.py": ["SECURITY_REQUIREMENT"],
+    "test_error_handling.py": ["ERROR_SCENARIO"],
+    "test_nfr.py": ["NFR"],
+}
+
+_FILE_HEADER = '''"""
+Auto-generated test suite by DokyDoc.
+Document: {doc_title}
+Generated: {generated_at}
+WARNING: Review before running. These tests are AI-generated from BRD requirements.
+"""
+import os
+import time
+import pytest
+import httpx
+
+BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000")
+AUTH_TOKEN = os.getenv("TEST_AUTH_TOKEN", "")
+
+HEADERS = {{"Authorization": f"Bearer {{AUTH_TOKEN}}"}}
+'''
+
+
+class TestSuiteService:
+
+    async def generate_zip(
+        self,
+        db: Session,
+        *,
+        document_id: int,
+        tenant_id: int,
+        doc_title: str,
+    ) -> bytes:
+        """
+        Generate all test files and return as a zip bytes object.
+        """
+        from app.services.ai.gemini import call_gemini_for_test_generation
+        from datetime import datetime
+
+        atoms = db.query(RequirementAtom).filter(
+            RequirementAtom.document_id == document_id,
+            RequirementAtom.tenant_id == tenant_id,
+            RequirementAtom.testability.in_(["static", "runtime"]),
+        ).all()
+
+        if not atoms:
+            # Return a zip with a README explaining no testable atoms found
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("README.txt", "No auto-testable atoms found in this document.")
+            return buf.getvalue()
+
+        # Map atom_type → file group
+        type_to_file = {}
+        for filename, types in _FILE_GROUPS.items():
+            for t in types:
+                type_to_file[t] = filename
+
+        # Generate test function for each atom
+        file_contents: dict[str, list[str]] = {k: [] for k in _FILE_GROUPS}
+        generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+        for atom in atoms:
+            target_file = type_to_file.get(atom.atom_type, "test_functional.py")
+            try:
+                test_code = await call_gemini_for_test_generation({
+                    "atom_id": atom.atom_id,
+                    "atom_type": atom.atom_type,
+                    "content": atom.content,
+                    "criticality": atom.criticality,
+                    "testability": atom.testability or "static",
+                })
+                file_contents[target_file].append(f"\n\n{test_code}")
+            except Exception as e:
+                logger.warning(f"Test generation failed for atom {atom.atom_id}: {e}")
+                # Write a placeholder test
+                snake = atom.atom_id.lower().replace("-", "_")
+                file_contents[target_file].append(
+                    f'\n\n@pytest.mark.skip(reason="AI generation failed")\n'
+                    f'def test_{snake}_placeholder():\n'
+                    f'    """BRD requirement: {atom.content[:100]}..."""\n'
+                    f'    pass\n'
+                )
+
+        # Build zip
+        buf = io.BytesIO()
+        header_fmt = _FILE_HEADER.format(doc_title=doc_title, generated_at=generated_at)
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for filename, functions in file_contents.items():
+                if not functions:
+                    continue
+                content = header_fmt + "".join(functions)
+                zf.writestr(f"dokydoc_tests/{filename}", content)
+
+            # Add conftest.py and pytest.ini
+            zf.writestr("dokydoc_tests/conftest.py", _CONFTEST)
+            zf.writestr("pytest.ini", _PYTEST_INI)
+
+        return buf.getvalue()
+
+
+_CONFTEST = '''"""
+Shared fixtures for DokyDoc auto-generated test suite.
+"""
+import os
+import pytest
+import httpx
+
+BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000")
+AUTH_TOKEN = os.getenv("TEST_AUTH_TOKEN", "")
+
+
+@pytest.fixture
+def client():
+    with httpx.Client(base_url=BASE_URL, headers={"Authorization": f"Bearer {AUTH_TOKEN}"}) as c:
+        yield c
+
+
+@pytest.fixture
+def auth_headers():
+    return {"Authorization": f"Bearer {AUTH_TOKEN}"}
+'''
+
+_PYTEST_INI = """[pytest]
+markers =
+    integration: marks tests as integration tests (require running app)
+    slow: marks tests as slow (performance tests)
+testpaths = dokydoc_tests
+"""
+
+test_suite_service = TestSuiteService()
+```
+
+### Backend — Celery Task (Async Generation)
+
+**Add to `backend/app/tasks/document_pipeline.py`** or create a new file `backend/app/tasks/test_generation_tasks.py`:
+
+```python
+# backend/app/tasks/test_generation_tasks.py
+import asyncio
+from app.core.celery_app import celery_app
+from app.core.logging import get_logger
+
+logger = get_logger("test_generation_tasks")
+
+
+@celery_app.task(name="generate_test_suite", bind=True, max_retries=2)
+def generate_test_suite(self, document_id: int, tenant_id: int, doc_title: str):
+    """
+    Celery task: generate test suite zip and store result path in Redis.
+    Result stored under key: test_suite:{document_id}:{tenant_id}
+    """
+    import asyncio
+    import tempfile
+    import os
+    from app.db.session import SessionLocal
+    from app.services.test_suite_service import test_suite_service
+    from app.core.redis import get_redis_client
+
+    db = SessionLocal()
+    try:
+        zip_bytes = asyncio.run(
+            test_suite_service.generate_zip(
+                db=db,
+                document_id=document_id,
+                tenant_id=tenant_id,
+                doc_title=doc_title,
+            )
+        )
+        # Store in Redis with 1-hour TTL
+        redis = get_redis_client()
+        redis_key = f"test_suite:{document_id}:{tenant_id}"
+        redis.set(redis_key, zip_bytes, ex=3600)
+        logger.info(f"Test suite generated for document {document_id}, {len(zip_bytes)} bytes")
+    except Exception as exc:
+        logger.error(f"Test suite generation failed: {exc}")
+        raise self.retry(exc=exc, countdown=30)
+    finally:
+        db.close()
+```
+
+### Backend — API Endpoints
+
+**Add to `backend/app/api/endpoints/validation.py`:**
+
+```python
+from fastapi.responses import StreamingResponse
+import io
+
+
+# POST /validation/{document_id}/generate-tests  (async trigger)
+@router.post("/{document_id}/generate-tests", status_code=202)
+def trigger_test_suite_generation(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Trigger async test suite generation for a document.
+    QA polls GET /download-tests until 200 is returned.
+    """
+    from app.models.document import Document
+    from app.tasks.test_generation_tasks import generate_test_suite
+
+    doc = db.get(Document, document_id)
+    if not doc or doc.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    task = generate_test_suite.apply_async(
+        args=[document_id, current_user.tenant_id, doc.title or "Untitled"]
+    )
+    return {"task_id": task.id, "status": "generating", "poll_url": f"/validation/{document_id}/download-tests"}
+
+
+# GET /validation/{document_id}/download-tests
+@router.get("/{document_id}/download-tests")
+def download_test_suite(
+    document_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Download the generated test suite zip. Returns 202 if still generating, 200 + zip if ready.
+    """
+    from app.core.redis import get_redis_client
+
+    redis = get_redis_client()
+    redis_key = f"test_suite:{document_id}:{current_user.tenant_id}"
+    zip_bytes = redis.get(redis_key)
+
+    if not zip_bytes:
+        return JSONResponse(
+            status_code=202,
+            content={"status": "generating", "message": "Test suite is being generated. Try again in 30 seconds."},
+        )
+
+    return StreamingResponse(
+        io.BytesIO(zip_bytes),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=dokydoc_tests_doc{document_id}.zip"},
+    )
+```
+
+### Frontend — "Generate Test Suite" Button on Validation Panel
+
+**Add to the validation panel** (near UAT checklist tab or as a standalone button):
+
+```tsx
+// frontend/components/validation/TestSuiteDownload.tsx
+import { useState } from "react";
+import { Download, Loader2, FileCode } from "lucide-react";
+import { apiPost, apiGetRaw } from "@/lib/api";
+import { toast } from "sonner";
+
+interface Props {
+  documentId: number;
+}
+
+export function TestSuiteDownload({ documentId }: Props) {
+  const [status, setStatus] = useState<"idle" | "generating" | "ready">("idle");
+
+  const handleGenerate = async () => {
+    setStatus("generating");
+    try {
+      await apiPost(`/validation/${documentId}/generate-tests`, {});
+
+      // Poll until ready (max 2 minutes)
+      const startTime = Date.now();
+      const poll = async () => {
+        if (Date.now() - startTime > 120_000) {
+          toast.error("Test suite generation timed out");
+          setStatus("idle");
+          return;
+        }
+        const resp = await apiGetRaw(`/validation/${documentId}/download-tests`);
+        if (resp.status === 200) {
+          // Trigger download
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `dokydoc_tests_doc${documentId}.zip`;
+          a.click();
+          URL.revokeObjectURL(url);
+          setStatus("idle");
+          toast.success("Test suite downloaded successfully");
+        } else {
+          // Still generating — retry in 5 seconds
+          setTimeout(poll, 5000);
+        }
+      };
+      await poll();
+    } catch {
+      toast.error("Failed to generate test suite");
+      setStatus("idle");
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-lg border border-dashed border-gray-300 bg-gray-50">
+      <FileCode className="h-5 w-5 text-gray-400 flex-shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-700">Auto-generated Test Suite</p>
+        <p className="text-xs text-gray-500">
+          Pytest files generated from BRD atoms · Drop into CI pipeline
+        </p>
+      </div>
+      <button
+        onClick={handleGenerate}
+        disabled={status === "generating"}
+        className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+      >
+        {status === "generating" ? (
+          <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating...</>
+        ) : (
+          <><Download className="h-3.5 w-3.5" /> Download Tests</>
+        )}
+      </button>
+    </div>
+  );
+}
+```
+
+### Test Commands
+
+```bash
+# 1. Verify testability column exists (from s17a1)
+psql -c "SELECT atom_id, testability FROM requirement_atoms WHERE document_id=1 LIMIT 5"
+
+# 2. Trigger test generation
+curl -X POST -H "Authorization: Bearer $QA_TOKEN" \
+  http://localhost:8000/api/v1/validation/1/generate-tests
+# Expected: { "task_id": "...", "status": "generating" }
+
+# 3. Poll for completion
+curl -H "Authorization: Bearer $QA_TOKEN" \
+  http://localhost:8000/api/v1/validation/1/download-tests
+# Expected: initially 202, then 200 + zip file after Celery task completes
+
+# 4. Inspect generated zip
+# After download: unzip dokydoc_tests_doc1.zip -d /tmp/tests
+# ls /tmp/tests/dokydoc_tests/
+# Expected: test_contracts.py, test_business_rules.py, conftest.py, etc.
+
+# 5. Run generated tests locally
+# cd /tmp/tests && APP_BASE_URL=http://localhost:8000 pytest dokydoc_tests/ -v
+
+# 6. Verify Redis key is set
+redis-cli get test_suite:1:1 | wc -c  # should be > 0 bytes
+```
+
+### Risk Assessment
+- **Generated code is advisory** — clearly labeled "AI-generated, review before running"; no auto-execution
+- **Redis TTL 1 hour** — prevents stale test suites from being downloaded after BRD changes
+- **Celery task + polling** — non-blocking; UI polls; no server-sent events needed
+- **Atom cap** — if document has >100 testable atoms, Gemini calls are made per-atom; consider batching or limiting to top 50 by criticality for initial release
+- **Import isolation** — generated tests only call via HTTP, never import source code directly; prevents import errors on QA machines
+
+
+---
+
+## P5C-06 — CI Test Result Webhook → Runtime Mismatch Auto-creation
+
+**Priority:** P1 — Covers QA Step 6: "CI runs, test fails, DokyDoc receives result via webhook, auto-creates mismatch."
+**Complexity:** HIGH — New webhook endpoint with secret-based auth, mismatch auto-creation, atom matching.
+**Risk:** MEDIUM — New endpoint; doesn't touch existing validation engine.
+
+### Why This Exists
+
+**QA Step 6:** "Test failure → DokyDoc receives result via webhook → auto-creates mismatch: 'Runtime test failed: FD rate returns 6%'."
+
+The existing GitHub webhook (P5B-06) triggers re-analysis on code push. But CI test results are different: a test runner (GitHub Actions, Jenkins, CircleCI) executes the auto-generated tests and sends failures back to DokyDoc. DokyDoc should create a new mismatch type `runtime_test_failure` when a test fails, linking it to the relevant BRD atom.
+
+This closes the loop: DokyDoc generates tests (P5C-05) → CI runs them → failures come back → DokyDoc creates mismatches → developer fixes → mismatch auto-closes on next CI pass.
+
+### DB Changes
+
+**New table: `ci_webhook_configs`** — stores per-tenant CI webhook secret keys.
+
+**New migration: `backend/alembic/versions/s17e1_ci_webhook_config.py`**
+
+```python
+# backend/alembic/versions/s17e1_ci_webhook_config.py
+"""Add ci_webhook_configs table
+
+Revision ID: s17e1
+Revises: s17d1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's17e1'
+down_revision = 's17d1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'ci_webhook_configs',
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('tenant_id', sa.Integer,
+                  sa.ForeignKey('tenants.id', ondelete='CASCADE'),
+                  nullable=False, unique=True),
+        # HMAC-SHA256 secret for verifying webhook payloads
+        sa.Column('webhook_secret', sa.String(64), nullable=False),
+        # Which document this CI config applies to (optional; null = all docs in tenant)
+        sa.Column('document_id', sa.Integer,
+                  sa.ForeignKey('documents.id', ondelete='SET NULL'), nullable=True),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now(),
+                  onupdate=sa.func.now(), nullable=False),
+    )
+    op.create_index('ix_ci_webhook_tenant', 'ci_webhook_configs', ['tenant_id'])
+
+    # Add mismatch_type value for runtime test failures
+    # (mismatch_type is a plain String field, no ENUM to alter — no migration needed for value)
+
+
+def downgrade():
+    op.drop_table('ci_webhook_configs')
+```
+
+### Backend — New Model
+
+**New file: `backend/app/models/ci_webhook_config.py`**
+
+```python
+# backend/app/models/ci_webhook_config.py
+import secrets
+from typing import Optional
+from datetime import datetime
+from sqlalchemy import Integer, String, ForeignKey, DateTime
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base_class import Base
+
+
+class CIWebhookConfig(Base):
+    """
+    Per-tenant CI webhook configuration.
+    Stores the HMAC secret used to verify incoming CI test result payloads.
+    """
+    __tablename__ = "ci_webhook_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True)
+    webhook_secret: Mapped[str] = mapped_column(String(64), nullable=False)
+    document_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    @staticmethod
+    def generate_secret() -> str:
+        return secrets.token_hex(32)  # 64 hex chars
+```
+
+**Add to `backend/app/models/__init__.py`:**
+
+```python
+from .ci_webhook_config import CIWebhookConfig  # noqa: F401
+```
+
+### Backend — Webhook Endpoint
+
+**Add to `backend/app/api/endpoints/webhooks.py`:**
+
+```python
+import hmac
+import hashlib
+from typing import List, Optional
+from pydantic import BaseModel
+from fastapi import Request
+
+
+class CITestResult(BaseModel):
+    test_name: str                    # e.g. "test_req_004_fd_rate_calculation"
+    status: str                       # "pass" | "fail" | "error"
+    error_message: Optional[str] = None  # failure message if status is fail/error
+    file_path: Optional[str] = None   # test file path within the zip
+    atom_id_hint: Optional[str] = None  # e.g. "REQ-004" — used to link to atom
+    duration_ms: Optional[float] = None
+
+
+class CIWebhookPayload(BaseModel):
+    document_id: int                  # which DokyDoc document these tests cover
+    run_id: str                       # CI pipeline run ID (for deduplication)
+    commit_sha: Optional[str] = None  # git commit that was tested
+    test_results: List[CITestResult]
+
+
+def _verify_ci_hmac(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
+    """Verify X-DokyDoc-Signature: sha256=<hmac> header."""
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+    received = signature_header[7:]
+    return hmac.compare_digest(expected, received)
+
+
+@router.post("/ci/test-results", status_code=202)
+async def receive_ci_test_results(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+):
+    """
+    Receive CI pipeline test results and auto-create mismatches for failures.
+
+    Authentication: HMAC-SHA256 signature in X-DokyDoc-Signature header.
+    Tenant is identified by the document_id in the payload.
+
+    GitHub Actions example:
+      curl -X POST https://app.dokydoc.com/api/v1/webhooks/ci/test-results \\
+        -H "X-DokyDoc-Signature: sha256=$(echo -n '$payload' | openssl dgst -sha256 -hmac '$SECRET')" \\
+        -H "Content-Type: application/json" \\
+        -d '{"document_id": 1, "run_id": "abc123", "test_results": [...]}'
+    """
+    from app.models.document import Document
+    from app.models.ci_webhook_config import CIWebhookConfig
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.mismatch import Mismatch
+    from app.models.code_component import CodeComponent
+
+    raw_body = await request.body()
+    payload_data = await request.json()
+
+    try:
+        payload = CIWebhookPayload(**payload_data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
+
+    # Look up document and tenant
+    doc = db.get(Document, payload.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Verify HMAC signature
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=doc.tenant_id).first()
+    if not config:
+        raise HTTPException(status_code=401, detail="CI webhook not configured for this tenant")
+
+    sig_header = request.headers.get("X-DokyDoc-Signature", "")
+    if not _verify_ci_hmac(raw_body, sig_header, config.webhook_secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Process failures
+    failures = [r for r in payload.test_results if r.status in ("fail", "error")]
+    created_mismatch_ids = []
+
+    for result in failures:
+        # Try to match to an atom by atom_id_hint
+        atom = None
+        if result.atom_id_hint:
+            atom = db.query(RequirementAtom).filter(
+                RequirementAtom.document_id == payload.document_id,
+                RequirementAtom.tenant_id == doc.tenant_id,
+                RequirementAtom.atom_id == result.atom_id_hint,
+            ).first()
+
+        # Check for duplicate: same run_id + test_name
+        existing = db.query(Mismatch).filter(
+            Mismatch.document_id == payload.document_id,
+            Mismatch.tenant_id == doc.tenant_id,
+            Mismatch.details["ci_run_id"].astext == payload.run_id,
+            Mismatch.details["test_name"].astext == result.test_name,
+        ).first()
+        if existing:
+            continue
+
+        # Find or create a synthetic "CI" code component
+        ci_component = db.query(CodeComponent).filter_by(
+            tenant_id=doc.tenant_id,
+            file_path="__ci_pipeline__",
+        ).first()
+        if not ci_component:
+            ci_component = CodeComponent(
+                tenant_id=doc.tenant_id,
+                file_path="__ci_pipeline__",
+                component_name="CI Pipeline",
+                language="pytest",
+            )
+            db.add(ci_component)
+            db.flush()
+
+        severity = "high" if (atom and atom.criticality in ("critical", "high")) else "medium"
+
+        mismatch = Mismatch(
+            tenant_id=doc.tenant_id,
+            document_id=payload.document_id,
+            code_component_id=ci_component.id,
+            requirement_atom_id=atom.id if atom else None,
+            owner_id=doc.owner_id,
+            mismatch_type="runtime_test_failure",
+            severity=severity,
+            status="open",
+            direction="forward",
+            description=(
+                f"CI test failed: {result.test_name}. "
+                f"{result.error_message or 'No error message provided.'}"
+            ),
+            details={
+                "ci_run_id": payload.run_id,
+                "commit_sha": payload.commit_sha,
+                "test_name": result.test_name,
+                "test_file": result.file_path,
+                "error_message": result.error_message,
+                "duration_ms": result.duration_ms,
+                "atom_id_hint": result.atom_id_hint,
+            },
+        )
+        db.add(mismatch)
+        db.flush()
+        created_mismatch_ids.append(mismatch.id)
+
+    # Auto-close previously-open runtime_test_failure mismatches for tests that now PASS
+    passing_test_names = {r.test_name for r in payload.test_results if r.status == "pass"}
+    if passing_test_names:
+        stale = db.query(Mismatch).filter(
+            Mismatch.document_id == payload.document_id,
+            Mismatch.tenant_id == doc.tenant_id,
+            Mismatch.mismatch_type == "runtime_test_failure",
+            Mismatch.status == "open",
+        ).all()
+        for m in stale:
+            if m.details and m.details.get("test_name") in passing_test_names:
+                m.status = "auto_closed"
+        db.flush()
+
+    db.commit()
+
+    return {
+        "received": len(payload.test_results),
+        "failures": len(failures),
+        "mismatches_created": len(created_mismatch_ids),
+        "mismatch_ids": created_mismatch_ids,
+    }
+```
+
+### Backend — CI Webhook Setup Endpoints
+
+**Add to `backend/app/api/endpoints/integrations.py`:**
+
+```python
+from app.models.ci_webhook_config import CIWebhookConfig
+
+
+# POST /integrations/ci/setup  — generate webhook secret
+@router.post("/ci/setup")
+def setup_ci_webhook(
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Generate or rotate the CI webhook secret for this tenant.
+    Returns the secret to store as a CI environment variable.
+    """
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=current_user.tenant_id).first()
+    new_secret = CIWebhookConfig.generate_secret()
+
+    if config:
+        config.webhook_secret = new_secret
+    else:
+        config = CIWebhookConfig(
+            tenant_id=current_user.tenant_id,
+            webhook_secret=new_secret,
+        )
+        db.add(config)
+
+    db.commit()
+
+    return {
+        "webhook_url": f"{settings.BACKEND_URL}/api/v1/webhooks/ci/test-results",
+        "secret": new_secret,
+        "env_var_name": "DOKYDOC_WEBHOOK_SECRET",
+        "instructions": (
+            "Add DOKYDOC_WEBHOOK_SECRET as a GitHub Actions secret. "
+            "In your CI workflow, compute HMAC-SHA256 of the request body "
+            "and send it in the X-DokyDoc-Signature header."
+        ),
+    }
+
+
+# GET /integrations/ci/status
+@router.get("/ci/status")
+def get_ci_webhook_status(
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """Check whether CI webhook is configured for this tenant."""
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=current_user.tenant_id).first()
+    return {
+        "configured": config is not None,
+        "webhook_url": f"{settings.BACKEND_URL}/api/v1/webhooks/ci/test-results" if config else None,
+        "created_at": config.created_at.isoformat() if config else None,
+    }
+```
+
+### Frontend — CI Integration Setup Card
+
+**New file: `frontend/components/settings/CIWebhookCard.tsx`**
+
+```tsx
+// frontend/components/settings/CIWebhookCard.tsx
+import { useState } from "react";
+import { Copy, RefreshCw, CheckCircle, Circle } from "lucide-react";
+import { apiPost, apiGet } from "@/lib/api";
+import useSWR from "swr";
+import { toast } from "sonner";
+
+export function CIWebhookCard() {
+  const { data: status, mutate } = useSWR("/integrations/ci/status", apiGet);
+  const [secret, setSecret] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+
+  const handleSetup = async () => {
+    setGenerating(true);
+    try {
+      const result = await apiPost("/integrations/ci/setup", {});
+      setSecret(result.secret);
+      mutate();
+      toast.success("CI webhook secret generated");
+    } catch {
+      toast.error("Failed to generate CI webhook");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const copySecret = () => {
+    if (secret) {
+      navigator.clipboard.writeText(secret);
+      toast.success("Secret copied to clipboard");
+    }
+  };
+
+  return (
+    <div className="rounded-lg border p-5 space-y-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <h3 className="font-semibold text-gray-900">CI Pipeline Integration</h3>
+          <p className="text-sm text-gray-500 mt-1">
+            Send test results from GitHub Actions / Jenkins to auto-create mismatches on failure.
+          </p>
+        </div>
+        <div className="flex items-center gap-1.5 text-xs">
+          {status?.configured ? (
+            <><CheckCircle className="h-4 w-4 text-green-500" /><span className="text-green-600">Connected</span></>
+          ) : (
+            <><Circle className="h-4 w-4 text-gray-300" /><span className="text-gray-400">Not configured</span></>
+          )}
+        </div>
+      </div>
+
+      {secret && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 p-3 space-y-2">
+          <p className="text-xs font-medium text-amber-800">
+            Save this secret now — it won't be shown again:
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 text-xs font-mono bg-white border border-amber-200 px-2 py-1 rounded truncate">
+              {secret}
+            </code>
+            <button onClick={copySecret} className="p-1 hover:bg-amber-100 rounded">
+              <Copy className="h-4 w-4 text-amber-700" />
+            </button>
+          </div>
+          <p className="text-xs text-amber-700">
+            Add as <code className="font-mono">DOKYDOC_WEBHOOK_SECRET</code> in your CI environment.
+          </p>
+        </div>
+      )}
+
+      <div className="rounded-md bg-gray-50 border p-3 text-xs space-y-1">
+        <p className="font-medium text-gray-700">Webhook URL:</p>
+        <code className="text-gray-600 break-all">
+          {status?.webhook_url || "https://app.dokydoc.com/api/v1/webhooks/ci/test-results"}
+        </code>
+      </div>
+
+      <div className="rounded-md bg-gray-50 border p-3">
+        <p className="text-xs font-medium text-gray-700 mb-2">GitHub Actions example:</p>
+        <pre className="text-xs text-gray-600 overflow-x-auto">{`- name: Send results to DokyDoc
+  run: |
+    PAYLOAD=$(cat test_results.json)
+    SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$DOKYDOC_WEBHOOK_SECRET" | cut -d' ' -f2)
+    curl -X POST "$DOKYDOC_WEBHOOK_URL" \\
+      -H "Content-Type: application/json" \\
+      -H "X-DokyDoc-Signature: sha256=$SIG" \\
+      -d "$PAYLOAD"`}</pre>
+      </div>
+
+      <button
+        onClick={handleSetup}
+        disabled={generating}
+        className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-gray-50 disabled:opacity-50"
+      >
+        <RefreshCw className={`h-4 w-4 ${generating ? "animate-spin" : ""}`} />
+        {status?.configured ? "Rotate Secret" : "Generate Webhook Secret"}
+      </button>
+    </div>
+  );
+}
+```
+
+**Wire into Settings page** — add `<CIWebhookCard />` in the integrations section of the Settings page alongside Jira, GitHub, and Confluence cards.
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s17e1
+
+# 2. Verify table
+psql -c "\d ci_webhook_configs"
+
+# 3. Setup CI webhook
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8000/api/v1/integrations/ci/setup
+# Expected: { "webhook_url": "...", "secret": "abc123...", "env_var_name": "DOKYDOC_WEBHOOK_SECRET" }
+
+# 4. Send a test result payload (manually compute HMAC)
+SECRET="abc123..."
+PAYLOAD='{"document_id":1,"run_id":"gh-run-999","commit_sha":"deadbeef","test_results":[{"test_name":"test_req_004_fd_rate","status":"fail","error_message":"AssertionError: expected 8.0 got 6.0","atom_id_hint":"REQ-004"}]}'
+SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)
+curl -X POST http://localhost:8000/api/v1/webhooks/ci/test-results \
+  -H "Content-Type: application/json" \
+  -H "X-DokyDoc-Signature: sha256=$SIG" \
+  -d "$PAYLOAD"
+# Expected: { "received": 1, "failures": 1, "mismatches_created": 1 }
+
+# 5. Verify mismatch created
+psql -c "SELECT id, mismatch_type, description, status FROM mismatches ORDER BY id DESC LIMIT 1"
+
+# 6. Send passing result for same test (should auto-close mismatch)
+PAYLOAD='{"document_id":1,"run_id":"gh-run-1000","test_results":[{"test_name":"test_req_004_fd_rate","status":"pass"}]}'
+SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)
+curl -X POST http://localhost:8000/api/v1/webhooks/ci/test-results ...
+# Expected: mismatch status → auto_closed
+
+# 7. Test invalid signature is rejected
+curl -X POST http://localhost:8000/api/v1/webhooks/ci/test-results \
+  -H "X-DokyDoc-Signature: sha256=badsig" \
+  -d "$PAYLOAD"
+# Expected: 401 Invalid webhook signature
+```
+
+### Risk Assessment
+- **HMAC signature verification** — `hmac.compare_digest` prevents timing attacks; unsigned requests rejected with 401
+- **Run ID deduplication** — same `run_id + test_name` combination never creates duplicate mismatches
+- **Synthetic code component** — `__ci_pipeline__` component is created once per tenant; avoids FK violation for CI mismatches that have no real code file
+- **Auto-close on pass** — when CI run passes a test, existing `open` mismatch for that test name is auto-closed
+- **Tenant isolation** — `document_id` in payload is validated against document ownership; cannot inject mismatches for other tenants
+
+
+---
+
+## P5C-07 — AI-Suggested Fix per Mismatch
+
+**Priority:** P2 — Developer Step 5: "Opens each mismatch — sees: BRD requirement | What code shows | Exact gap | **Suggested fix**."
+**Complexity:** MEDIUM — Gemini call per mismatch, stored in existing `details` JSONB. No new table.
+**Risk:** LOW — Suggestions are read-only and advisory. Stored lazily on first view.
+
+### Why This Exists
+
+**Developer Step 5** of the workflow: the mismatch card shows BRD requirement, what the code shows, and the exact gap (P5B-05 covers evidence transparency). The final column — **Suggested fix** — is missing. The developer must mentally compute "what do I need to change?" from the evidence alone.
+
+The fix: when a developer opens a mismatch, DokyDoc calls Gemini with the mismatch description + BRD atom content + code evidence snapshot → receives a concise, actionable code fix suggestion (3-10 lines). Stored in `details.suggested_fix` so it's only computed once.
+
+### No New DB Changes
+
+`Mismatch.details` is already a JSONB field. The suggested fix is stored as:
+
+```json
+{
+  "suggested_fix": {
+    "summary": "Update FD_INTEREST_RATE constant from 0.06 to 0.08",
+    "code_snippet": "# In fd_service.py, line 23:\nFD_INTEREST_RATE = 0.08  # Changed from 0.06 per BRD Section 4.2",
+    "language": "python",
+    "generated_at": "2026-04-07T10:30:00Z",
+    "confidence": "high"
+  }
+}
+```
+
+No migration required.
+
+### Backend — Gemini Prompt for Fix Suggestion
+
+**Add to `backend/app/services/ai/gemini.py`:**
+
+```python
+_FIX_SUGGESTION_PROMPT = """
+You are a senior software engineer helping fix a BRD compliance mismatch.
+
+BRD REQUIREMENT:
+{atom_content}
+
+ATOM TYPE: {atom_type}
+MISMATCH TYPE: {mismatch_type}
+MISMATCH DESCRIPTION:
+{mismatch_description}
+
+CODE EVIDENCE (what the code currently shows):
+{code_evidence}
+
+Generate a CONCISE, ACTIONABLE fix suggestion for this developer.
+
+Rules:
+1. Focus on the MINIMAL code change needed to satisfy the BRD requirement
+2. Provide a 1-line summary of what to change
+3. Provide a 3-10 line code snippet showing the fix
+4. Use the correct programming language based on the file extension in the evidence
+5. Include a comment citing the BRD requirement (e.g. # BRD Section 4.2: FD rate must be 8%)
+6. If you cannot determine the exact fix (e.g., UX requirement), say so clearly
+7. Confidence: "high" if the fix is precise, "medium" if approximate, "low" if speculative
+
+Return ONLY valid JSON:
+{
+  "summary": "One-line description of the fix",
+  "code_snippet": "The actual code change (use markdown code formatting)",
+  "language": "python|typescript|java|sql|etc",
+  "confidence": "high|medium|low",
+  "caveat": "Any important warning or consideration (optional)"
+}
+"""
+
+
+async def call_gemini_for_fix_suggestion(
+    atom_content: str,
+    atom_type: str,
+    mismatch_type: str,
+    mismatch_description: str,
+    code_evidence: str,
+    model: str = "gemini-2.0-flash",
+) -> dict:
+    """
+    Generate an AI fix suggestion for a mismatch.
+    Returns dict with summary, code_snippet, language, confidence, caveat.
+    """
+    import google.generativeai as genai
+    from app.core.config import settings
+    import json
+
+    prompt = _FIX_SUGGESTION_PROMPT.format(
+        atom_content=atom_content[:1000],
+        atom_type=atom_type,
+        mismatch_type=mismatch_type,
+        mismatch_description=mismatch_description[:500],
+        code_evidence=code_evidence[:2000],
+    )
+
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel(model)
+    response = model_client.generate_content(
+        prompt,
+        generation_config={"temperature": 0.2, "response_mime_type": "application/json"},
+    )
+    return json.loads(response.text)
+```
+
+### Backend — Service Function
+
+**New file: `backend/app/services/fix_suggestion_service.py`**
+
+```python
+# backend/app/services/fix_suggestion_service.py
+"""
+FixSuggestionService — generates AI-powered code fix suggestions for mismatches.
+Suggestions are stored lazily in mismatch.details["suggested_fix"] on first request.
+"""
+from datetime import datetime
+from sqlalchemy.orm import Session
+from app.core.logging import get_logger
+from app.models.mismatch import Mismatch
+from app.models.requirement_atom import RequirementAtom
+
+logger = get_logger("fix_suggestion_service")
+
+
+class FixSuggestionService:
+
+    async def get_or_generate(
+        self,
+        db: Session,
+        *,
+        mismatch_id: int,
+        tenant_id: int,
+    ) -> dict:
+        """
+        Return cached fix suggestion if available, otherwise generate and cache.
+        Never raises — returns {"error": "..."} on failure.
+        """
+        mismatch = db.query(Mismatch).filter(
+            Mismatch.id == mismatch_id,
+            Mismatch.tenant_id == tenant_id,
+        ).first()
+        if not mismatch:
+            return {"error": "Mismatch not found"}
+
+        # Return cached if present
+        existing = (mismatch.details or {}).get("suggested_fix")
+        if existing:
+            return existing
+
+        # Build code evidence string from existing details
+        details = mismatch.details or {}
+        code_evidence_parts = []
+        if details.get("code_evidence"):
+            for ev in details["code_evidence"]:
+                code_evidence_parts.append(
+                    f"File: {ev.get('file_path', 'unknown')}\n"
+                    f"Lines {ev.get('start_line', '?')}-{ev.get('end_line', '?')}:\n"
+                    f"{ev.get('snippet', '')}"
+                )
+        code_evidence = "\n\n".join(code_evidence_parts) or "No code evidence available."
+
+        # Get atom content
+        atom_content = "No atom content available."
+        atom_type = mismatch.mismatch_type
+        if mismatch.requirement_atom_id:
+            atom = db.get(RequirementAtom, mismatch.requirement_atom_id)
+            if atom:
+                atom_content = atom.content
+                atom_type = atom.atom_type
+
+        try:
+            from app.services.ai.gemini import call_gemini_for_fix_suggestion
+            fix = await call_gemini_for_fix_suggestion(
+                atom_content=atom_content,
+                atom_type=atom_type,
+                mismatch_type=mismatch.mismatch_type,
+                mismatch_description=mismatch.description,
+                code_evidence=code_evidence,
+            )
+        except Exception as e:
+            logger.warning(f"Fix suggestion generation failed for mismatch {mismatch_id}: {e}")
+            fix = {
+                "error": "Could not generate suggestion",
+                "summary": "Manually review the BRD requirement against the code evidence above.",
+                "confidence": "low",
+            }
+
+        # Cache in details
+        fix["generated_at"] = datetime.utcnow().isoformat()
+        updated_details = dict(mismatch.details or {})
+        updated_details["suggested_fix"] = fix
+        mismatch.details = updated_details
+        db.add(mismatch)
+        db.commit()
+
+        return fix
+
+
+fix_suggestion_service = FixSuggestionService()
+```
+
+### Backend — API Endpoint
+
+**Add to `backend/app/api/endpoints/validation.py`:**
+
+```python
+# POST /validation/mismatches/{id}/suggest-fix
+@router.post("/mismatches/{mismatch_id}/suggest-fix")
+async def get_fix_suggestion(
+    mismatch_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return AI-generated fix suggestion for a mismatch.
+    Generates on first call and caches in mismatch.details['suggested_fix'].
+    Returns cached result on subsequent calls (no Gemini cost).
+    """
+    from app.services.fix_suggestion_service import fix_suggestion_service
+    import asyncio
+
+    fix = await fix_suggestion_service.get_or_generate(
+        db=db,
+        mismatch_id=mismatch_id,
+        tenant_id=current_user.tenant_id,
+    )
+    return {"mismatch_id": mismatch_id, "suggested_fix": fix}
+
+
+# DELETE /validation/mismatches/{id}/suggest-fix  (force regenerate)
+@router.delete("/mismatches/{mismatch_id}/suggest-fix", status_code=204)
+def clear_fix_suggestion(
+    mismatch_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """Clear cached fix suggestion to force regeneration on next request."""
+    from app.models.mismatch import Mismatch
+
+    mismatch = db.query(Mismatch).filter(
+        Mismatch.id == mismatch_id,
+        Mismatch.tenant_id == current_user.tenant_id,
+    ).first()
+    if not mismatch:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    updated = dict(mismatch.details or {})
+    updated.pop("suggested_fix", None)
+    mismatch.details = updated
+    db.add(mismatch)
+    db.commit()
+```
+
+### Frontend — Suggested Fix Panel on Mismatch Card
+
+**New file: `frontend/components/validation/MismatchSuggestedFix.tsx`**
+
+```tsx
+// frontend/components/validation/MismatchSuggestedFix.tsx
+import { useState } from "react";
+import { Lightbulb, Copy, RefreshCw, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
+import { apiPost, apiDelete } from "@/lib/api";
+import { toast } from "sonner";
+
+const CONFIDENCE_CONFIG = {
+  high: { color: "text-green-600 bg-green-50", label: "High confidence" },
+  medium: { color: "text-amber-600 bg-amber-50", label: "Medium confidence" },
+  low: { color: "text-gray-500 bg-gray-50", label: "Low confidence" },
+};
+
+interface Fix {
+  summary?: string;
+  code_snippet?: string;
+  language?: string;
+  confidence?: "high" | "medium" | "low";
+  caveat?: string;
+  error?: string;
+  generated_at?: string;
+}
+
+interface Props {
+  mismatchId: number;
+  existingFix?: Fix;         // pre-loaded from mismatch.details.suggested_fix
+}
+
+export function MismatchSuggestedFix({ mismatchId, existingFix }: Props) {
+  const [open, setOpen] = useState(false);
+  const [fix, setFix] = useState<Fix | null>(existingFix || null);
+  const [loading, setLoading] = useState(false);
+
+  const loadFix = async (forceRegenerate = false) => {
+    if (forceRegenerate) {
+      try {
+        await apiDelete(`/validation/mismatches/${mismatchId}/suggest-fix`);
+        setFix(null);
+      } catch {}
+    }
+    setLoading(true);
+    try {
+      const data = await apiPost(`/validation/mismatches/${mismatchId}/suggest-fix`, {});
+      setFix(data.suggested_fix);
+    } catch {
+      toast.error("Failed to generate fix suggestion");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copySnippet = () => {
+    if (fix?.code_snippet) {
+      navigator.clipboard.writeText(fix.code_snippet);
+      toast.success("Code copied to clipboard");
+    }
+  };
+
+  return (
+    <div className="border-t mt-3 pt-3">
+      <button
+        onClick={() => {
+          setOpen(!open);
+          if (!open && !fix) loadFix();
+        }}
+        className="flex items-center gap-2 text-sm text-amber-700 hover:text-amber-900"
+      >
+        <Lightbulb className="h-4 w-4" />
+        <span>Suggested Fix</span>
+        {open ? <ChevronUp className="h-3.5 w-3.5 ml-auto" /> : <ChevronDown className="h-3.5 w-3.5 ml-auto" />}
+      </button>
+
+      {open && (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 space-y-3">
+          {loading && (
+            <div className="flex items-center gap-2 text-xs text-amber-600">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              Generating AI fix suggestion...
+            </div>
+          )}
+
+          {fix && !loading && (
+            <>
+              {/* Summary */}
+              {fix.summary && (
+                <div className="space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-sm font-medium text-amber-900">{fix.summary}</p>
+                    {fix.confidence && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+                        CONFIDENCE_CONFIG[fix.confidence]?.color || "text-gray-500 bg-gray-50"
+                      }`}>
+                        {CONFIDENCE_CONFIG[fix.confidence]?.label}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Code snippet */}
+              {fix.code_snippet && (
+                <div className="relative">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-mono text-amber-600">{fix.language}</span>
+                    <button
+                      onClick={copySnippet}
+                      className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800"
+                    >
+                      <Copy className="h-3 w-3" /> Copy
+                    </button>
+                  </div>
+                  <pre className="bg-white border border-amber-200 rounded p-2 text-xs overflow-x-auto whitespace-pre-wrap">
+                    <code>{fix.code_snippet}</code>
+                  </pre>
+                </div>
+              )}
+
+              {/* Caveat */}
+              {fix.caveat && (
+                <div className="flex items-start gap-2 text-xs text-amber-700">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <span>{fix.caveat}</span>
+                </div>
+              )}
+
+              {/* Error case */}
+              {fix.error && (
+                <p className="text-xs text-gray-500 italic">{fix.summary || fix.error}</p>
+              )}
+
+              {/* Regenerate */}
+              <button
+                onClick={() => loadFix(true)}
+                className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800"
+              >
+                <RefreshCw className="h-3 w-3" /> Regenerate suggestion
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**Wire into mismatch card** — in the mismatch card component, add below the evidence panel (P5B-05):
+
+```tsx
+<MismatchSuggestedFix
+  mismatchId={mismatch.id}
+  existingFix={mismatch.details?.suggested_fix}
+/>
+```
+
+### Test Commands
+
+```bash
+# 1. No migration needed — uses existing mismatch.details JSONB
+
+# 2. Fetch fix suggestion for a mismatch (generates on first call)
+curl -X POST -H "Authorization: Bearer $DEV_TOKEN" \
+  http://localhost:8000/api/v1/validation/mismatches/5/suggest-fix
+# Expected: { "mismatch_id": 5, "suggested_fix": { "summary": "...", "code_snippet": "...", "confidence": "high" } }
+
+# 3. Verify it was cached in the mismatch details
+psql -c "SELECT details->'suggested_fix'->>'summary' FROM mismatches WHERE id=5"
+
+# 4. Second call should return cached (no Gemini API call)
+curl -X POST -H "Authorization: Bearer $DEV_TOKEN" \
+  http://localhost:8000/api/v1/validation/mismatches/5/suggest-fix
+# Same response, no Gemini cost
+
+# 5. Force regenerate
+curl -X DELETE -H "Authorization: Bearer $DEV_TOKEN" \
+  http://localhost:8000/api/v1/validation/mismatches/5/suggest-fix
+# Then POST again — fresh Gemini call
+
+# 6. Test with a mismatch that has code evidence (P5B-05 populated details)
+# The code_evidence in details should inform the fix suggestion
+```
+
+### Risk Assessment
+- **Lazy generation** — Gemini is called only on first user request, not on mismatch creation; zero extra cost for mismatches that are never opened
+- **Cached in JSONB** — subsequent loads are instant; no Gemini cost; persists until manually cleared
+- **Failure graceful** — if Gemini fails, stores `{"error": "...", "summary": "Manually review..."}` so the card still renders something useful
+- **Context limit** — atom content capped at 1000 chars, code evidence at 2000 chars; avoids token limit errors
+- **Advisory only** — clearly labeled "AI suggestion"; developer is responsible for the actual fix
+
+
+---
+
+## P5C-08 — Compliance Score Trend / Time Series
+
+**Priority:** P1 — Tech Lead Step 2: "Sees trend: Core Banking dropped from 89% to 79% this week."
+**Complexity:** MEDIUM — New table, Celery beat snapshot task, recharts line chart.
+**Risk:** LOW — Snapshot task is read-only and never blocks anything.
+
+### Why This Exists
+
+**Tech Lead Steps 1-3:**
+- "Opens compliance dashboard daily — FD Product: 87%."
+- "Sees trend: Core Banking dropped from 89% to 79% this week."
+- "Drills in: 4 new high-severity mismatches from BRD v3.1 upload."
+
+P5B-02 (compliance score) gives a single current percentage. There is no way to see whether things are getting better or worse over time. A Tech Lead needs to see trend direction — improving, degrading, or flat — to prioritize sprint work.
+
+The fix: store a compliance score snapshot once per day per document. A Celery beat task runs nightly. Tech Lead sees a line chart over the last 30 days.
+
+### DB Changes
+
+**New table: `compliance_score_snapshots`**
+
+**New migration: `backend/alembic/versions/s17d1_compliance_snapshots.py`**
+
+```python
+# backend/alembic/versions/s17d1_compliance_snapshots.py
+"""Add compliance_score_snapshots table
+
+Revision ID: s17d1
+Revises: s17c1
+Create Date: 2026-04-07
+"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = 's17d1'
+down_revision = 's17c1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'compliance_score_snapshots',
+        sa.Column('id', sa.Integer, primary_key=True),
+        sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
+        sa.Column('document_id', sa.Integer,
+                  sa.ForeignKey('documents.id', ondelete='CASCADE'),
+                  nullable=False, index=True),
+        # Snapshot values
+        sa.Column('score_percentage', sa.Float, nullable=False),
+        sa.Column('total_atoms', sa.Integer, nullable=False, default=0),
+        sa.Column('covered_atoms', sa.Integer, nullable=False, default=0),
+        sa.Column('open_mismatches', sa.Integer, nullable=False, default=0),
+        sa.Column('critical_mismatches', sa.Integer, nullable=False, default=0),
+        # Timestamp of snapshot (date-level granularity, one per day)
+        sa.Column('snapshot_date', sa.Date, nullable=False),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+    )
+    op.create_index('ix_compliance_snapshots_document_date',
+                    'compliance_score_snapshots', ['document_id', 'snapshot_date'],
+                    unique=True)  # One snapshot per document per day
+    op.create_index('ix_compliance_snapshots_tenant',
+                    'compliance_score_snapshots', ['tenant_id', 'snapshot_date'])
+
+
+def downgrade():
+    op.drop_table('compliance_score_snapshots')
+```
+
+### Backend — New Model
+
+**New file: `backend/app/models/compliance_score_snapshot.py`**
+
+```python
+# backend/app/models/compliance_score_snapshot.py
+from datetime import datetime, date
+from sqlalchemy import Integer, Float, ForeignKey, DateTime, Date, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base_class import Base
+
+
+class ComplianceScoreSnapshot(Base):
+    """
+    Daily compliance score snapshot per document.
+    Created by a nightly Celery beat task.
+    Also triggered on-demand when validation scan completes.
+    """
+    __tablename__ = "compliance_score_snapshots"
+    __table_args__ = (
+        UniqueConstraint("document_id", "snapshot_date", name="uq_snapshot_document_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    score_percentage: Mapped[float] = mapped_column(Float, nullable=False)
+    total_atoms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    covered_atoms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    open_mismatches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    critical_mismatches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+```
+
+**Add to `backend/app/models/__init__.py`:**
+
+```python
+from .compliance_score_snapshot import ComplianceScoreSnapshot  # noqa: F401
+```
+
+### Backend — Snapshot Service
+
+**New file: `backend/app/services/compliance_snapshot_service.py`**
+
+```python
+# backend/app/services/compliance_snapshot_service.py
+"""
+ComplianceSnapshotService — captures daily compliance score per document.
+Reuses the existing compliance score calculation from P5B-02's CRUDMismatch.
+"""
+from datetime import date, datetime
+from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core.logging import get_logger
+from app.models.compliance_score_snapshot import ComplianceScoreSnapshot
+from app.models.requirement_atom import RequirementAtom
+from app.models.mismatch import Mismatch
+
+logger = get_logger("compliance_snapshot_service")
+
+
+class ComplianceSnapshotService:
+
+    def capture_for_document(
+        self,
+        db: Session,
+        *,
+        document_id: int,
+        tenant_id: int,
+        snapshot_date: date | None = None,
+    ) -> ComplianceScoreSnapshot:
+        """
+        Take a compliance snapshot for one document.
+        Uses UPSERT so re-running on the same day updates rather than duplicates.
+        """
+        if snapshot_date is None:
+            snapshot_date = date.today()
+
+        # Calculate current score
+        total_atoms = db.query(RequirementAtom).filter(
+            RequirementAtom.document_id == document_id,
+            RequirementAtom.tenant_id == tenant_id,
+        ).count()
+
+        # Atoms with at least one open/non-false-positive mismatch = not covered
+        from sqlalchemy import func, distinct
+        uncovered_atom_ids = db.query(distinct(Mismatch.requirement_atom_id)).filter(
+            Mismatch.document_id == document_id,
+            Mismatch.tenant_id == tenant_id,
+            Mismatch.status.in_(["open", "in_progress"]),
+            Mismatch.requirement_atom_id.isnot(None),
+        ).all()
+        uncovered_count = len(uncovered_atom_ids)
+        covered = max(0, total_atoms - uncovered_count)
+        score = round((covered / total_atoms * 100) if total_atoms > 0 else 100.0, 1)
+
+        open_mismatches = db.query(Mismatch).filter(
+            Mismatch.document_id == document_id,
+            Mismatch.tenant_id == tenant_id,
+            Mismatch.status == "open",
+        ).count()
+
+        critical_mismatches = db.query(Mismatch).filter(
+            Mismatch.document_id == document_id,
+            Mismatch.tenant_id == tenant_id,
+            Mismatch.status == "open",
+            Mismatch.severity.in_(["critical", "high"]),
+        ).count()
+
+        # UPSERT: insert or update on (document_id, snapshot_date)
+        stmt = pg_insert(ComplianceScoreSnapshot).values(
+            tenant_id=tenant_id,
+            document_id=document_id,
+            score_percentage=score,
+            total_atoms=total_atoms,
+            covered_atoms=covered,
+            open_mismatches=open_mismatches,
+            critical_mismatches=critical_mismatches,
+            snapshot_date=snapshot_date,
+            created_at=datetime.utcnow(),
+        ).on_conflict_do_update(
+            index_elements=["document_id", "snapshot_date"],
+            set_={
+                "score_percentage": score,
+                "total_atoms": total_atoms,
+                "covered_atoms": covered,
+                "open_mismatches": open_mismatches,
+                "critical_mismatches": critical_mismatches,
+                "created_at": datetime.utcnow(),
+            }
+        )
+        db.execute(stmt)
+        db.commit()
+
+        obj = db.query(ComplianceScoreSnapshot).filter_by(
+            document_id=document_id, snapshot_date=snapshot_date
+        ).first()
+        return obj
+
+    def capture_all_active_documents(self, db: Session) -> int:
+        """
+        Snapshot all documents that have atoms. Called by nightly Celery beat task.
+        Returns count of documents snapshotted.
+        """
+        from app.models.document import Document
+        from sqlalchemy import func
+
+        # Documents that have atoms (active documents)
+        active_doc_ids = db.query(
+            RequirementAtom.document_id, RequirementAtom.tenant_id
+        ).group_by(
+            RequirementAtom.document_id, RequirementAtom.tenant_id
+        ).all()
+
+        count = 0
+        for doc_id, tenant_id in active_doc_ids:
+            try:
+                self.capture_for_document(db=db, document_id=doc_id, tenant_id=tenant_id)
+                count += 1
+            except Exception as e:
+                logger.warning(f"Snapshot failed for document {doc_id}: {e}")
+
+        logger.info(f"Snapshotted {count} documents")
+        return count
+
+
+compliance_snapshot_service = ComplianceSnapshotService()
+```
+
+### Backend — Celery Beat Task (Nightly Snapshot)
+
+**Add to `backend/app/tasks/document_pipeline.py`** or create `backend/app/tasks/analytics_tasks.py`:
+
+```python
+# backend/app/tasks/analytics_tasks.py
+from app.core.celery_app import celery_app
+from app.core.logging import get_logger
+
+logger = get_logger("analytics_tasks")
+
+
+@celery_app.task(name="nightly_compliance_snapshots")
+def nightly_compliance_snapshots():
+    """
+    Celery beat task: run every night at midnight to snapshot compliance scores
+    for all active documents. Configured in celery beat schedule.
+    """
+    from app.db.session import SessionLocal
+    from app.services.compliance_snapshot_service import compliance_snapshot_service
+
+    db = SessionLocal()
+    try:
+        count = compliance_snapshot_service.capture_all_active_documents(db)
+        logger.info(f"Nightly snapshot completed: {count} documents")
+        return {"status": "completed", "documents_snapshotted": count}
+    except Exception as e:
+        logger.error(f"Nightly snapshot task failed: {e}")
+        raise
+    finally:
+        db.close()
+```
+
+**Add to Celery beat schedule** in `backend/app/core/celery_app.py`:
+
+```python
+# Add to beat_schedule dict:
+"nightly-compliance-snapshots": {
+    "task": "nightly_compliance_snapshots",
+    "schedule": crontab(hour=0, minute=0),  # midnight UTC
+    "options": {"expires": 3600},
+},
+```
+
+**Also trigger a snapshot after each validation scan completes** — in `backend/app/services/validation_service.py` at the end of `run_validation_scan`:
+
+```python
+# PHASE 5C: Capture compliance snapshot after each scan
+try:
+    from app.services.compliance_snapshot_service import compliance_snapshot_service
+    compliance_snapshot_service.capture_for_document(
+        db=db, document_id=document_id, tenant_id=tenant_id
+    )
+except Exception as e:
+    logger.warning(f"Post-scan compliance snapshot failed (non-fatal): {e}")
+```
+
+### Backend — API Endpoint
+
+**Add to `backend/app/api/endpoints/validation.py`:**
+
+```python
+from app.models.compliance_score_snapshot import ComplianceScoreSnapshot
+from datetime import date, timedelta
+
+
+# GET /validation/{document_id}/compliance-trend
+@router.get("/{document_id}/compliance-trend")
+def get_compliance_trend(
+    document_id: int,
+    days: int = Query(default=30, ge=7, le=365),
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    Return compliance score snapshots for the last N days.
+    Used to render the trend line chart on the validation dashboard.
+    """
+    since = date.today() - timedelta(days=days)
+
+    snapshots = db.query(ComplianceScoreSnapshot).filter(
+        ComplianceScoreSnapshot.document_id == document_id,
+        ComplianceScoreSnapshot.tenant_id == current_user.tenant_id,
+        ComplianceScoreSnapshot.snapshot_date >= since,
+    ).order_by(ComplianceScoreSnapshot.snapshot_date.asc()).all()
+
+    if not snapshots:
+        return {
+            "document_id": document_id,
+            "days": days,
+            "trend": [],
+            "direction": "neutral",
+            "change_pct": 0.0,
+        }
+
+    trend_data = [
+        {
+            "date": s.snapshot_date.isoformat(),
+            "score": s.score_percentage,
+            "total_atoms": s.total_atoms,
+            "covered_atoms": s.covered_atoms,
+            "open_mismatches": s.open_mismatches,
+            "critical_mismatches": s.critical_mismatches,
+        }
+        for s in snapshots
+    ]
+
+    # Calculate direction: compare first and last snapshot
+    first_score = snapshots[0].score_percentage
+    last_score = snapshots[-1].score_percentage
+    change = round(last_score - first_score, 1)
+
+    direction = "improving" if change > 1 else "degrading" if change < -1 else "stable"
+
+    return {
+        "document_id": document_id,
+        "days": days,
+        "trend": trend_data,
+        "direction": direction,
+        "change_pct": change,
+        "current_score": last_score,
+        "baseline_score": first_score,
+    }
+```
+
+### Frontend — Compliance Trend Chart
+
+**New file: `frontend/components/validation/ComplianceTrendChart.tsx`**
+
+```tsx
+// frontend/components/validation/ComplianceTrendChart.tsx
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine
+} from "recharts";
+import { TrendingUp, TrendingDown, Minus } from "lucide-react";
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+import { useState } from "react";
+
+interface Props {
+  documentId: number;
+}
+
+const DIRECTION_CONFIG = {
+  improving: { icon: TrendingUp, color: "text-green-600", bg: "bg-green-50 border-green-200" },
+  degrading: { icon: TrendingDown, color: "text-red-600", bg: "bg-red-50 border-red-200" },
+  stable: { icon: Minus, color: "text-gray-500", bg: "bg-gray-50 border-gray-200" },
+  neutral: { icon: Minus, color: "text-gray-400", bg: "bg-gray-50 border-gray-100" },
+};
+
+export function ComplianceTrendChart({ documentId }: Props) {
+  const [days, setDays] = useState(30);
+  const { data, isLoading } = useSWR(
+    `/validation/${documentId}/compliance-trend?days=${days}`,
+    apiGet,
+    { refreshInterval: 300_000 }  // refresh every 5 min
+  );
+
+  if (isLoading) return <div className="h-48 flex items-center justify-center text-sm text-gray-400">Loading trend...</div>;
+  if (!data?.trend?.length) return (
+    <div className="h-20 flex items-center justify-center text-sm text-gray-400">
+      No trend data yet. Run a validation scan to start tracking.
+    </div>
+  );
+
+  const direction = data.direction || "neutral";
+  const cfg = DIRECTION_CONFIG[direction as keyof typeof DIRECTION_CONFIG] || DIRECTION_CONFIG.neutral;
+  const Icon = cfg.icon;
+
+  const formatDate = (dateStr: string) => {
+    const d = new Date(dateStr);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  const chartData = data.trend.map((s: any) => ({
+    ...s,
+    date: formatDate(s.date),
+  }));
+
+  return (
+    <div className="space-y-3">
+      {/* Header: score + direction indicator */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full border text-xs font-medium ${cfg.bg} ${cfg.color}`}>
+            <Icon className="h-3.5 w-3.5" />
+            {direction === "improving" && `+${Math.abs(data.change_pct)}% in ${days}d`}
+            {direction === "degrading" && `-${Math.abs(data.change_pct)}% in ${days}d`}
+            {direction === "stable" && `Stable (${data.change_pct > 0 ? "+" : ""}${data.change_pct}%)`}
+            {direction === "neutral" && "No trend data"}
+          </div>
+          <span className="text-2xl font-bold text-gray-900">{data.current_score}%</span>
+        </div>
+        {/* Days selector */}
+        <div className="flex gap-1">
+          {[7, 14, 30, 90].map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`px-2 py-0.5 text-xs rounded ${days === d ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Line chart */}
+      <ResponsiveContainer width="100%" height={160}>
+        <LineChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: -20 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} tickFormatter={(v) => `${v}%`} />
+          <Tooltip
+            formatter={(value: number) => [`${value}%`, "Compliance"]}
+            labelStyle={{ fontSize: 11 }}
+            contentStyle={{ fontSize: 11 }}
+          />
+          <ReferenceLine y={80} stroke="#f59e0b" strokeDasharray="3 3" label={{ value: "80%", fontSize: 10, fill: "#f59e0b" }} />
+          <Line
+            type="monotone"
+            dataKey="score"
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dot={{ r: 3, fill: "#3b82f6" }}
+            activeDot={{ r: 5 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+
+      {/* Supporting metrics row */}
+      <div className="grid grid-cols-3 gap-2 text-center text-xs">
+        <div className="rounded border p-2">
+          <div className="font-semibold text-gray-900">{data.trend[data.trend.length - 1]?.open_mismatches ?? 0}</div>
+          <div className="text-gray-400">Open mismatches</div>
+        </div>
+        <div className="rounded border p-2">
+          <div className="font-semibold text-red-600">{data.trend[data.trend.length - 1]?.critical_mismatches ?? 0}</div>
+          <div className="text-gray-400">Critical/High</div>
+        </div>
+        <div className="rounded border p-2">
+          <div className="font-semibold text-gray-900">{data.trend[data.trend.length - 1]?.total_atoms ?? 0}</div>
+          <div className="text-gray-400">Total atoms</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+**Wire into validation panel** — replace or augment the static compliance score display with:
+
+```tsx
+// In the compliance score section of the validation panel:
+<ComplianceTrendChart documentId={documentId} />
+```
+
+### Test Commands
+
+```bash
+# 1. Run migration
+alembic upgrade s17d1
+
+# 2. Verify table with unique constraint
+psql -c "\d compliance_score_snapshots"
+psql -c "SELECT indexname FROM pg_indexes WHERE tablename='compliance_score_snapshots'"
+
+# 3. Manually trigger a snapshot for document 1
+# In Python shell:
+from app.db.session import SessionLocal
+from app.services.compliance_snapshot_service import compliance_snapshot_service
+db = SessionLocal()
+snap = compliance_snapshot_service.capture_for_document(db, document_id=1, tenant_id=1)
+print(snap.score_percentage)
+
+# 4. Verify in DB
+psql -c "SELECT document_id, score_percentage, snapshot_date FROM compliance_score_snapshots"
+
+# 5. Run the nightly task manually
+celery -A app.core.celery_app call nightly_compliance_snapshots
+# Expected: { "status": "completed", "documents_snapshotted": N }
+
+# 6. Test trend API
+curl -H "Authorization: Bearer $TECH_LEAD_TOKEN" \
+  "http://localhost:8000/api/v1/validation/1/compliance-trend?days=30"
+# Expected: { "trend": [...], "direction": "...", "change_pct": ..., "current_score": ... }
+
+# 7. Verify upsert on same day (run snapshot twice — should not duplicate)
+psql -c "SELECT COUNT(*) FROM compliance_score_snapshots WHERE document_id=1 AND snapshot_date=CURRENT_DATE"
+# Expected: 1 (upsert, not insert)
+
+# 8. Test recharts dependency installed
+cd frontend && npm list recharts
+```
+
+### Risk Assessment
+- **Unique constraint + UPSERT** — idempotent; running snapshot twice on the same day updates, not duplicates
+- **Celery beat timing** — midnight UTC snapshot; documents created during the day get a snapshot within 24 hours at most; also triggered immediately after each scan
+- **Large tenant performance** — `capture_all_active_documents` loops per document; for 1000+ docs, consider chunking with `try/except` per doc (already has that)
+- **Recharts dependency** — already used in P4-09 cost savings widget; no new NPM dependency
+- **Cascade delete** — `ON DELETE CASCADE` on document_id FK; snapshots auto-deleted with document
+
+
+---
+
+## P5C-09 — Cross-Project Aggregate Compliance Dashboard (CTO / VP Engineering)
+
+**Priority:** P2 — CTO monthly view: "BRD Compliance Score: 91% across 14 active projects. QA time saved: ~18 hours."
+**Complexity:** MEDIUM — Aggregate query across documents; new analytics page in frontend.
+**Risk:** LOW — Read-only analytics endpoint. No writes to existing tables.
+
+### Why This Exists
+
+**CTO Monthly View:**
+- "BRD Compliance Score: 91% across 14 active projects."
+- "Open mismatches: 23 (8 High, 11 Medium, 4 Low)."
+- "Regulatory risk: 2 HIPAA requirements unvalidated (file not uploaded)."
+- "Gemini cost saved vs baseline: ₹12,400 this month." (P4-09 already covers this)
+- "QA time saved: ~18 hours (based on atom count × baseline tester hours)."
+
+P5B-02 gives a per-document compliance score. There is no cross-document aggregate view. A CTO needs to see all projects at once and spot which ones are lagging.
+
+The fix: a new analytics endpoint that aggregates across all documents in the tenant, plus a frontend executive dashboard page. QA time saved is calculated as `testable_atoms × baseline_tester_hours_per_atom` (configurable in tenant settings, default 0.5 hours).
+
+### No New DB Changes
+
+This task only reads existing tables:
+- `compliance_score_snapshots` (P5C-08) — for per-document latest score
+- `requirement_atoms` — for atom counts and regulatory tags
+- `mismatches` — for open/severity breakdown
+- `documents` — for document metadata
+- `file_suggestions` (P5C-01) — for unvalidated regulatory atoms
+
+No new migration required.
+
+One optional tenant setting addition (stored in existing `tenant.settings` JSONB, no schema change):
+
+```json
+{
+  "qa_baseline_hours_per_atom": 0.5
+}
+```
+
+### Backend — Aggregate Analytics Endpoint
+
+**Add to `backend/app/api/endpoints/analysis_results.py`** (or create a new `analytics.py` router):
+
+```python
+# Add to backend/app/api/endpoints/analytics.py (new file)
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import Optional
+from app.api import deps
+
+router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+@router.get("/compliance-overview")
+def get_compliance_overview(
+    db: Session = Depends(deps.get_db),
+    current_user = Depends(deps.get_current_active_user),
+):
+    """
+    CTO/VP dashboard: aggregate compliance across all documents in the tenant.
+
+    Returns:
+    - Overall compliance percentage (weighted by atom count)
+    - Per-document breakdown
+    - Mismatch severity breakdown
+    - Regulatory risk summary (atoms with regulatory tags but no linked file)
+    - QA time saved estimate
+    """
+    from app.models.document import Document
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.mismatch import Mismatch
+    from app.models.compliance_score_snapshot import ComplianceScoreSnapshot
+    from app.models.file_suggestion import FileSuggestion
+    from app.models.tenant import Tenant
+    from datetime import date
+
+    tenant_id = current_user.tenant_id
+
+    # 1. All active documents (have atoms)
+    docs_with_atoms = db.query(
+        RequirementAtom.document_id,
+        func.count(RequirementAtom.id).label("atom_count"),
+    ).filter(
+        RequirementAtom.tenant_id == tenant_id,
+    ).group_by(RequirementAtom.document_id).all()
+
+    doc_ids = [r.document_id for r in docs_with_atoms]
+    atom_count_by_doc = {r.document_id: r.atom_count for r in docs_with_atoms}
+
+    if not doc_ids:
+        return {
+            "tenant_id": tenant_id,
+            "total_documents": 0,
+            "overall_compliance_pct": 100.0,
+            "projects": [],
+            "mismatch_breakdown": {},
+            "regulatory_risk": {},
+            "qa_time_saved_hours": 0.0,
+        }
+
+    # 2. Latest compliance score snapshot per document
+    from sqlalchemy import distinct
+    latest_snapshots_subq = db.query(
+        ComplianceScoreSnapshot.document_id,
+        func.max(ComplianceScoreSnapshot.snapshot_date).label("latest_date"),
+    ).filter(
+        ComplianceScoreSnapshot.tenant_id == tenant_id,
+        ComplianceScoreSnapshot.document_id.in_(doc_ids),
+    ).group_by(ComplianceScoreSnapshot.document_id).subquery()
+
+    latest_snapshots = db.query(ComplianceScoreSnapshot).join(
+        latest_snapshots_subq,
+        (ComplianceScoreSnapshot.document_id == latest_snapshots_subq.c.document_id) &
+        (ComplianceScoreSnapshot.snapshot_date == latest_snapshots_subq.c.latest_date),
+    ).all()
+
+    score_by_doc = {s.document_id: s for s in latest_snapshots}
+
+    # 3. Document metadata
+    docs = db.query(Document).filter(
+        Document.id.in_(doc_ids),
+        Document.tenant_id == tenant_id,
+    ).all()
+    doc_meta = {d.id: d for d in docs}
+
+    # 4. Overall mismatch breakdown
+    mismatch_summary = db.query(
+        Mismatch.severity,
+        func.count(Mismatch.id).label("count"),
+    ).filter(
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.document_id.in_(doc_ids),
+        Mismatch.status.in_(["open", "in_progress"]),
+    ).group_by(Mismatch.severity).all()
+
+    mismatch_breakdown = {r.severity: r.count for r in mismatch_summary}
+    total_open_mismatches = sum(mismatch_breakdown.values())
+
+    # 5. Regulatory risk — atoms with regulatory tags but no linked code file
+    from sqlalchemy.dialects.postgresql import ARRAY
+    from sqlalchemy import String, cast
+    # Find atoms with regulatory_tags set but corresponding file suggestion unfulfilled
+    unvalidated_regulatory = db.execute(
+        """
+        SELECT ra.regulatory_tags, COUNT(*) as cnt
+        FROM requirement_atoms ra
+        WHERE ra.tenant_id = :tenant_id
+          AND ra.document_id = ANY(:doc_ids)
+          AND ra.regulatory_tags IS NOT NULL
+          AND array_length(ra.regulatory_tags, 1) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM mismatches m
+            WHERE m.requirement_atom_id = ra.id
+              AND m.status NOT IN ('false_positive', 'auto_closed')
+          )
+        GROUP BY ra.regulatory_tags
+        """,
+        {"tenant_id": tenant_id, "doc_ids": doc_ids}
+    ).fetchall()
+
+    # Simplified: count unvalidated atoms by regulatory tag
+    regulatory_risk = {}
+    for row in unvalidated_regulatory:
+        tags = row[0] or []
+        for tag in tags:
+            regulatory_risk[tag] = regulatory_risk.get(tag, 0) + row[1]
+
+    # 6. QA time saved
+    # Atoms with testability="static" or "runtime" = auto-tested = QA time saved
+    auto_testable_count = db.query(func.count(RequirementAtom.id)).filter(
+        RequirementAtom.tenant_id == tenant_id,
+        RequirementAtom.document_id.in_(doc_ids),
+        RequirementAtom.testability.in_(["static", "runtime"]),
+    ).scalar() or 0
+
+    # QA baseline hours per atom from tenant settings (default 0.5 hours)
+    tenant = db.query(Tenant).filter_by(id=tenant_id).first()
+    tenant_settings = tenant.settings if tenant and hasattr(tenant, 'settings') and tenant.settings else {}
+    baseline_hours = float(tenant_settings.get("qa_baseline_hours_per_atom", 0.5))
+    qa_time_saved = round(auto_testable_count * baseline_hours, 1)
+
+    # 7. Weighted overall compliance (weighted by atom count)
+    total_atoms = sum(atom_count_by_doc.values())
+    weighted_score_sum = 0.0
+    for doc_id in doc_ids:
+        snap = score_by_doc.get(doc_id)
+        score = snap.score_percentage if snap else 100.0
+        weighted_score_sum += score * atom_count_by_doc[doc_id]
+    overall_compliance = round(weighted_score_sum / total_atoms, 1) if total_atoms > 0 else 100.0
+
+    # 8. Per-project list
+    projects = []
+    for doc_id in doc_ids:
+        snap = score_by_doc.get(doc_id)
+        doc = doc_meta.get(doc_id)
+        projects.append({
+            "document_id": doc_id,
+            "title": doc.title if doc else f"Document {doc_id}",
+            "atom_count": atom_count_by_doc[doc_id],
+            "compliance_score": snap.score_percentage if snap else None,
+            "open_mismatches": snap.open_mismatches if snap else 0,
+            "critical_mismatches": snap.critical_mismatches if snap else 0,
+            "last_snapshot_date": snap.snapshot_date.isoformat() if snap else None,
+        })
+
+    # Sort: lowest compliance first (most urgent)
+    projects.sort(key=lambda p: p["compliance_score"] or 100.0)
+
+    return {
+        "tenant_id": tenant_id,
+        "total_documents": len(doc_ids),
+        "total_atoms": total_atoms,
+        "overall_compliance_pct": overall_compliance,
+        "total_open_mismatches": total_open_mismatches,
+        "mismatch_breakdown": mismatch_breakdown,
+        "regulatory_risk": regulatory_risk,
+        "qa_time_saved_hours": qa_time_saved,
+        "auto_testable_atoms": auto_testable_count,
+        "qa_baseline_hours_per_atom": baseline_hours,
+        "projects": projects,
+        "generated_at": date.today().isoformat(),
+    }
+```
+
+**Register router in `backend/app/api/api.py`:**
+
+```python
+from app.api.endpoints import analytics
+api_router.include_router(analytics.router)
+```
+
+### Frontend — Executive Compliance Dashboard Page
+
+**New file: `frontend/pages/analytics/compliance.tsx`** (or `frontend/app/analytics/compliance/page.tsx` for Next.js app router):
+
+```tsx
+// frontend/pages/analytics/compliance.tsx
+import { Building2, TrendingUp, TrendingDown, AlertTriangle, Clock, Shield } from "lucide-react";
+import useSWR from "swr";
+import { apiGet } from "@/lib/api";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
+
+export default function ComplianceDashboard() {
+  const { data, isLoading } = useSWR("/analytics/compliance-overview", apiGet, {
+    refreshInterval: 300_000,  // refresh every 5 min
+  });
+
+  if (isLoading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading compliance data...</div>;
+
+  const {
+    total_documents, overall_compliance_pct, total_open_mismatches,
+    mismatch_breakdown, regulatory_risk, qa_time_saved_hours,
+    auto_testable_atoms, projects = [],
+  } = data ?? {};
+
+  const getScoreColor = (score: number) =>
+    score >= 90 ? "text-green-600" : score >= 75 ? "text-amber-600" : "text-red-600";
+  const getScoreBg = (score: number) =>
+    score >= 90 ? "bg-green-50 border-green-200" : score >= 75 ? "bg-amber-50 border-amber-200" : "bg-red-50 border-red-200";
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Compliance Overview</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Across {total_documents} active projects · Last updated today
+        </p>
+      </div>
+
+      {/* Top KPI cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Overall compliance */}
+        <div className={`rounded-xl border p-5 space-y-1 ${getScoreBg(overall_compliance_pct)}`}>
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Overall Compliance</p>
+          <p className={`text-4xl font-bold ${getScoreColor(overall_compliance_pct)}`}>
+            {overall_compliance_pct}%
+          </p>
+          <p className="text-xs text-gray-500">Weighted across {total_documents} projects</p>
+        </div>
+
+        {/* Open mismatches */}
+        <div className="rounded-xl border bg-white p-5 space-y-1">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Open Mismatches</p>
+          <p className="text-4xl font-bold text-gray-900">{total_open_mismatches}</p>
+          <div className="flex gap-2 text-xs">
+            <span className="text-red-600 font-medium">{mismatch_breakdown?.critical || 0} Critical</span>
+            <span className="text-amber-600">{mismatch_breakdown?.high || 0} High</span>
+            <span className="text-gray-400">{mismatch_breakdown?.medium || 0} Med</span>
+          </div>
+        </div>
+
+        {/* QA time saved */}
+        <div className="rounded-xl border bg-white p-5 space-y-1">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">QA Time Saved</p>
+          <p className="text-4xl font-bold text-blue-600">{qa_time_saved_hours}h</p>
+          <p className="text-xs text-gray-500">
+            {auto_testable_atoms} atoms auto-tested · 0.5h baseline each
+          </p>
+        </div>
+
+        {/* Regulatory risk */}
+        <div className="rounded-xl border bg-white p-5 space-y-1">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Regulatory Risk</p>
+          <p className="text-4xl font-bold text-amber-600">
+            {Object.values(regulatory_risk || {}).reduce((a: number, b: any) => a + (b as number), 0)}
+          </p>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {Object.entries(regulatory_risk || {}).map(([tag, count]) => (
+              <span key={tag} className="text-xs px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded">
+                {tag}: {count as number}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Per-project compliance bar chart */}
+      <div className="rounded-xl border bg-white p-5">
+        <h2 className="text-sm font-semibold text-gray-700 mb-4">Compliance by Project</h2>
+        <ResponsiveContainer width="100%" height={Math.max(200, projects.length * 40)}>
+          <BarChart
+            data={projects.slice(0, 15)}  // Show top 15 lowest compliance first
+            layout="vertical"
+            margin={{ left: 20, right: 40, top: 0, bottom: 0 }}
+          >
+            <XAxis type="number" domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11 }} />
+            <YAxis
+              dataKey="title"
+              type="category"
+              width={180}
+              tick={{ fontSize: 11 }}
+              tickFormatter={(v) => v.length > 25 ? `${v.slice(0, 22)}...` : v}
+            />
+            <Tooltip
+              formatter={(value: number) => [`${value}%`, "Compliance"]}
+              contentStyle={{ fontSize: 11 }}
+            />
+            <Bar dataKey="compliance_score" radius={[0, 4, 4, 0]}>
+              {projects.slice(0, 15).map((p: any) => (
+                <Cell
+                  key={p.document_id}
+                  fill={
+                    (p.compliance_score || 0) >= 90 ? "#22c55e" :
+                    (p.compliance_score || 0) >= 75 ? "#f59e0b" : "#ef4444"
+                  }
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Project detail table */}
+      <div className="rounded-xl border bg-white overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 border-b">
+            <tr>
+              <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Project</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Score</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Atoms</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Open</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Critical</th>
+              <th className="text-center px-4 py-3 text-xs font-medium text-gray-500 uppercase">Last Update</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {projects.map((p: any) => (
+              <tr key={p.document_id} className="hover:bg-gray-50 cursor-pointer"
+                  onClick={() => window.location.href = `/documents/${p.document_id}`}>
+                <td className="px-4 py-3 font-medium text-gray-900">{p.title}</td>
+                <td className="px-4 py-3 text-center">
+                  <span className={`font-bold ${getScoreColor(p.compliance_score || 0)}`}>
+                    {p.compliance_score != null ? `${p.compliance_score}%` : "—"}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-center text-gray-600">{p.atom_count}</td>
+                <td className="px-4 py-3 text-center">
+                  <span className={p.open_mismatches > 0 ? "text-amber-600 font-medium" : "text-gray-400"}>
+                    {p.open_mismatches}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <span className={p.critical_mismatches > 0 ? "text-red-600 font-bold" : "text-gray-400"}>
+                    {p.critical_mismatches}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-center text-gray-400 text-xs">
+                  {p.last_snapshot_date || "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+```
+
+**Wire into sidebar navigation** — add a "Compliance Dashboard" link in the sidebar under Analytics:
+
+```tsx
+// In the sidebar nav items array:
+{
+  label: "Compliance Dashboard",
+  href: "/analytics/compliance",
+  icon: Shield,
+  roles: ["cto", "vp_engineering", "admin", "tech_lead"],
+}
+```
+
+**Tenant Settings — QA Baseline Hours Configurability**
+
+In the settings page (where P5-09 Industry Profile is), add a QA calibration field:
+
+```tsx
+// In frontend/pages/settings/index.tsx, inside tenant settings form:
+<div className="space-y-1">
+  <label className="text-sm font-medium text-gray-700">
+    QA Baseline Hours per Atom
+  </label>
+  <p className="text-xs text-gray-500">
+    Estimated hours a QA engineer spends testing one requirement manually.
+    Used to calculate QA time saved on the compliance dashboard. Default: 0.5 hours.
+  </p>
+  <input
+    type="number"
+    step="0.1"
+    min="0.1"
+    max="8"
+    value={settings.qa_baseline_hours_per_atom ?? 0.5}
+    onChange={(e) => updateSetting("qa_baseline_hours_per_atom", parseFloat(e.target.value))}
+    className="w-24 text-sm border rounded px-2 py-1"
+  />
+</div>
+```
+
+### Test Commands
+
+```bash
+# 1. No migration needed (pure read)
+# Verify tables used exist
+psql -c "\d compliance_score_snapshots"
+psql -c "\d requirement_atoms" | grep testability
+psql -c "\d mismatches" | grep severity
+
+# 2. Seed some snapshots (or trigger validation scans on multiple documents)
+# Then test the aggregate endpoint:
+curl -H "Authorization: Bearer $CTO_TOKEN" \
+  http://localhost:8000/api/v1/analytics/compliance-overview
+# Expected:
+# {
+#   "total_documents": 14,
+#   "overall_compliance_pct": 91.2,
+#   "total_open_mismatches": 23,
+#   "mismatch_breakdown": {"high": 8, "medium": 11, "low": 4},
+#   "regulatory_risk": {"HIPAA": 2, "PCI-DSS": 1},
+#   "qa_time_saved_hours": 18.5,
+#   "projects": [...]
+# }
+
+# 3. Test with no snapshots yet (graceful fallback)
+# compliance_score should be null for documents without snapshots
+
+# 4. Verify QA baseline from tenant settings
+psql -c "SELECT settings->'qa_baseline_hours_per_atom' FROM tenants WHERE id=1"
+
+# 5. Update baseline via settings endpoint and re-check
+curl -X PATCH -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"settings": {"qa_baseline_hours_per_atom": 0.75}}' \
+  http://localhost:8000/api/v1/tenants/settings
+curl http://localhost:8000/api/v1/analytics/compliance-overview | jq .qa_time_saved_hours
+# Should reflect new 0.75 * atom_count value
+
+# 6. Verify recharts BarChart renders without console errors
+# Open /analytics/compliance in browser → check devtools for errors
+```
+
+### Risk Assessment
+- **Read-only endpoint** — aggregates from existing tables; no writes; safe to call frequently
+- **Weighted compliance** — weighted by atom count (not simple average); large documents don't get diluted by small ones
+- **Missing snapshots** — documents without snapshots show `compliance_score: null` and `open_mismatches: 0`; handled gracefully in the UI with "—"
+- **Regulatory risk query** — raw SQL for the regulatory cross-join; consider moving to ORM query if maintenance is a concern
+- **Role guard** — sidebar link only shows for `cto / vp_engineering / admin / tech_lead` roles; endpoint itself has no role check (tenant_id isolation is sufficient for data safety)
+- **QA time metric is an estimate** — clearly labeled as estimate; not shown to external auditors; configurable baseline makes it honest
+
+---
+
+## Phase 5C — Migration Dependency Chain
+
+```
+s16f1  (Phase 5B baseline — brd_sign_offs)
+  └── s17a1  file_suggestions + requirement_atoms.testability + documents.file_suggestion_summary
+       └── s17b1  mismatch_clarifications
+            └── s17c1  uat_checklist_items
+                 └── s17d1  compliance_score_snapshots
+                      └── s17e1  ci_webhook_configs
+```
+
+Run all at once:
+```bash
+alembic upgrade s17e1
+```
+
+Or step by step:
+```bash
+alembic upgrade s17a1  # P5C-01: file suggestions + testability
+alembic upgrade s17b1  # P5C-03: clarifications
+alembic upgrade s17c1  # P5C-04: UAT checklist
+alembic upgrade s17d1  # P5C-08: compliance snapshots
+alembic upgrade s17e1  # P5C-06: CI webhook config
+```
+
+## Phase 5C — New Files Summary
+
+| File | Task | Purpose |
+|------|------|---------|
+| `backend/alembic/versions/s17a1_file_suggestions.py` | P5C-01 | Migration: file_suggestions table + testability field |
+| `backend/alembic/versions/s17b1_mismatch_clarifications.py` | P5C-03 | Migration: mismatch_clarifications table |
+| `backend/alembic/versions/s17c1_uat_checklist.py` | P5C-04 | Migration: uat_checklist_items table |
+| `backend/alembic/versions/s17d1_compliance_snapshots.py` | P5C-08 | Migration: compliance_score_snapshots table |
+| `backend/alembic/versions/s17e1_ci_webhook_config.py` | P5C-06 | Migration: ci_webhook_configs table |
+| `backend/app/models/file_suggestion.py` | P5C-01 | FileSuggestion ORM model |
+| `backend/app/models/mismatch_clarification.py` | P5C-03 | MismatchClarification ORM model |
+| `backend/app/models/uat_checklist_item.py` | P5C-04 | UATChecklistItem ORM model |
+| `backend/app/models/compliance_score_snapshot.py` | P5C-08 | ComplianceScoreSnapshot ORM model |
+| `backend/app/models/ci_webhook_config.py` | P5C-06 | CIWebhookConfig ORM model |
+| `backend/app/services/file_suggestion_service.py` | P5C-01 | AI file suggestion generation + storage |
+| `backend/app/services/test_suite_service.py` | P5C-05 | Pytest test file generation + zip packaging |
+| `backend/app/services/fix_suggestion_service.py` | P5C-07 | AI fix suggestion + lazy cache in details |
+| `backend/app/services/compliance_snapshot_service.py` | P5C-08 | Daily snapshot service + upsert logic |
+| `backend/app/crud/crud_mismatch_clarification.py` | P5C-03 | CRUD: create, answer, close, get_by_mismatch |
+| `backend/app/tasks/test_generation_tasks.py` | P5C-05 | Celery task: async test suite generation |
+| `backend/app/tasks/analytics_tasks.py` | P5C-08 | Celery beat: nightly compliance snapshots |
+| `backend/app/api/endpoints/analytics.py` | P5C-09 | Analytics router: compliance-overview endpoint |
+| `frontend/components/documents/FileSuggestionBanner.tsx` | P5C-01 | Banner showing files needed + atom count |
+| `frontend/components/documents/RequestUploadModal.tsx` | P5C-02 | Modal: select team members + send notification |
+| `frontend/components/validation/MismatchClarificationPanel.tsx` | P5C-03 | Q&A thread on mismatch card |
+| `frontend/components/validation/UATChecklist.tsx` | P5C-04 | UAT checklist tab with pass/fail/blocked |
+| `frontend/components/validation/TestSuiteDownload.tsx` | P5C-05 | Download button + polling logic |
+| `frontend/components/settings/CIWebhookCard.tsx` | P5C-06 | CI webhook setup + secret display |
+| `frontend/components/validation/MismatchSuggestedFix.tsx` | P5C-07 | Expandable fix suggestion panel |
+| `frontend/components/validation/ComplianceTrendChart.tsx` | P5C-08 | Recharts line chart for compliance trend |
+| `frontend/pages/analytics/compliance.tsx` | P5C-09 | CTO executive compliance dashboard page |
+| `frontend/hooks/useFileSuggestions.ts` | P5C-01 | SWR hook for file suggestions |
+| `frontend/hooks/useTeamMembers.ts` | P5C-02 | SWR hook for team members list |
+| `frontend/hooks/useClarifications.ts` | P5C-03 | SWR hook for mismatch clarifications |
+| `frontend/hooks/useUATChecklist.ts` | P5C-04 | SWR hook for UAT checklist |
+
+## Phase 5C — Completion Checklist
+
+### Database (5 migrations)
+- [ ] `s17a1` — `file_suggestions` table + `requirement_atoms.testability` + `documents.file_suggestion_summary`
+- [ ] `s17b1` — `mismatch_clarifications` table with status CHECK constraint
+- [ ] `s17c1` — `uat_checklist_items` table with result CHECK constraint
+- [ ] `s17d1` — `compliance_score_snapshots` table with unique constraint on (document_id, snapshot_date)
+- [ ] `s17e1` — `ci_webhook_configs` table with per-tenant HMAC secret
+
+### Backend Services
+- [ ] `FileSuggestionService.generate_and_store()` triggered after atomization
+- [ ] `TestSuiteService.generate_zip()` packages pytest files as a zip
+- [ ] `FixSuggestionService.get_or_generate()` lazy-generates and caches AI fix
+- [ ] `ComplianceSnapshotService.capture_for_document()` + `capture_all_active_documents()`
+
+### Backend Tasks
+- [ ] `nightly_compliance_snapshots` Celery beat task registered at midnight UTC
+- [ ] `generate_test_suite` Celery task with Redis result storage (1h TTL)
+
+### Backend Endpoints
+- [ ] `GET /documents/{id}/file-suggestions`
+- [ ] `GET /documents/{id}/team-members`
+- [ ] `POST /documents/{id}/request-uploads`
+- [ ] `POST /validation/mismatches/{id}/clarification`
+- [ ] `POST /validation/mismatches/{id}/clarification/{cid}/answer`
+- [ ] `GET /validation/mismatches/{id}/clarifications`
+- [ ] `GET /validation/{document_id}/uat-checklist`
+- [ ] `POST /validation/{document_id}/uat-checklist/{item_id}/check`
+- [ ] `POST /validation/{document_id}/generate-tests`
+- [ ] `GET /validation/{document_id}/download-tests`
+- [ ] `POST /validation/mismatches/{id}/suggest-fix`
+- [ ] `DELETE /validation/mismatches/{id}/suggest-fix`
+- [ ] `GET /validation/{document_id}/compliance-trend`
+- [ ] `POST /webhooks/ci/test-results`
+- [ ] `POST /integrations/ci/setup`
+- [ ] `GET /integrations/ci/status`
+- [ ] `GET /analytics/compliance-overview`
+
+### Frontend Components
+- [ ] `FileSuggestionBanner` on document detail page
+- [ ] `RequestUploadModal` wired to banner's "Request Upload" button
+- [ ] `MismatchClarificationPanel` on each mismatch card
+- [ ] `UATChecklist` tab on validation panel
+- [ ] `TestSuiteDownload` button on validation panel
+- [ ] `CIWebhookCard` in settings integrations section
+- [ ] `MismatchSuggestedFix` on each mismatch card
+- [ ] `ComplianceTrendChart` replacing static score on validation panel
+- [ ] Compliance Dashboard page at `/analytics/compliance`
+- [ ] Sidebar nav link for CTO/Tech Lead roles
+
+### Notifications wired
+- [ ] `upload_request` — when BA requests code upload (P5C-02)
+- [ ] `clarification_requested` — when BA asks developer a question (P5C-03)
+- [ ] `clarification_answered` — when developer answers (P5C-03)
+
