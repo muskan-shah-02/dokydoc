@@ -15435,3 +15435,1757 @@ The 4 new JSON output fields (`file_role`, `backed_by_model`, `model_definition`
 - Rebuild button click rate (signal that auto-build is not working well)
 - Node click-through rate (are users navigating via the diagram?)
 
+
+---
+
+## P3.10 — Mermaid Click Callback Fix (`window.dokydocClick` + `securityLevel: 'loose'`)
+
+**Owner:** Frontend Dev  
+**Estimate:** 0.5 day  
+**Severity:** CRITICAL — Node click navigation is completely broken without this  
+**Covers:** GAP-1  
+**Depends on:** P3.8 (DataFlowDiagram.tsx exists)
+
+---
+
+### Root Cause
+
+Mermaid's `click n1 call dokydocClick("123")` directive works by invoking a **global JavaScript function** named `dokydocClick` on `window`. Two problems in the current plan:
+
+1. `handleNodeClick` is a React closure inside `DataFlowDiagram.tsx` — it is **never exposed** on `window`, so Mermaid has nothing to call.
+2. Mermaid's default `securityLevel: 'strict'` **silently ignores all click directives** regardless of step 1. This must be changed to `'loose'`.
+
+Without both fixes, every node in every generated diagram is permanently non-clickable.
+
+---
+
+### Fix A — Register Global Click Handler in `DataFlowDiagram.tsx`
+
+**File:** `frontend/components/data-flow/DataFlowDiagram.tsx`
+
+Find the `handleNodeClick` function (already defined in P3.8) and add a `useEffect` **immediately after** it:
+
+```tsx
+// EXISTING (from P3.8):
+const handleNodeClick = (nodeId: string) => {
+  const numId = parseInt(nodeId, 10);
+  if (!isNaN(numId)) {
+    router.push(`/dashboard/code/${numId}`);
+  }
+};
+
+// ADD THIS immediately after:
+useEffect(() => {
+  // Expose handler as global so Mermaid's `click n1 call dokydocClick("id")` works
+  (window as any).dokydocClick = (id: string) => {
+    const numId = parseInt(id, 10);
+    if (!isNaN(numId)) {
+      router.push(`/dashboard/code/${numId}`);
+    }
+  };
+  // Clean up when component unmounts (e.g. user navigates away)
+  return () => {
+    delete (window as any).dokydocClick;
+  };
+}, [router]);
+```
+
+> **Why the cleanup matters:** Without it, navigating from one component page to another leaves a stale `window.dokydocClick` pointing to the old router instance, which could navigate to wrong pages.
+
+---
+
+### Fix B — Set `securityLevel: 'loose'` in `MermaidDiagram.tsx`
+
+**File:** `frontend/components/ontology/MermaidDiagram.tsx`
+
+Find the Mermaid initialization call (search for `mermaid.initialize` or `mermaid.init`). Add `securityLevel: 'loose'` to the config object:
+
+```ts
+// BEFORE (current state — securityLevel defaults to 'strict'):
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "default",
+  // ... other existing config
+});
+
+// AFTER:
+mermaid.initialize({
+  startOnLoad: false,
+  theme: "default",
+  securityLevel: "loose",   // ← ADD THIS LINE
+  // ... other existing config
+});
+```
+
+> **Security note:** `securityLevel: 'loose'` allows Mermaid to invoke named global functions via click directives. This is safe here because:
+> - The `dokydocClick` function only calls `router.push()` — it cannot execute arbitrary code
+> - The Mermaid syntax itself is generated server-side by DokyDoc, not from user input
+> - The function is cleaned up on unmount
+
+---
+
+### Fix C — Verify `onNodeClick` Prop Still Works (Non-Regression)
+
+The existing `MermaidDiagram.tsx` `onNodeClick` prop is used by other diagrams (ontology graph, domain map). Confirm that setting `securityLevel: 'loose'` does NOT break those existing click handlers.
+
+**Test:**
+1. Navigate to a component's "Graph" or "Domains" tab (existing tab that uses `MermaidDiagram` with `onNodeClick`)
+2. Verify node clicks still work as before
+3. Navigate to "Data Flow" tab → verify `dokydocClick` fires on node click → browser navigates to component page
+
+---
+
+### Fix D — Harden `render_mermaid()` node ID format (Backend)
+
+**File:** `backend/app/services/data_flow_service.py`
+
+The current `click` directive format is:
+```python
+lines.append(f'    click {nid} call dokydocClick("{node["component_id"]}")')
+```
+
+The `nid` is a sequential counter (`n0`, `n1`, etc.) while `node["component_id"]` is the actual DB id. The `dokydocClick` receives the **DB id** as a string argument — this is correct. But add a safety guard to ensure we never emit a click directive for external nodes (which have `component_id = None`):
+
+```python
+# BEFORE (current — could emit click for external nodes):
+if node.get("component_id"):
+    lines.append(f'    click {nid} call dokydocClick("{node["component_id"]}")')
+
+# AFTER (same — already has the guard — just confirm this line exists exactly as-is):
+if node.get("component_id"):   # Only internal nodes with real DB ids get click handlers
+    lines.append(f'    click {nid} call dokydocClick("{node["component_id"]}")')
+```
+
+This is already correct in P3.4 — just a confirmation checklist item.
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Backend — ensure render_mermaid output contains click directives:
+python3 -c "
+from app.services.data_flow_service import DataFlowService
+svc = DataFlowService()
+nodes = [{'component_id': 42, 'name': 'TestService', 'file_role': 'SERVICE'}]
+edges = []
+result = svc.render_mermaid(nodes, edges, 'technical')
+print(result)
+assert 'click n0 call dokydocClick' in result, 'click directive missing'
+print('OK')
+"
+```
+
+```
+# 2. Frontend — manual browser test:
+# a. Open any pro-tier component → Data Flow tab
+# b. Open browser DevTools → Console
+# c. Type: window.dokydocClick
+# Expected: function (not undefined)
+# d. Click a node in the diagram
+# Expected: browser navigates to /dashboard/code/{id}
+```
+
+```
+# 3. Non-regression — ontology/graph tabs:
+# a. Navigate to component → "Graph" tab (existing MermaidDiagram usage)
+# b. Click any node
+# Expected: existing behavior unchanged
+```
+
+---
+
+### Developer Checklist
+
+- [ ] Add `useEffect` to register `window.dokydocClick` in `DataFlowDiagram.tsx`
+- [ ] Add cleanup `return () => delete (window as any).dokydocClick` in the same effect
+- [ ] Add `securityLevel: "loose"` to `mermaid.initialize()` in `MermaidDiagram.tsx`
+- [ ] Test non-regression on all existing diagram tabs (Graph, Domains, System)
+- [ ] Test node click navigation in Data Flow tab (Technical mode + Business mode)
+- [ ] Test that unmount cleanup works: navigate away → verify `window.dokydocClick` is `undefined`
+
+
+---
+
+## P3.11 — CACHE & EVENT Edge Extraction in DataFlowService
+
+**Owner:** Backend Dev 2  
+**Estimate:** 1 day  
+**Severity:** CRITICAL — Diagram is structurally incomplete for any system using Redis, Celery, Kafka  
+**Covers:** GAP-3  
+**Depends on:** P3.4 (DataFlowService exists), P3.1 (outbound_calls prompt field)
+
+---
+
+### Root Cause
+
+`DataFlowService.build_flow_for_component()` defines 10 edge types but generates only 5 of them. The 4 edge types below are in the DB CHECK constraint and in the EdgeListPanel UI but are never created:
+
+| Edge Type | Represents | Typical Code Pattern |
+|-----------|------------|---------------------|
+| `CACHE_READ` | Redis GET / Memcached get / cache.get() | `await redis.get(key)`, `cache.get("user:123")` |
+| `CACHE_WRITE` | Redis SET / cache.set() / cache.delete() | `await redis.set(key, value)`, `cache.delete(key)` |
+| `EVENT_PUBLISH` | Celery task.delay() / Kafka produce / SQS send | `send_email.delay(user_id)`, `producer.send(topic, msg)` |
+| `EVENT_CONSUME` | Celery @task decorator / Kafka consumer / SQS poll | `@celery_app.task`, `@app.task(name=...)` |
+
+---
+
+### What to Add in `DataFlowService.build_flow_for_component()`
+
+**File:** `backend/app/services/data_flow_service.py`
+
+Add these two new detection blocks inside `build_flow_for_component()`, **after the existing EXTERNAL_API block** and **before the SCHEMA block**:
+
+```python
+# ── CACHE edges: detect Redis / Memcached / cache interactions ──────────────
+_CACHE_READ_KEYWORDS = {"redis.get", "cache.get", "get_cache", "cache_get",
+                        "memcache.get", "client.get", "hget", "lrange",
+                        "smembers", "zrange", "getex"}
+_CACHE_WRITE_KEYWORDS = {"redis.set", "cache.set", "set_cache", "cache_set",
+                         "memcache.set", "client.set", "hset", "lpush",
+                         "rpush", "sadd", "zadd", "setex", "cache.delete",
+                         "redis.delete", "cache_invalidate"}
+_CACHE_SERVICE_KEYWORDS = {"redis", "cache", "memcache", "memcached",
+                           "cacheservice", "redisclient"}
+
+for i, interaction in enumerate(sa.get("component_interactions", []), start=1):
+    target = (interaction.get("target") or "").lower()
+    description = (interaction.get("description") or "").lower()
+    combined = f"{target} {description}"
+
+    # Determine if this is a cache interaction
+    is_cache_target = any(kw in combined for kw in _CACHE_SERVICE_KEYWORDS)
+    if not is_cache_target:
+        continue
+
+    # Determine READ vs WRITE
+    is_read = any(kw in combined for kw in _CACHE_READ_KEYWORDS)
+    is_write = any(kw in combined for kw in _CACHE_WRITE_KEYWORDS)
+    if not is_read and not is_write:
+        # Default: if we see cache target but can't determine direction, use CACHE_READ
+        is_read = True
+
+    edge_type = "CACHE_READ" if is_read else "CACHE_WRITE"
+    cache_target = interaction.get("target", "Redis")
+
+    edges.append({
+        "tenant_id": tenant_id,
+        "repository_id": component.repository_id,
+        "source_component_id": component_id,
+        "target_component_id": None,   # Cache is always external
+        "edge_type": edge_type,
+        "source_function": interaction.get("source"),
+        "target_function": None,
+        "data_in_description": interaction.get("data_passed"),
+        "data_out_description": None,
+        "human_label": self._build_human_label(
+            edge_type,
+            key=interaction.get("data_passed") or cache_target,
+        ),
+        "external_target_name": cache_target,
+        "step_index": None,
+    })
+
+# ── EVENT edges: detect Celery / Kafka / RabbitMQ / SQS / SNS ───────────────
+_EVENT_PUBLISH_KEYWORDS = {".delay(", ".apply_async(", "producer.send",
+                           "publish(", "sns.publish", "sqs.send_message",
+                           "rabbitmq.publish", "channel.publish",
+                           "task.apply_async", "celery_app.send_task"}
+_EVENT_CONSUME_KEYWORDS = {"@celery_app.task", "@app.task", "@shared_task",
+                           "@task(", "consumer.poll", "consumer.consume",
+                           "subscribe(", "sqs.receive_message",
+                           "channel.consume", "@dramatiq.actor"}
+_EVENT_SERVICE_KEYWORDS = {"celery", "kafka", "rabbitmq", "sqs", "sns",
+                           "redis queue", "dramatiq", "rq.", "huey",
+                           "event", "message queue", "broker"}
+
+# Check component_interactions for event patterns
+for i, interaction in enumerate(sa.get("component_interactions", []), start=1):
+    target = (interaction.get("target") or "").lower()
+    description = (interaction.get("description") or "").lower()
+    source_fn = (interaction.get("source") or "").lower()
+    combined = f"{target} {description} {source_fn}"
+
+    is_event_target = any(kw in combined for kw in _EVENT_SERVICE_KEYWORDS)
+    if not is_event_target:
+        continue
+
+    is_publish = any(kw in combined for kw in _EVENT_PUBLISH_KEYWORDS)
+    is_consume = any(kw in combined for kw in _EVENT_CONSUME_KEYWORDS)
+    if not is_publish and not is_consume:
+        # Default: producer pattern if it's a service calling, consumer if it's a task decorator
+        is_publish = True
+
+    edge_type = "EVENT_PUBLISH" if is_publish else "EVENT_CONSUME"
+    event_name = interaction.get("data_passed") or interaction.get("target", "event")
+
+    edges.append({
+        "tenant_id": tenant_id,
+        "repository_id": component.repository_id,
+        "source_component_id": component_id,
+        "target_component_id": None,
+        "edge_type": edge_type,
+        "source_function": interaction.get("source"),
+        "target_function": None,
+        "data_in_description": interaction.get("data_passed"),
+        "data_out_description": None,
+        "human_label": self._build_human_label(
+            edge_type,
+            topic=event_name,
+        ),
+        "external_target_name": interaction.get("target", "Message Queue"),
+        "step_index": None,
+    })
+
+# Also check outbound_calls for event patterns (P3.1 new field)
+for i, call in enumerate(sa.get("outbound_calls", []), start=1):
+    target_module = (call.get("target_module") or "").lower()
+    target_fn = (call.get("target_function") or "").lower()
+    combined_call = f"{target_module} {target_fn}"
+
+    # Cache via outbound_calls
+    if any(kw in combined_call for kw in _CACHE_SERVICE_KEYWORDS):
+        is_read = any(kw in combined_call for kw in {"get", "read", "fetch", "hget", "lrange"})
+        edge_type = "CACHE_READ" if is_read else "CACHE_WRITE"
+        edges.append({
+            "tenant_id": tenant_id,
+            "repository_id": component.repository_id,
+            "source_component_id": component_id,
+            "target_component_id": None,
+            "edge_type": edge_type,
+            "source_function": call.get("caller_function"),
+            "target_function": call.get("target_function"),
+            "data_in_description": call.get("data_in"),
+            "data_out_description": call.get("data_out"),
+            "human_label": self._build_human_label(
+                edge_type,
+                key=call.get("data_in") or call.get("target_function", "key"),
+            ),
+            "external_target_name": "Redis" if "redis" in combined_call else "Cache",
+            "step_index": i,
+        })
+
+    # Events via outbound_calls
+    elif any(kw in combined_call for kw in _EVENT_SERVICE_KEYWORDS):
+        is_pub = any(kw in combined_call for kw in {"delay", "apply_async", "send", "publish"})
+        edge_type = "EVENT_PUBLISH" if is_pub else "EVENT_CONSUME"
+        edges.append({
+            "tenant_id": tenant_id,
+            "repository_id": component.repository_id,
+            "source_component_id": component_id,
+            "target_component_id": None,
+            "edge_type": edge_type,
+            "source_function": call.get("caller_function"),
+            "target_function": call.get("target_function"),
+            "data_in_description": call.get("data_in"),
+            "data_out_description": call.get("data_out"),
+            "human_label": self._build_human_label(
+                edge_type,
+                topic=call.get("target_function") or call.get("data_in") or "task",
+            ),
+            "external_target_name": call.get("target_module", "Message Queue"),
+            "step_index": i,
+        })
+```
+
+> **Placement note:** Insert both blocks **after** the existing `EXTERNAL_API` detection block (the `elif any(kw in dest for kw in ("external", "api", "sendgrid", ...)):` block) and **before** the `SCHEMA: backed_by_model` block. The new blocks process `component_interactions` independently from the existing `data_flows` loop.
+
+---
+
+### Add Module-Level Keyword Sets (at top of file)
+
+Add these constants **at the top of `data_flow_service.py`** (after the `_FILE_TYPE_TO_ROLE` dict):
+
+```python
+# Cache keyword sets (used in build_flow_for_component)
+_CACHE_READ_KEYWORDS = frozenset({
+    "redis.get", "cache.get", "get_cache", "cache_get", "memcache.get",
+    "client.get", "hget", "lrange", "smembers", "zrange", "getex",
+})
+_CACHE_WRITE_KEYWORDS = frozenset({
+    "redis.set", "cache.set", "set_cache", "cache_set", "memcache.set",
+    "client.set", "hset", "lpush", "rpush", "sadd", "zadd", "setex",
+    "cache.delete", "redis.delete", "cache_invalidate",
+})
+_CACHE_SERVICE_KEYWORDS = frozenset({
+    "redis", "cache", "memcache", "memcached", "cacheservice", "redisclient",
+})
+
+# Event/queue keyword sets
+_EVENT_PUBLISH_KEYWORDS = frozenset({
+    ".delay(", ".apply_async(", "producer.send", "publish(",
+    "sns.publish", "sqs.send_message", "rabbitmq.publish",
+    "channel.publish", "task.apply_async", "celery_app.send_task",
+})
+_EVENT_CONSUME_KEYWORDS = frozenset({
+    "@celery_app.task", "@app.task", "@shared_task", "@task(",
+    "consumer.poll", "consumer.consume", "subscribe(",
+    "sqs.receive_message", "channel.consume", "@dramatiq.actor",
+})
+_EVENT_SERVICE_KEYWORDS = frozenset({
+    "celery", "kafka", "rabbitmq", "sqs", "sns", "dramatiq", "rq.",
+    "huey", "event", "message queue", "broker",
+})
+```
+
+> **Why `frozenset`:** Membership checks on frozensets are O(1) vs O(n) for lists. These sets are checked per-edge in a loop — performance matters for components with many interactions.
+
+---
+
+### Deduplication Guard
+
+When a component has both `outbound_calls` AND `component_interactions` present (P3.1 new field + old field), it is possible to generate duplicate edges. Add a deduplication step **before** the `crud_code_data_flow_edge.bulk_create()` call:
+
+```python
+# Deduplicate edges: same source + edge_type + external_target is one edge
+seen = set()
+deduped_edges = []
+for e in edges:
+    key = (
+        e["source_component_id"],
+        e.get("target_component_id"),
+        e["edge_type"],
+        e.get("external_target_name") or "",
+        e.get("source_function") or "",
+    )
+    if key not in seen:
+        seen.add(key)
+        deduped_edges.append(e)
+edges = deduped_edges
+
+# Delete old edges and insert new ones (idempotent rebuild)
+crud_code_data_flow_edge.delete_by_component(
+    db=db, component_id=component_id, tenant_id=tenant_id
+)
+created = crud_code_data_flow_edge.bulk_create(db=db, edges=deduped_edges)
+```
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Analyze a file that uses Redis (e.g. a service that calls cache.get / cache.set)
+# Trigger rebuild for that component, then check DB:
+psql $DATABASE_URL -c "
+SELECT edge_type, source_function, external_target_name, human_label
+FROM code_data_flow_edges
+WHERE source_component_id = {COMPONENT_ID}
+ORDER BY edge_type;
+"
+# Expected: CACHE_READ and/or CACHE_WRITE rows present
+
+# 2. Analyze a service that calls a Celery task (.delay())
+# Expected: EVENT_PUBLISH row with external_target_name = task module name
+
+# 3. Analyze a Celery task file (@celery_app.task decorated)
+# Expected: EVENT_CONSUME row
+
+# 4. Verify no duplicate edges:
+psql $DATABASE_URL -c "
+SELECT source_component_id, edge_type, external_target_name, COUNT(*)
+FROM code_data_flow_edges
+GROUP BY source_component_id, edge_type, external_target_name
+HAVING COUNT(*) > 1;
+"
+# Expected: 0 rows (no duplicates)
+
+# 5. Verify CACHE/EVENT edges show in EdgeListPanel:
+# Navigate to a cache-using component → Data Flow tab
+# Scroll to "Calls" panel
+# Expected: CACHE_READ/WRITE entries with yellow/orange badge
+```
+
+---
+
+### Developer Checklist
+
+- [ ] Add `_CACHE_*` and `_EVENT_*` keyword frozensets as module-level constants at top of `data_flow_service.py`
+- [ ] Add CACHE edge extraction block (from `component_interactions` + `outbound_calls`)
+- [ ] Add EVENT edge extraction block (from `component_interactions` + `outbound_calls`)
+- [ ] Add deduplication guard before `bulk_create()`
+- [ ] Test with a real Redis-using service component
+- [ ] Test with a real Celery task file
+- [ ] Verify no duplicate edges created when both `outbound_calls` and `component_interactions` present
+- [ ] Verify all 10 edge types appear in the EdgeListPanel for a complex component
+
+
+---
+
+## P3.12 — Task Status Polling & Backfill Progress UI
+
+**Owner:** Backend Dev 1 (API) + Frontend Dev (UI)  
+**Estimate:** 1.5 days  
+**Severity:** HIGH — Rebuild appears to do nothing when Celery is under load; backfill has zero visibility  
+**Covers:** GAP-5, GAP-8  
+**Depends on:** P3.6 (Celery tasks), P3.7 (rebuild endpoint), P3.8 (DataFlowDiagram)
+
+---
+
+### Root Cause
+
+The rebuild flow uses a hardcoded 3-second wait before re-fetching:
+```ts
+setTimeout(() => { traceResult.mutate?.(); egoResult.mutate?.(); }, 3000);
+```
+If Celery is processing other jobs, the task might take 10–60 seconds. The diagram stays stale and the user has no feedback.
+
+The backfill endpoint returns `{ task_id, component_count }` but there is no UI to show progress, no way to know when it completes, and no indication of how many components succeeded vs failed.
+
+---
+
+### Part A — Task Status API Endpoint (Backend)
+
+**File:** `backend/app/api/endpoints/tasks.py` (new file)
+
+```python
+# backend/app/api/endpoints/tasks.py
+"""
+Generic Celery task status endpoint.
+Returns task state, result, and metadata from the Celery result backend.
+"""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.api import deps
+
+router = APIRouter(prefix="/tasks", tags=["Tasks"])
+
+
+@router.get("/{task_id}/status")
+def get_task_status(
+    task_id: str,
+    current_user=Depends(deps.get_current_active_user),
+):
+    """
+    Poll Celery task status by task_id.
+
+    Returns:
+      - state: "PENDING" | "STARTED" | "SUCCESS" | "FAILURE" | "RETRY"
+      - result: task return value (if SUCCESS), error message (if FAILURE)
+      - progress: optional progress dict for tasks that emit intermediate updates
+    """
+    from app.core.celery_app import celery_app
+    from celery.result import AsyncResult
+
+    result = AsyncResult(task_id, app=celery_app)
+
+    response = {
+        "task_id": task_id,
+        "state": result.state,
+        "result": None,
+        "error": None,
+    }
+
+    if result.state == "SUCCESS":
+        response["result"] = result.result   # e.g. {"success": 72, "failed": 15, "total": 87}
+    elif result.state == "FAILURE":
+        response["error"] = str(result.result)
+    elif result.state in ("PENDING", "STARTED", "RETRY"):
+        # Some tasks emit progress via result.info
+        if isinstance(result.info, dict):
+            response["progress"] = result.info
+
+    return response
+```
+
+**Register in `backend/app/api/api.py`:**
+```python
+from app.api.endpoints import tasks
+api_router.include_router(tasks.router, prefix="/api/v1")
+```
+
+> **Note:** This endpoint intentionally does NOT restrict by tenant — task_id is an opaque UUID, not guessable. Any authenticated user who has the task_id (received from the API response) can poll it.
+
+---
+
+### Part B — Emit Progress from Backfill Task (Backend)
+
+**File:** `backend/app/tasks/data_flow_tasks.py`
+
+Update `backfill_data_flow_edges` to emit progress updates via `self.update_state()`:
+
+```python
+@celery_app.task(name="backfill_data_flow_edges", bind=True, max_retries=2)
+def backfill_data_flow_edges(self, repository_id: int, tenant_id: int):
+    from app.db.session import SessionLocal
+    from app.models.code_component import CodeComponent
+    from app.services.data_flow_service import data_flow_service
+
+    db = SessionLocal()
+    results = {"success": 0, "failed": 0, "total": 0}
+    try:
+        components = db.query(CodeComponent).filter(
+            CodeComponent.repository_id == repository_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status == "completed",   # canonical value — see P3.15
+            CodeComponent.structured_analysis.isnot(None),
+        ).all()
+
+        results["total"] = len(components)
+        logger.info(f"Backfilling {len(components)} components for repo {repository_id}")
+
+        for idx, component in enumerate(components, start=1):
+            # ── Emit progress so frontend can poll ──────────────────────
+            self.update_state(
+                state="STARTED",
+                meta={
+                    "current": idx,
+                    "total": results["total"],
+                    "success": results["success"],
+                    "failed": results["failed"],
+                    "current_component": component.name,
+                },
+            )
+            # ────────────────────────────────────────────────────────────
+            try:
+                data_flow_service.build_flow_for_component(
+                    db=db, component_id=component.id, tenant_id=tenant_id,
+                )
+                results["success"] += 1
+            except Exception as e:
+                logger.warning(f"Backfill failed for component {component.id}: {e}")
+                results["failed"] += 1
+
+        logger.info(f"Backfill complete: {results}")
+        return results
+    except Exception as exc:
+        logger.error(f"Backfill task failed: {exc}")
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        db.close()
+```
+
+---
+
+### Part C — Smart Polling in `DataFlowDiagram.tsx` (Frontend)
+
+**File:** `frontend/components/data-flow/DataFlowDiagram.tsx`
+
+Replace the hardcoded 3-second timeout with real polling:
+
+```tsx
+// BEFORE (P3.8 original — race condition):
+const handleRebuild = async () => {
+  setIsRebuilding(true);
+  try {
+    await apiPost(`/code-components/${componentId}/data-flow/rebuild`, {});
+    toast.success("Diagram rebuilding — refresh in a few seconds");
+    setTimeout(() => {
+      traceResult.mutate?.();
+      egoResult.mutate?.();
+    }, 3000);
+  } catch {
+    toast.error("Rebuild failed");
+  } finally {
+    setIsRebuilding(false);
+  }
+};
+
+// AFTER (P3.12 — real polling):
+const handleRebuild = async () => {
+  setIsRebuilding(true);
+  try {
+    const { task_id } = await apiPost(
+      `/code-components/${componentId}/data-flow/rebuild`, {}
+    );
+    toast.info("Rebuilding diagram...");
+
+    // Poll task status until terminal state
+    let attempts = 0;
+    const maxAttempts = 20;   // 20 × 2s = 40s max wait
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const status = await apiGet(`/tasks/${task_id}/status`);
+        if (status.state === "SUCCESS") {
+          clearInterval(poll);
+          setIsRebuilding(false);
+          toast.success("Diagram updated");
+          traceResult.mutate?.();
+          egoResult.mutate?.();
+        } else if (status.state === "FAILURE") {
+          clearInterval(poll);
+          setIsRebuilding(false);
+          toast.error(`Rebuild failed: ${status.error}`);
+        } else if (attempts >= maxAttempts) {
+          clearInterval(poll);
+          setIsRebuilding(false);
+          toast.warning("Rebuild is taking longer than expected — try refreshing");
+        }
+      } catch {
+        clearInterval(poll);
+        setIsRebuilding(false);
+      }
+    }, 2000);   // Poll every 2 seconds
+  } catch {
+    toast.error("Could not start rebuild");
+    setIsRebuilding(false);
+  }
+};
+```
+
+---
+
+### Part D — Backfill Progress Card (Frontend)
+
+**New file:** `frontend/components/data-flow/BackfillProgressCard.tsx`
+
+This component is shown in the repository settings or overview page when a backfill is in progress. It is NOT shown in the Data Flow tab (which is per-component).
+
+```tsx
+// frontend/components/data-flow/BackfillProgressCard.tsx
+"use client";
+import { useEffect, useState } from "react";
+import { Loader2, CheckCircle, XCircle, RefreshCw } from "lucide-react";
+import { apiGet } from "@/lib/api";
+
+interface Props {
+  taskId: string;
+  totalComponents: number;
+  onComplete?: (result: { success: number; failed: number; total: number }) => void;
+}
+
+export function BackfillProgressCard({ taskId, totalComponents, onComplete }: Props) {
+  const [state, setState] = useState<"polling" | "success" | "failed">("polling");
+  const [progress, setProgress] = useState({ current: 0, success: 0, failed: 0 });
+  const [result, setResult] = useState<any>(null);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const status = await apiGet(`/tasks/${taskId}/status`);
+        if (status.state === "STARTED" && status.progress) {
+          setProgress({
+            current: status.progress.current ?? 0,
+            success: status.progress.success ?? 0,
+            failed: status.progress.failed ?? 0,
+          });
+        } else if (status.state === "SUCCESS") {
+          clearInterval(interval);
+          setState("success");
+          setResult(status.result);
+          onComplete?.(status.result);
+        } else if (status.state === "FAILURE") {
+          clearInterval(interval);
+          setState("failed");
+        }
+      } catch {
+        clearInterval(interval);
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [taskId, onComplete]);
+
+  const pct = totalComponents > 0
+    ? Math.round((progress.current / totalComponents) * 100)
+    : 0;
+
+  return (
+    <div className="rounded-xl border bg-white p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        {state === "polling" && <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />}
+        {state === "success" && <CheckCircle className="h-4 w-4 text-green-500" />}
+        {state === "failed" && <XCircle className="h-4 w-4 text-red-500" />}
+        <span className="text-sm font-medium text-gray-800">
+          {state === "polling" && "Building data flow diagrams..."}
+          {state === "success" && "Backfill complete"}
+          {state === "failed" && "Backfill failed"}
+        </span>
+      </div>
+
+      {state === "polling" && (
+        <>
+          {/* Progress bar */}
+          <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+            <div
+              className="bg-indigo-500 h-2 rounded-full transition-all duration-500"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-gray-500">
+            <span>{progress.current} / {totalComponents} components</span>
+            <span>
+              {progress.success > 0 && <span className="text-green-600">{progress.success} done</span>}
+              {progress.failed > 0 && <span className="text-red-500 ml-2">{progress.failed} failed</span>}
+            </span>
+          </div>
+        </>
+      )}
+
+      {state === "success" && result && (
+        <div className="flex gap-4 text-xs">
+          <span className="text-green-600 font-medium">{result.success} succeeded</span>
+          {result.failed > 0 && (
+            <span className="text-red-500 font-medium">{result.failed} failed</span>
+          )}
+          <span className="text-gray-400">{result.total} total</span>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+**Where to use it:** In `frontend/app/dashboard/repositories/[id]/page.tsx` (or equivalent repo detail page). After triggering backfill, store `task_id` + `component_count` in local state and render `<BackfillProgressCard>`.
+
+---
+
+### Verification Commands
+
+```bash
+# 1. API — trigger rebuild and poll status:
+TASK=$(curl -sX POST .../code-components/5/data-flow/rebuild \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.task_id')
+echo "Task: $TASK"
+
+# Poll until SUCCESS:
+for i in $(seq 1 10); do
+  STATUS=$(curl -s .../tasks/$TASK/status -H "Authorization: Bearer $TOKEN")
+  echo "Attempt $i: $(echo $STATUS | jq -r '.state')"
+  [ "$(echo $STATUS | jq -r '.state')" = "SUCCESS" ] && break
+  sleep 2
+done
+
+# 2. Backfill progress:
+BTASK=$(curl -sX POST .../repositories/1/backfill-data-flow \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.task_id')
+
+# Poll and see intermediate STARTED states with progress:
+curl -s .../tasks/$BTASK/status -H "Authorization: Bearer $TOKEN" | jq '.progress'
+# Expected during processing: {"current": 15, "total": 87, "success": 14, "failed": 1, ...}
+```
+
+---
+
+### Developer Checklist
+
+**Backend (Dev 1):**
+- [ ] Create `backend/app/api/endpoints/tasks.py` with `GET /{task_id}/status`
+- [ ] Register tasks router in `backend/app/api/api.py`
+- [ ] Add `self.update_state(state="STARTED", meta={...})` calls to `backfill_data_flow_edges` Celery task
+
+**Frontend (Frontend Dev):**
+- [ ] Replace 3-second `setTimeout` in `handleRebuild` with interval polling logic
+- [ ] Create `frontend/components/data-flow/BackfillProgressCard.tsx`
+- [ ] Integrate `BackfillProgressCard` into repository overview/settings page
+
+
+---
+
+## P3.13 — User Role & Tenant Tier in Frontend Context
+
+**Owner:** Backend Dev 1 (API) + Frontend Dev (context store)  
+**Estimate:** 1 day  
+**Severity:** CRITICAL + HIGH — Role-aware diagram defaults broken; free tier shows loading flash before gate  
+**Covers:** GAP-2, GAP-6  
+**Depends on:** Existing `/auth/me` endpoint, existing user context store
+
+---
+
+### Root Cause 1 — `currentUser?.roles` (plural array) Does Not Exist
+
+The backend `User` model has `role: str` (a single string like `"admin"`, `"member"`, `"viewer"`). The frontend `DataFlowDiagram` component receives:
+```tsx
+userRoles={currentUser?.roles}   // always undefined
+```
+This makes `userRoles.some(r => ["business_analyst", ...].includes(r))` always return `false`. BAs always land on "Technical" mode.
+
+### Root Cause 2 — Tenant Tier Not in User Context
+
+The frontend has no knowledge of `tenant.tier` until it makes an API call and receives a 403. Free tier users see a loading skeleton before the premium gate appears — jarring UX.
+
+---
+
+### Fix A — Expose `role` and `tenant_tier` from `/auth/me` (Backend)
+
+**File:** `backend/app/api/endpoints/auth.py` (or wherever `GET /auth/me` is defined)
+
+Find the response schema for `/auth/me` and add `tenant_tier`:
+
+```python
+# Find the existing UserMeResponse or similar schema in backend/app/schemas/user.py
+# ADD these two fields:
+
+class UserMeResponse(BaseModel):
+    id: int
+    email: str
+    role: str                    # existing field — "admin" | "member" | "viewer" etc.
+    tenant_id: int
+    tenant_tier: str             # ← ADD: "free" | "pro" | "enterprise"
+    # ... other existing fields
+    
+    model_config = ConfigDict(from_attributes=True)
+```
+
+**In the `/auth/me` endpoint handler**, populate `tenant_tier`:
+
+```python
+@router.get("/me", response_model=UserMeResponse)
+def get_current_user_info(
+    current_user: User = Depends(deps.get_current_active_user),
+    db: Session = Depends(deps.get_db),
+):
+    from app.models.tenant import Tenant
+    tenant = db.get(Tenant, current_user.tenant_id)
+    return {
+        **current_user.__dict__,
+        "tenant_tier": getattr(tenant, "tier", "free"),
+    }
+```
+
+> **Note:** If `Tenant` model does not yet have a `tier` field (it may be added in Phase 5), return `"free"` as a safe default. The premium gate will show for all users until the tier field exists, which is the safe direction.
+
+---
+
+### Fix B — Add `tenant_tier` and Role Helpers to Frontend User Context
+
+**File:** `frontend/lib/types/user.ts` (or wherever the `User` type is defined)
+
+```ts
+// Find the existing User type and add tenant_tier:
+export interface CurrentUser {
+  id: number;
+  email: string;
+  role: string;          // existing — "admin" | "member" | "viewer"
+  tenant_id: number;
+  tenant_tier: "free" | "pro" | "enterprise";   // ← ADD
+  // ... other existing fields
+}
+
+// ADD these helper functions (or add to existing user utils):
+export function isProOrEnterprise(user: CurrentUser | null | undefined): boolean {
+  return user?.tenant_tier === "pro" || user?.tenant_tier === "enterprise";
+}
+
+export function getDataFlowMode(user: CurrentUser | null | undefined): "technical" | "simple" {
+  // Business Analyst and PM roles default to simple (Business) view
+  const businessRoles = ["business_analyst", "product_manager", "ba", "pm", "cxo", "vp"];
+  const role = (user?.role ?? "").toLowerCase();
+  return businessRoles.some((r) => role.includes(r)) ? "simple" : "technical";
+}
+```
+
+---
+
+### Fix C — Update `DataFlowDiagram.tsx` to Use Correct Props
+
+**File:** `frontend/components/data-flow/DataFlowDiagram.tsx`
+
+Update the `Props` interface and prop handling:
+
+```tsx
+// BEFORE (P3.8 original):
+interface Props {
+  componentId: number;
+  fileRole?: string;
+  userRoles?: string[];   // ← This was wrong — User model has role (singular)
+}
+
+// AFTER:
+interface Props {
+  componentId: number;
+  fileRole?: string;
+  userRole?: string;         // singular string from currentUser.role
+  tenantTier?: string;       // "free" | "pro" | "enterprise"
+}
+```
+
+Update the default state derivation:
+
+```tsx
+// BEFORE (P3.8 original — always false because userRoles is undefined):
+const [flowMode, setFlowMode] = useState<FlowMode>(
+  userRoles?.some((r) => ["business_analyst", "product_manager", "cxo"].includes(r))
+    ? "simple" : "technical"
+);
+
+// AFTER:
+const [flowMode, setFlowMode] = useState<FlowMode>(() => {
+  const role = (userRole ?? "").toLowerCase();
+  const businessRoles = ["business_analyst", "product_manager", "ba", "pm", "cxo", "vp"];
+  return businessRoles.some((r) => role.includes(r)) ? "simple" : "technical";
+});
+```
+
+Update premium gate logic — show gate immediately without API roundtrip:
+
+```tsx
+// BEFORE (P3.8 original — only detects gate after 403 response):
+const [isPremiumGated, setIsPremiumGated] = useState(false);
+
+useEffect(() => {
+  if (error?.status === 403) setIsPremiumGated(true);
+}, [error]);
+
+// AFTER — detect immediately from tenantTier prop:
+const isPremiumGated = tenantTier === "free";
+// (Keep the error detection as a fallback for missing prop scenarios)
+useEffect(() => {
+  if (error?.status === 403 && !isPremiumGated) {
+    // This shouldn't happen if tenantTier is correctly passed,
+    // but keep as a safety fallback
+    console.warn("Premium gate: 403 received but tenantTier was not 'free'");
+  }
+}, [error, isPremiumGated]);
+```
+
+> **Result:** Free tier users see `PremiumGateCard` **instantly** on tab activation — no loading spinner, no API call, no 403 round-trip.
+
+---
+
+### Fix D — Update Wire-In in `code/[id]/page.tsx`
+
+**File:** `frontend/app/dashboard/code/[id]/page.tsx`
+
+Update the DataFlowDiagram usage (replaces the step from P3.8):
+
+```tsx
+// BEFORE (P3.8 — wrong prop):
+<DataFlowDiagram
+  componentId={Number(id)}
+  fileRole={component?.structured_analysis?.file_role}
+  userRoles={currentUser?.roles}          // ← wrong: was always undefined
+/>
+
+// AFTER:
+<DataFlowDiagram
+  componentId={Number(id)}
+  fileRole={component?.structured_analysis?.file_role}
+  userRole={currentUser?.role}            // ← correct: singular string
+  tenantTier={currentUser?.tenant_tier}   // ← new: instant gate detection
+/>
+```
+
+---
+
+### Fix E — Update PremiumGateCard Upgrade Link
+
+The link in `PremiumGateCard.tsx` currently points to:
+```tsx
+href="/dashboard/settings?tab=billing"
+```
+
+Ensure this is the correct path in the actual application. If the billing settings are at a different route, update it here. This is the canonical upgrade path for all premium gates in the app — keep it consistent.
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Backend — verify tenant_tier in /auth/me response:
+curl -H "Authorization: Bearer $FREE_TOKEN" \
+  http://localhost:8000/api/v1/auth/me | jq '.tenant_tier'
+# Expected: "free"
+
+curl -H "Authorization: Bearer $PRO_TOKEN" \
+  http://localhost:8000/api/v1/auth/me | jq '.tenant_tier'
+# Expected: "pro"
+```
+
+```
+# 2. Frontend — free tier instant gate:
+# a. Log in as free tier user
+# b. Navigate to any code component
+# c. Click "Data Flow" tab
+# d. Open Network tab in DevTools
+# Expected: NO request to /data-flow or /request-trace (gate shows immediately)
+# Expected: PremiumGateCard visible immediately (no loading spinner)
+```
+
+```
+# 3. Frontend — role-aware mode default:
+# a. Log in as a user whose role is "business_analyst" (or configure a test user)
+# b. Navigate to any code component (pro tier tenant)
+# c. Click "Data Flow" tab
+# Expected: "Business" mode button is active by default (not "Technical")
+```
+
+---
+
+### Developer Checklist
+
+**Backend (Dev 1):**
+- [ ] Add `tenant_tier: str` to `UserMeResponse` schema
+- [ ] Update `/auth/me` handler to query Tenant and include `tier` (default `"free"` if tenant has no tier field yet)
+- [ ] Write test: `GET /auth/me` for free tenant returns `tenant_tier: "free"`
+- [ ] Write test: `GET /auth/me` for pro tenant returns `tenant_tier: "pro"`
+
+**Frontend (Frontend Dev):**
+- [ ] Add `tenant_tier` to `CurrentUser` type definition
+- [ ] Add `isProOrEnterprise()` and `getDataFlowMode()` helper functions
+- [ ] Update `DataFlowDiagram.tsx` Props: change `userRoles?: string[]` → `userRole?: string` + `tenantTier?: string`
+- [ ] Replace `isPremiumGated` state with direct `tenantTier === "free"` check
+- [ ] Update `useState(flowMode)` initialization to use `userRole` (singular)
+- [ ] Update wire-in in `code/[id]/page.tsx`: pass `userRole` and `tenantTier`
+- [ ] Verify: free tier user sees gate instantly on tab click (no loading flash)
+- [ ] Verify: BA-role pro user defaults to Business mode
+- [ ] Verify: Developer-role pro user defaults to Technical mode
+
+
+---
+
+## P3.14 — Egocentric View: Fix Missing Incoming Edge Source Nodes
+
+**Owner:** Backend Dev 2  
+**Estimate:** 0.5 day  
+**Severity:** CRITICAL — "This File Only" Mermaid diagram renders no incoming edges  
+**Covers:** GAP-4  
+**Depends on:** P3.7 (egocentric endpoint), P3.3 (CRUD methods)
+
+---
+
+### Root Cause
+
+The `GET /code-components/{id}/data-flow` endpoint (egocentric view) builds a node list with **only the current component**:
+
+```python
+# P3.7 current code — only one node:
+node_self = [{
+    "component_id": id,
+    "name": comp.name,
+    "location": comp.location,
+    "file_role": file_role,
+    "summary": comp.summary,
+}]
+return EgocentricFlowResponse(
+    mermaid_technical=data_flow_service.render_mermaid(node_self, all_edges, "technical"),
+    ...
+)
+```
+
+`edges_in` are edges FROM other components TO this one. In `render_mermaid()`:
+```python
+src_node = node_id_map.get(src_id)   # src_id = other component's ID, NOT in node_self
+# → src_node is None → `continue` → edge SKIPPED entirely
+```
+
+Result: The Mermaid diagram in "This File Only" mode renders zero incoming edges — the "Called By" section exists only in the EdgeListPanel text list, not in the visual diagram.
+
+---
+
+### Fix — Enrich Egocentric Node List
+
+**File:** `backend/app/api/endpoints/code_components.py`
+
+Replace the egocentric endpoint's node building section:
+
+```python
+# GET /code-components/{id}/data-flow
+@router.get("/{id}/data-flow", response_model=EgocentricFlowResponse)
+def get_component_data_flow(
+    id: int,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_active_user),
+):
+    _check_premium(current_user.tenant_id, db)
+
+    from app.models.code_component import CodeComponent
+    from app.services.data_flow_service import data_flow_service
+    from app.crud.crud_code_data_flow_edge import crud_code_data_flow_edge
+
+    comp = db.get(CodeComponent, id)
+    if not comp or comp.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+    # Use the efficient get_egocentric method (single query — fixes GAP-11)
+    edges_in, edges_out = crud_code_data_flow_edge.get_egocentric(
+        db=db, component_id=id, tenant_id=current_user.tenant_id
+    )
+    all_edges = edges_in + edges_out
+
+    sa = comp.structured_analysis or {}
+    file_role = data_flow_service._resolve_file_role(sa)
+
+    # ── Build complete node list ──────────────────────────────────────────────
+    # Start with the focal component
+    nodes = [{
+        "component_id": id,
+        "name": comp.name,
+        "location": comp.location,
+        "file_role": file_role,
+        "summary": comp.summary,
+        "model_columns": sa.get("model_definition", {}).get("columns"),
+        "schema_fields": sa.get("backed_by_model", {}).get("fields"),
+    }]
+
+    # Add source nodes from edges_in (the callers of this component)
+    seen_ids = {id}
+    for edge in edges_in:
+        src_id = edge.source_component_id
+        if src_id and src_id not in seen_ids:
+            seen_ids.add(src_id)
+            src_comp = db.get(CodeComponent, src_id)
+            if src_comp and src_comp.tenant_id == current_user.tenant_id:
+                src_sa = src_comp.structured_analysis or {}
+                nodes.append({
+                    "component_id": src_id,
+                    "name": src_comp.name,
+                    "location": src_comp.location,
+                    "file_role": data_flow_service._resolve_file_role(src_sa),
+                    "summary": src_comp.summary,
+                })
+
+    # Add target nodes from edges_out (the callees of this component)
+    for edge in edges_out:
+        tgt_id = edge.target_component_id
+        if tgt_id and tgt_id not in seen_ids:
+            seen_ids.add(tgt_id)
+            tgt_comp = db.get(CodeComponent, tgt_id)
+            if tgt_comp and tgt_comp.tenant_id == current_user.tenant_id:
+                tgt_sa = tgt_comp.structured_analysis or {}
+                nodes.append({
+                    "component_id": tgt_id,
+                    "name": tgt_comp.name,
+                    "location": tgt_comp.location,
+                    "file_role": data_flow_service._resolve_file_role(tgt_sa),
+                    "summary": tgt_comp.summary,
+                })
+        elif not tgt_id and edge.external_target_name:
+            # External node (no DB record)
+            ext_name = edge.external_target_name
+            if ext_name not in seen_ids:
+                seen_ids.add(ext_name)
+                nodes.append({
+                    "component_id": None,
+                    "name": ext_name,
+                    "location": None,
+                    "file_role": None,
+                    "is_external": True,
+                })
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Also compute edges_built_at for GAP-10 (see P3.15)
+    from sqlalchemy import func as sql_func
+    from app.models.code_data_flow_edge import CodeDataFlowEdge as EdgeModel
+    edges_built_at_row = db.query(sql_func.max(EdgeModel.created_at)).filter(
+        EdgeModel.source_component_id == id,
+        EdgeModel.tenant_id == current_user.tenant_id,
+    ).scalar()
+
+    return EgocentricFlowResponse(
+        component_id=id,
+        file_role=file_role,
+        edges_in=edges_in,
+        edges_out=edges_out,
+        mermaid_technical=data_flow_service.render_mermaid(nodes, all_edges, "technical"),
+        mermaid_simple=data_flow_service.render_mermaid(nodes, all_edges, "simple"),
+        total_edges=len(all_edges),
+        edges_built_at=edges_built_at_row,   # None if never built (see P3.15)
+    )
+```
+
+---
+
+### Update `EgocentricFlowResponse` Schema
+
+**File:** `backend/app/schemas/code_component.py`
+
+Add `edges_built_at` and `nodes` to the schema (the `nodes` field enables the frontend to show rich data even in egocentric mode):
+
+```python
+class EgocentricFlowResponse(BaseModel):
+    component_id: int
+    file_role: str
+    edges_in: list[DataFlowEdgeSchema]
+    edges_out: list[DataFlowEdgeSchema]
+    nodes: list[DataFlowNodeSchema]           # ← ADD: all relevant nodes for this view
+    mermaid_technical: str
+    mermaid_simple: str
+    total_edges: int
+    edges_built_at: Optional[datetime] = None  # ← ADD: None = never built
+
+    model_config = ConfigDict(from_attributes=True)
+```
+
+---
+
+### Update `get_egocentric` in CRUD
+
+**File:** `backend/app/crud/crud_code_data_flow_edge.py`
+
+The `get_egocentric` method was defined in P3.3 but not detailed. Implement it as a single query returning both directions:
+
+```python
+def get_egocentric(
+    self,
+    db: Session,
+    *,
+    component_id: int,
+    tenant_id: int,
+) -> tuple[list[CodeDataFlowEdge], list[CodeDataFlowEdge]]:
+    """
+    Return (edges_in, edges_out) for a component in two separate lists.
+    Single method call vs two separate get_by_source/get_by_target calls.
+    Edges are sorted by step_index ASC NULLS LAST (see P3.15).
+    """
+    edges_out = (
+        db.query(CodeDataFlowEdge)
+        .filter(
+            CodeDataFlowEdge.source_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        )
+        .order_by(
+            CodeDataFlowEdge.step_index.asc().nullslast()
+        )
+        .all()
+    )
+    edges_in = (
+        db.query(CodeDataFlowEdge)
+        .filter(
+            CodeDataFlowEdge.target_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        )
+        .order_by(
+            CodeDataFlowEdge.step_index.asc().nullslast()
+        )
+        .all()
+    )
+    return edges_in, edges_out
+```
+
+---
+
+### Verification Commands
+
+```bash
+# 1. For a component that IS called by other components (e.g. a UserCRUD called by UserService):
+curl -H "Authorization: Bearer $PRO_TOKEN" \
+  http://localhost:8000/api/v1/code-components/{CRUD_COMPONENT_ID}/data-flow \
+  | python3 -m json.tool
+
+# Expected:
+# - "edges_in" array is non-empty
+# - "nodes" array contains BOTH the CRUD component AND the calling service component(s)
+# - "mermaid_technical" string contains node IDs for both the CRUD and the calling service
+# - "total_edges" = len(edges_in) + len(edges_out)
+```
+
+```
+# 2. Browser test:
+# a. Open a CRUD file's Data Flow tab → "This File Only" view
+# b. Verify the Mermaid diagram shows INCOMING arrows (not just outgoing)
+# c. Verify nodes from calling services appear as box shapes in the correct swimlane
+# d. Click on a calling service node → verify navigation to that component page
+```
+
+---
+
+### Developer Checklist
+
+- [ ] Implement `get_egocentric()` in `CRUDCodeDataFlowEdge` (returns tuple of edges_in, edges_out, ordered by step_index)
+- [ ] Update egocentric endpoint to use `get_egocentric()` instead of separate calls
+- [ ] Add incoming edge source nodes to the node list (with tenant isolation check)
+- [ ] Add outgoing edge target nodes to the node list (with tenant isolation check)
+- [ ] Add external node handling (null target_component_id)
+- [ ] Add `edges_built_at` query to egocentric endpoint
+- [ ] Add `nodes` and `edges_built_at` fields to `EgocentricFlowResponse` schema
+- [ ] Test: CRUD file shows callers in diagram
+- [ ] Test: MODEL file shows writers and readers in diagram
+- [ ] Test: ENDPOINT file shows downstream services in diagram
+
+
+---
+
+## P3.15 — Edge Quality Omnibus Fix
+
+**Owner:** Backend Dev 1 (items A, B, E) + Backend Dev 2 (items C, D) + Frontend Dev (item F)  
+**Estimate:** 1 day  
+**Severity:** HIGH + MEDIUM — Multiple quality and consistency issues that degrade diagram accuracy  
+**Covers:** GAP-7, GAP-9, GAP-10, GAP-11, GAP-13  
+**Depends on:** P3.3 (CRUD), P3.4 (DataFlowService), P3.7 (API schemas), P3.14 (EgocentricFlowResponse updated)
+
+---
+
+### Fix A — Canonical `analysis_status` Value Audit (GAP-7)
+
+**Problem:** P3.6 uses `"completed"` and P3.9.1 uses `"complete"` — one is wrong and will silently return 0 components.
+
+**Action:**
+```bash
+# 1. Check the actual values in your DB right now:
+psql $DATABASE_URL -c "
+SELECT DISTINCT analysis_status, COUNT(*)
+FROM code_components
+GROUP BY analysis_status
+ORDER BY count DESC;
+"
+```
+
+**If result shows `"completed"` (with 'd'):**
+- Keep P3.6 as-is (`analysis_status == "completed"`)
+- Fix P3.9.1 endpoint: change `analysis_status == "complete"` → `"completed"`
+- Fix P3.5 hook: verify it uses the same value
+
+**If result shows `"complete"` (without 'd'):**
+- Keep P3.9.1 as-is (`analysis_status == "complete"`)
+- Fix P3.6 task: change `analysis_status == "completed"` → `"complete"`
+
+**Whichever value is correct — standardize it as a module-level constant:**
+
+```python
+# Add to backend/app/models/code_component.py or backend/app/constants.py
+ANALYSIS_STATUS_COMPLETE = "completed"   # or "complete" — pick ONE based on audit above
+
+# Then use it everywhere:
+# P3.5 hook:
+if component.analysis_status == ANALYSIS_STATUS_COMPLETE:
+# P3.6 task:
+CodeComponent.analysis_status == ANALYSIS_STATUS_COMPLETE,
+# P3.9.1 endpoint:
+CodeComponent.analysis_status == ANALYSIS_STATUS_COMPLETE,
+```
+
+> **This is a 5-minute fix with potentially massive impact** — if the wrong value is used, Tech Lead's backfill triggers on 0 components silently. Always audit before assuming.
+
+---
+
+### Fix B — Order Edges by `step_index` in CRUD Queries (GAP-9)
+
+**Problem:** `render_mermaid()` processes edges in DB insertion order. Edges should flow logically (step 1 → step 2 → step 3).
+
+**File:** `backend/app/crud/crud_code_data_flow_edge.py`
+
+Add `ORDER BY step_index ASC NULLS LAST` to all edge query methods:
+
+```python
+def get_by_source(
+    self, db: Session, *, component_id: int, tenant_id: int
+) -> list[CodeDataFlowEdge]:
+    return (
+        db.query(CodeDataFlowEdge)
+        .filter(
+            CodeDataFlowEdge.source_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        )
+        .order_by(CodeDataFlowEdge.step_index.asc().nullslast())  # ← ADD
+        .all()
+    )
+
+def get_by_target(
+    self, db: Session, *, component_id: int, tenant_id: int
+) -> list[CodeDataFlowEdge]:
+    return (
+        db.query(CodeDataFlowEdge)
+        .filter(
+            CodeDataFlowEdge.target_component_id == component_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        )
+        .order_by(CodeDataFlowEdge.step_index.asc().nullslast())  # ← ADD
+        .all()
+    )
+
+def get_by_repository(
+    self, db: Session, *, repository_id: int, tenant_id: int
+) -> list[CodeDataFlowEdge]:
+    return (
+        db.query(CodeDataFlowEdge)
+        .filter(
+            CodeDataFlowEdge.repository_id == repository_id,
+            CodeDataFlowEdge.tenant_id == tenant_id,
+        )
+        .order_by(
+            CodeDataFlowEdge.source_component_id,
+            CodeDataFlowEdge.step_index.asc().nullslast()   # ← ADD
+        )
+        .all()
+    )
+```
+
+Also sort in `render_mermaid()` as a safety net (in case edges arrive from non-CRUD sources):
+
+```python
+def render_mermaid(self, nodes: list[dict], edges: list, mode: str = "technical") -> str:
+    lines = ["flowchart LR"]
+
+    # Sort edges by step_index (None values go last)
+    sorted_edges = sorted(
+        edges,
+        key=lambda e: (
+            getattr(e, "step_index", None) if hasattr(e, "step_index")
+            else e.get("step_index"),
+        ) or 9999
+    )
+    # ... rest of method uses sorted_edges instead of edges
+```
+
+---
+
+### Fix C — "Not Built Yet" vs "Genuinely 0 Edges" Distinction (GAP-10)
+
+**File:** `backend/app/schemas/code_component.py`
+
+`edges_built_at` was added to `EgocentricFlowResponse` in P3.14. Also add it to `RequestTraceResponse`:
+
+```python
+class RequestTraceResponse(BaseModel):
+    start_component_id: int
+    depth: int
+    nodes: list[DataFlowNodeSchema]
+    edges: list[DataFlowEdgeSchema]
+    mermaid_technical: str
+    mermaid_simple: str
+    total_nodes: int
+    total_edges: int
+    edges_built_at: Optional[datetime] = None  # ← ADD
+
+    model_config = ConfigDict(from_attributes=True)
+```
+
+**File:** `backend/app/api/endpoints/code_components.py`
+
+In the request-trace endpoint, query and include `edges_built_at`:
+
+```python
+@router.get("/{id}/request-trace", response_model=RequestTraceResponse)
+def get_request_trace(id: int, depth: int = Query(default=5, ge=1, le=8), ...):
+    # ... existing BFS trace logic ...
+
+    # Add edges_built_at
+    from sqlalchemy import func as sql_func
+    from app.models.code_data_flow_edge import CodeDataFlowEdge as EdgeModel
+    edges_built_at_row = db.query(sql_func.max(EdgeModel.created_at)).filter(
+        EdgeModel.source_component_id == id,
+        EdgeModel.tenant_id == current_user.tenant_id,
+    ).scalar()
+
+    return RequestTraceResponse(
+        start_component_id=id,
+        depth=depth,
+        nodes=trace["nodes"],
+        edges=trace["edges"],
+        mermaid_technical=trace["mermaid_technical"],
+        mermaid_simple=trace["mermaid_simple"],
+        total_nodes=len(trace["nodes"]),
+        total_edges=len(trace["edges"]),
+        edges_built_at=edges_built_at_row,   # ← ADD
+    )
+```
+
+**File:** `frontend/components/data-flow/DataFlowDiagram.tsx`
+
+Use `edges_built_at` to show the correct empty state message:
+
+```tsx
+// In the empty state section (where total_edges === 0):
+// BEFORE (same message for both states):
+<div className="h-48 flex items-center justify-center rounded-xl border border-dashed bg-gray-50">
+  <div className="text-center space-y-2">
+    <GitBranch className="h-8 w-8 text-gray-300 mx-auto" />
+    <p className="text-sm text-gray-400">No flow data yet</p>
+    <button onClick={handleRebuild} ...>Click to build diagram</button>
+  </div>
+</div>
+
+// AFTER (differentiated messages):
+const wasBuilt = !!data?.edges_built_at;
+const hasEdges = (data?.total_edges ?? 0) > 0;
+
+// Empty state:
+{!hasEdges && (
+  <div className="h-48 flex items-center justify-center rounded-xl border border-dashed bg-gray-50">
+    <div className="text-center space-y-2">
+      <GitBranch className="h-8 w-8 text-gray-300 mx-auto" />
+      {wasBuilt ? (
+        // Was built but has 0 edges — this file genuinely has no tracked connections
+        <>
+          <p className="text-sm text-gray-400">No connections found</p>
+          <p className="text-xs text-gray-400">
+            This file makes no trackable outbound calls.
+            <br />
+            <span className="text-gray-300">
+              Last checked: {new Date(data.edges_built_at).toLocaleDateString()}
+            </span>
+          </p>
+        </>
+      ) : (
+        // Never built — offer to build
+        <>
+          <p className="text-sm text-gray-400">Diagram not generated yet</p>
+          <button onClick={handleRebuild}
+            className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline">
+            Generate data flow diagram
+          </button>
+        </>
+      )}
+    </div>
+  </div>
+)}
+```
+
+---
+
+### Fix D — Add `created_at` to `DataFlowEdgeSchema` (GAP-13)
+
+**File:** `backend/app/schemas/code_component.py`
+
+```python
+class DataFlowEdgeSchema(BaseModel):
+    id: Optional[int] = None
+    source_component_id: int
+    target_component_id: Optional[int] = None
+    edge_type: str
+    source_function: Optional[str] = None
+    target_function: Optional[str] = None
+    data_in_description: Optional[str] = None
+    data_out_description: Optional[str] = None
+    human_label: Optional[str] = None
+    external_target_name: Optional[str] = None
+    step_index: Optional[int] = None
+    created_at: Optional[datetime] = None      # ← ADD (allows "last built X ago" display)
+
+    model_config = ConfigDict(from_attributes=True)
+```
+
+---
+
+### Fix E — Align Backfill Auth Check (GAP-12)
+
+**Problem:** Two different auth checks for the same concept of "admin or repo owner":
+- P3.9.1: `current_user.role not in ("admin", "owner")`
+- P3.7 stub: `repo.owner_id != current_user.id` (no admin check)
+
+**Action:** Standardize to one helper function:
+
+```python
+# Add to backend/app/api/deps.py or backend/app/api/endpoints/repositories.py:
+
+def _assert_repo_admin(repo, current_user) -> None:
+    """
+    Raise 403 unless the current user is:
+    - The repository owner, OR
+    - A tenant admin (role = "admin")
+    
+    Audit the actual User.role values in your system and update the
+    admin_roles set below to match.
+    """
+    _ADMIN_ROLES = {"admin"}   # add "owner" if that's a valid role value in your system
+    is_owner = repo.owner_id == current_user.id
+    is_admin = current_user.role in _ADMIN_ROLES
+    if not (is_owner or is_admin):
+        raise HTTPException(
+            status_code=403,
+            detail="Must be repository owner or tenant admin",
+        )
+
+# Use in both backfill endpoints (P3.9.1 and P3.7 stub):
+_assert_repo_admin(repo, current_user)
+```
+
+---
+
+### Fix F — "Last Built" Timestamp in UI (GAP-13)
+
+**File:** `frontend/components/data-flow/DataFlowDiagram.tsx`
+
+Add "Last built" display in the stats bar (the gray bar above the diagram):
+
+```tsx
+// In the stats bar section (already in P3.8):
+<div className="flex items-center gap-4 px-4 py-2 border-b bg-gray-50 text-xs text-gray-500">
+  <span><b className="text-gray-700">{data.total_nodes ?? 1}</b> components</span>
+  <span><b className="text-gray-700">{data.total_edges ?? 0}</b> connections</span>
+  {flowView === "trace" && (
+    <span><b className="text-gray-700">{data.depth}</b> levels deep</span>
+  )}
+  {/* ADD: Last built timestamp */}
+  {data.edges_built_at && (
+    <span className="text-gray-400">
+      Built {formatRelativeTime(data.edges_built_at)}
+    </span>
+  )}
+  <span className="ml-auto text-gray-400 italic">Click any node to navigate →</span>
+</div>
+```
+
+Add the `formatRelativeTime` helper (or use `date-fns`):
+```tsx
+function formatRelativeTime(isoString: string): string {
+  const diff = Date.now() - new Date(isoString).getTime();
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+```
+
+---
+
+### P3.15 Verification Commands
+
+```bash
+# A — Canonical analysis_status:
+psql $DATABASE_URL -c "SELECT DISTINCT analysis_status FROM code_components"
+# Record the value, update ANALYSIS_STATUS_COMPLETE constant
+
+# B — step_index ordering:
+psql $DATABASE_URL -c "
+SELECT id, edge_type, step_index
+FROM code_data_flow_edges
+WHERE source_component_id = {ID}
+ORDER BY step_index ASC NULLS LAST;
+"
+# Verify edges returned in logical step order
+
+# C — edges_built_at in API response:
+curl -H "Authorization: Bearer $TOKEN" \
+  .../code-components/{ID}/data-flow | jq '.edges_built_at'
+# Expect: ISO timestamp string OR null (never built)
+
+# D — created_at in edge schema:
+curl -H "Authorization: Bearer $TOKEN" \
+  .../code-components/{ID}/data-flow | jq '.edges_out[0].created_at'
+# Expect: ISO timestamp string
+```
+
+---
+
+### P3.15 Developer Checklist
+
+**Backend Dev 1:**
+- [ ] **Fix A** — Run SQL audit, determine canonical `analysis_status` value, add `ANALYSIS_STATUS_COMPLETE` constant, update P3.6 task + P3.9.1 endpoint + P3.5 hook to use it
+- [ ] **Fix B** — Add `ORDER BY step_index ASC NULLS LAST` to `get_by_source()`, `get_by_target()`, `get_by_repository()` in CRUD
+- [ ] **Fix E** — Create `_assert_repo_admin()` helper, replace inline auth checks in both backfill endpoints
+
+**Backend Dev 2:**
+- [ ] **Fix B** — Add edge sort by step_index in `render_mermaid()` (safety net)
+- [ ] **Fix C** — Add `edges_built_at` field to `RequestTraceResponse` schema and populate in request-trace endpoint
+- [ ] **Fix D** — Add `created_at: Optional[datetime]` to `DataFlowEdgeSchema`
+
+**Frontend Dev:**
+- [ ] **Fix C** — Differentiate "never built" vs "genuinely 0 edges" empty states using `edges_built_at`
+- [ ] **Fix F** — Add "Built X ago" display in the diagram stats bar
+
+---
+
+## Phase 3 Gap-Fix Summary (P3.10–P3.15)
+
+| Task | Gaps Fixed | Files Modified |
+|------|-----------|----------------|
+| P3.10 | GAP-1 (Mermaid click) | `DataFlowDiagram.tsx`, `MermaidDiagram.tsx` |
+| P3.11 | GAP-3 (CACHE/EVENT edges) | `data_flow_service.py` |
+| P3.12 | GAP-5, GAP-8 (task polling, backfill progress) | `tasks.py` (new), `data_flow_tasks.py`, `DataFlowDiagram.tsx`, `BackfillProgressCard.tsx` (new) |
+| P3.13 | GAP-2, GAP-6 (role, tier context) | `/auth/me` schema, `CurrentUser` type, `DataFlowDiagram.tsx`, `code/[id]/page.tsx` |
+| P3.14 | GAP-4, GAP-11 (egocentric nodes, get_egocentric usage) | `code_components.py` endpoint, `crud_code_data_flow_edge.py`, `EgocentricFlowResponse` schema |
+| P3.15 | GAP-7, GAP-9, GAP-10, GAP-12, GAP-13 | `constants.py`, CRUD queries, `RequestTraceResponse`, `DataFlowEdgeSchema`, `DataFlowDiagram.tsx` |
+
+**Total new files from gap-fix tasks:**
+- `backend/app/api/endpoints/tasks.py` (P3.12)
+- `frontend/components/data-flow/BackfillProgressCard.tsx` (P3.12)
+
+**Total modified files from gap-fix tasks:**
+- `backend/app/services/data_flow_service.py` (P3.11, P3.15B)
+- `backend/app/tasks/data_flow_tasks.py` (P3.12B)
+- `backend/app/api/endpoints/code_components.py` (P3.14, P3.15C)
+- `backend/app/api/endpoints/repositories.py` (P3.15E)
+- `backend/app/api/api.py` (P3.12A — register tasks router)
+- `backend/app/crud/crud_code_data_flow_edge.py` (P3.14, P3.15B)
+- `backend/app/schemas/code_component.py` (P3.14, P3.15C, P3.15D)
+- `backend/app/models/code_component.py` or `constants.py` (P3.15A)
+- `frontend/components/data-flow/DataFlowDiagram.tsx` (P3.10, P3.12C, P3.13C, P3.15C, P3.15F)
+- `frontend/components/ontology/MermaidDiagram.tsx` (P3.10B)
+- `frontend/app/dashboard/code/[id]/page.tsx` (P3.13D)
+- `frontend/lib/types/user.ts` (P3.13B)
+- `backend/app/api/endpoints/auth.py` + user schema (P3.13A)
+
