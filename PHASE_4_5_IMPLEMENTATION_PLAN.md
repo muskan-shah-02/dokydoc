@@ -3699,6 +3699,1573 @@ grep -r "INDUSTRY_OPTIONS" frontend/ --include="*.ts" --include="*.tsx"
 
 ---
 
+## P5-11 — "Other" Industry Option + Custom Industry Input UI
+
+**Owner:** Frontend Dev  
+**Estimate:** 1 day  
+**Priority:** P1 — Without this, every tenant outside the 8 known industries has zero domain context  
+**Depends on:** P5-10 Fix E (INDUSTRY_OPTIONS shared constant), P5-12 (matcher API)
+
+---
+
+### Why
+
+The fixed grid of 8 industry buttons covers only the industries DokyDoc launched with. Any tenant in insurance, real estate, education, media, government, telecom, or travel must currently pick the "closest" known industry — which degrades prompt quality. The "Other" option + live parent-matching gives them accurate classification without friction.
+
+---
+
+### Updated `frontend/lib/constants/industry-options.ts`
+
+Extend the shared constant (from P5-10 Fix E) to include an "other" sentinel:
+
+```typescript
+export const INDUSTRY_OPTIONS = [
+  { value: "fintech/payments",  label: "Fintech — Payments",  emoji: "💳" },
+  { value: "fintech/lending",   label: "Fintech — Lending",   emoji: "🏦" },
+  { value: "banking",           label: "Banking",             emoji: "🏛️" },
+  { value: "healthcare",        label: "Healthcare",          emoji: "🏥" },
+  { value: "saas",              label: "SaaS / Software",     emoji: "☁️" },
+  { value: "ecommerce",         label: "E-commerce",          emoji: "🛒" },
+  { value: "logistics",         label: "Logistics",           emoji: "🚚" },
+  { value: "devtools",          label: "Developer Tools",     emoji: "🛠️" },
+] as const;
+
+// Sentinel value stored in tenant.settings.industry when user chooses "Other"
+export const OTHER_INDUSTRY_SENTINEL = "other";
+
+export type KnownIndustryValue = typeof INDUSTRY_OPTIONS[number]["value"];
+export type IndustryValue = KnownIndustryValue | string;   // string = custom slug
+export type IndustryOption = typeof INDUSTRY_OPTIONS[number];
+
+export function isKnownIndustry(slug: string): slug is KnownIndustryValue {
+  return INDUSTRY_OPTIONS.some((o) => o.value === slug);
+}
+
+export function getIndustryLabel(slug: string): string {
+  const known = INDUSTRY_OPTIONS.find((o) => o.value === slug);
+  if (known) return known.label;
+  if (!slug || slug === OTHER_INDUSTRY_SENTINEL) return "Other";
+  // Custom slug: capitalise and de-slug
+  return slug.replace(/[/_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+```
+
+---
+
+### Updated Onboarding Step 2 (`frontend/app/dashboard/onboarding/page.tsx`)
+
+**State additions:**
+```tsx
+const [isOther, setIsOther]           = useState(false);
+const [customIndustry, setCustomIndustry] = useState("");
+const [matchResult, setMatchResult]   = useState<IndustryMatchResult | null>(null);
+const [isMatching, setIsMatching]     = useState(false);
+
+interface IndustryMatchResult {
+  slug: string;              // e.g. "banking/insurance"
+  display_name: string;      // e.g. "Insurance & InsurTech"
+  parent_slug: string | null; // e.g. "banking"
+  parent_label: string | null; // e.g. "Banking"
+  confidence: number;         // 0.0–1.0
+  is_known_parent: boolean;
+}
+```
+
+**Live matching — debounced call as user types:**
+```tsx
+useEffect(() => {
+  if (!isOther || customIndustry.trim().length < 3) {
+    setMatchResult(null);
+    return;
+  }
+  setIsMatching(true);
+  const timer = setTimeout(async () => {
+    try {
+      const res = await api.post("/api/v1/industries/match", {
+        query: customIndustry.trim(),
+      });
+      setMatchResult(res.data);
+    } catch {
+      setMatchResult(null);
+    } finally {
+      setIsMatching(false);
+    }
+  }, 600);   // 600ms debounce — don't call on every keystroke
+  return () => clearTimeout(timer);
+}, [customIndustry, isOther]);
+```
+
+**Industry grid with "Other" card at the end:**
+```tsx
+{/* Known industry cards */}
+<div className="grid grid-cols-2 gap-3">
+  {INDUSTRY_OPTIONS.map((opt) => (
+    <button
+      key={opt.value}
+      onClick={() => { setSelectedIndustry(opt.value); setIsOther(false); }}
+      className={`rounded-xl border p-4 text-left transition-all ${
+        selectedIndustry === opt.value && !isOther
+          ? "border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200"
+          : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
+      }`}
+    >
+      <span className="text-2xl">{opt.emoji}</span>
+      <p className="mt-2 text-sm font-medium text-gray-800">{opt.label}</p>
+      {opt.value === detectedIndustry && (
+        <span className="mt-1 inline-block text-[10px] font-bold text-green-600 uppercase">
+          Auto-detected ✓
+        </span>
+      )}
+    </button>
+  ))}
+
+  {/* "Other" card — always last */}
+  <button
+    onClick={() => { setIsOther(true); setSelectedIndustry(""); }}
+    className={`rounded-xl border p-4 text-left transition-all ${
+      isOther
+        ? "border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200"
+        : "border-gray-200 border-dashed hover:border-gray-300 hover:bg-gray-50"
+    }`}
+  >
+    <span className="text-2xl">🏢</span>
+    <p className="mt-2 text-sm font-medium text-gray-800">Other / Not listed</p>
+    <p className="text-xs text-gray-400 mt-0.5">Tell us your industry</p>
+  </button>
+</div>
+
+{/* Custom industry input — shown only when "Other" is selected */}
+{isOther && (
+  <div className="mt-4 space-y-3 rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+    <label className="block text-sm font-medium text-gray-700">
+      Describe your industry
+    </label>
+    <input
+      type="text"
+      value={customIndustry}
+      onChange={(e) => setCustomIndustry(e.target.value)}
+      placeholder="e.g. Insurance, Real Estate, Education, Government Tech..."
+      className="block w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm
+                 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+      autoFocus
+    />
+
+    {/* Live matching feedback */}
+    {isMatching && (
+      <div className="flex items-center gap-2 text-xs text-indigo-600">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Finding the best match...
+      </div>
+    )}
+
+    {matchResult && !isMatching && (
+      <div className="rounded-lg border bg-white p-3 space-y-2">
+        {matchResult.is_known_parent && matchResult.parent_label ? (
+          <div className="flex items-start gap-2">
+            <CheckCircle className="h-4 w-4 text-green-500 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-gray-800">
+                Looks like a sub-industry of <strong>{matchResult.parent_label}</strong>
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                You'll inherit {matchResult.parent_label} regulations and terminology,
+                plus {matchResult.display_name}-specific context.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-start gap-2">
+            <Info className="h-4 w-4 text-blue-500 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-gray-800">
+                New industry: <strong>{matchResult.display_name}</strong>
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                We'll generate a custom knowledge profile for your industry in the
+                background. This takes about 30 seconds.
+              </p>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          <span className="text-xs text-gray-400">
+            Classification: <code className="text-indigo-600">{matchResult.slug}</code>
+          </span>
+          {matchResult.confidence < 0.6 && (
+            <span className="text-xs text-amber-600">
+              (low confidence — you can edit if incorrect)
+            </span>
+          )}
+        </div>
+      </div>
+    )}
+  </div>
+)}
+```
+
+**Updated Step 2 submit handler:**
+```tsx
+const handleStep2Submit = async () => {
+  let finalSlug: string;
+  let displayName: string;
+  let parentSlug: string | null = null;
+
+  if (isOther) {
+    if (!customIndustry.trim()) {
+      setError("Please describe your industry");
+      return;
+    }
+    if (matchResult) {
+      finalSlug = matchResult.slug;
+      displayName = matchResult.display_name;
+      parentSlug = matchResult.parent_slug;
+    } else {
+      // No match result yet (still typing) — use raw input as slug
+      finalSlug = customIndustry.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      displayName = customIndustry.trim();
+    }
+  } else {
+    if (!selectedIndustry) {
+      setError("Please select an industry");
+      return;
+    }
+    finalSlug = selectedIndustry;
+    displayName = getIndustryLabel(selectedIndustry);
+  }
+
+  setLoading(true);
+  setError(null);
+  try {
+    await api.patch("/api/v1/tenants/me/settings", {
+      industry: finalSlug,
+      industry_display_name: displayName,
+      parent_industry: parentSlug,
+      industry_is_known: isKnownIndustry(finalSlug),
+    });
+    setStep(3);
+  } catch (e: any) {
+    setError(e.message || "Failed to save industry");
+  } finally {
+    setLoading(false);
+  }
+};
+```
+
+---
+
+### Updated Industry Profile Settings Card (`frontend/app/dashboard/admin/page.tsx`)
+
+Add the same "Other" option + custom input to the P5-09 settings card so admins can re-classify their industry post-onboarding. The card already has a `select` dropdown — replace it:
+
+```tsx
+// Replace the existing <select> in the P5-09 card with this:
+{editingIndustry ? (
+  <div className="space-y-3">
+    {/* Known industry select */}
+    <select
+      value={isKnownIndustry(selectedNewIndustry) ? selectedNewIndustry : "other"}
+      onChange={(e) => {
+        if (e.target.value === "other") {
+          setIsEditingOther(true);
+          setSelectedNewIndustry("");
+        } else {
+          setIsEditingOther(false);
+          setSelectedNewIndustry(e.target.value);
+        }
+      }}
+      className="block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+    >
+      <option value="">Select industry...</option>
+      {INDUSTRY_OPTIONS.map((opt) => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+      <option value="other">Other / Custom industry...</option>
+    </select>
+
+    {/* Custom input when "Other" selected */}
+    {isEditingOther && (
+      <input
+        type="text"
+        value={customIndustryEdit}
+        onChange={(e) => setCustomIndustryEdit(e.target.value)}
+        placeholder="e.g. Insurance, Real Estate, EdTech..."
+        className="block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm
+                   focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+      />
+    )}
+  </div>
+) : (
+  <p className="mt-1 text-sm font-medium text-gray-900">
+    {industryProfile?.industry
+      ? getIndustryLabel(industryProfile.industry)
+      : <span className="text-gray-400 italic">Not set</span>
+    }
+  </p>
+)}
+```
+
+---
+
+### Developer Checklist (P5-11)
+
+- [ ] Add `emoji` field to `INDUSTRY_OPTIONS` in `industry-options.ts`
+- [ ] Add `OTHER_INDUSTRY_SENTINEL`, `isKnownIndustry()`, `getIndustryLabel()` exports
+- [ ] Add `isOther`, `customIndustry`, `matchResult`, `isMatching` state to onboarding page
+- [ ] Implement debounced `POST /api/v1/industries/match` call (600ms)
+- [ ] Render "Other" card as last item in grid
+- [ ] Render custom input + live match result panel when `isOther` is true
+- [ ] Update Step 2 submit handler to resolve final slug from `matchResult`
+- [ ] Save `industry_display_name`, `parent_industry`, `industry_is_known` to settings
+- [ ] Update admin settings card to include "Other / Custom" option in select
+- [ ] Test: Known industry selected → `industry_is_known: true` saved
+- [ ] Test: Custom industry typed → match result shown → slug saved correctly
+- [ ] Test: Sub-industry detected → parent label shown in match result panel
+
+
+---
+
+## P5-12 — Industry Taxonomy & Sub-Industry Parent Matching Service
+
+**Owner:** Backend Dev 1  
+**Estimate:** 1.5 days  
+**Priority:** P1 — Powers the live matching in P5-11 and feeds P5-13 generation  
+**New files:** `backend/app/services/industry_matcher.py`, `backend/app/api/endpoints/industries.py`  
+**Depends on:** P5-02 (industry_context.json exists)
+
+---
+
+### Why
+
+When a user types "Property Insurance", the system needs to:
+1. Detect that "insurance" maps to the parent industry "banking"
+2. Suggest the slug `banking/insurance`
+3. Inherit banking's regulations + vocabulary automatically
+4. Only trigger full AI profile generation (P5-13) if NO known parent exists
+
+This is pure deterministic matching — zero Gemini cost, runs in <10ms.
+
+---
+
+### Industry Taxonomy — Add to `industry_context.json`
+
+**File:** `backend/app/services/ai/industry_context.json`
+
+Add a top-level `"__taxonomy__"` key (double-underscore prefix prevents collision with real industry slugs). This maps keyword patterns → known parent slugs:
+
+```json
+{
+  "__taxonomy__": {
+    "parent_keywords": {
+      "fintech": [
+        "payment", "payments", "fintech", "financial technology", "money transfer",
+        "remittance", "wallet", "neobank", "challenger bank", "open banking",
+        "embedded finance", "buy now pay later", "bnpl", "crypto", "defi",
+        "lending", "loan", "mortgage", "credit", "underwriting", "insurtech"
+      ],
+      "banking": [
+        "bank", "banking", "insurance", "insurer", "insuretech", "insurtech",
+        "wealth management", "asset management", "investment", "brokerage",
+        "fund", "hedge fund", "treasury", "capital markets", "trading",
+        "forex", "fx", "securities", "stock", "equity"
+      ],
+      "healthcare": [
+        "health", "healthcare", "medical", "clinic", "hospital", "pharma",
+        "pharmaceutical", "biotech", "life sciences", "mental health",
+        "telemedicine", "telehealth", "dental", "vision", "wellness",
+        "fitness", "nutrition", "care", "therapy", "therapeutics", "diagnostics",
+        "medtech", "healthtech", "digital health", "patient"
+      ],
+      "saas": [
+        "software", "saas", "platform", "cloud", "b2b", "enterprise software",
+        "hr tech", "hrtech", "hr software", "payroll", "erp", "crm",
+        "project management", "collaboration", "productivity", "workflow",
+        "automation", "no-code", "low-code", "api", "developer platform",
+        "data platform", "analytics platform", "bi tool", "business intelligence",
+        "martech", "marketing technology", "adtech", "proptech"
+      ],
+      "ecommerce": [
+        "ecommerce", "e-commerce", "retail", "marketplace", "shop", "store",
+        "shopping", "consumer", "d2c", "direct to consumer", "subscription box",
+        "fashion", "apparel", "beauty", "cosmetics", "food delivery",
+        "grocery", "furniture", "electronics retail"
+      ],
+      "logistics": [
+        "logistics", "supply chain", "shipping", "freight", "delivery",
+        "courier", "warehouse", "fulfilment", "fulfillment", "transport",
+        "trucking", "fleet", "last mile", "cold chain", "3pl", "4pl",
+        "port", "customs", "import", "export", "trade"
+      ],
+      "devtools": [
+        "developer tool", "devtool", "devops", "devsecops", "ci/cd",
+        "monitoring", "observability", "security tool", "code review",
+        "testing", "qa tool", "documentation", "api gateway", "sdk",
+        "infrastructure", "cloud infrastructure", "kubernetes", "container"
+      ]
+    },
+    "sub_industry_display_names": {
+      "banking/insurance":         "Insurance & InsurTech",
+      "banking/wealth":            "Wealth Management",
+      "banking/investment":        "Investment & Capital Markets",
+      "fintech/crypto":            "Crypto & DeFi",
+      "fintech/bnpl":              "Buy Now Pay Later",
+      "fintech/remittance":        "Remittance & Money Transfer",
+      "healthcare/telemedicine":   "Telemedicine & Digital Health",
+      "healthcare/pharma":         "Pharma & Life Sciences",
+      "healthcare/mentalhealth":   "Mental Health Tech",
+      "healthcare/dental":         "Dental & Vision",
+      "saas/hrtech":               "HR Tech & Payroll",
+      "saas/martech":              "MarTech & AdTech",
+      "saas/proptech":             "PropTech & Real Estate Tech",
+      "saas/edtech":               "EdTech & Learning Platforms",
+      "ecommerce/fashion":         "Fashion & Apparel",
+      "ecommerce/food":            "Food & Grocery Delivery",
+      "logistics/freight":         "Freight & International Shipping"
+    }
+  },
+  "fintech/payments": { ... },
+  ...
+}
+```
+
+---
+
+### New Service: `backend/app/services/industry_matcher.py`
+
+```python
+# backend/app/services/industry_matcher.py
+"""
+IndustryMatcherService — deterministic parent-industry matching.
+
+Takes a free-text industry description and returns:
+  - slug: best-match slug (e.g. "banking/insurance")
+  - parent_slug: known parent if found (e.g. "banking")
+  - display_name: human name (e.g. "Insurance & InsurTech")
+  - is_known_parent: True if parent exists in industry_context.json
+  - confidence: float 0.0-1.0
+
+Zero Gemini cost — pure keyword matching with token overlap scoring.
+Runs in <10ms.
+"""
+import json
+import os
+import re
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class IndustryMatchResult:
+    slug: str
+    parent_slug: Optional[str]
+    display_name: str
+    is_known_parent: bool
+    confidence: float
+    reasoning: str
+
+
+_CONTEXT_PATH = os.path.join(os.path.dirname(__file__), "ai", "industry_context.json")
+_taxonomy: dict = {}
+_known_slugs: set = set()
+
+try:
+    with open(_CONTEXT_PATH, "r") as f:
+        _data = json.load(f)
+        _taxonomy = _data.get("__taxonomy__", {})
+        _known_slugs = {k for k in _data if not k.startswith("__")}
+except Exception:
+    pass
+
+
+class IndustryMatcherService:
+
+    def match(self, query: str) -> IndustryMatchResult:
+        """
+        Match a free-text industry description to the best industry slug.
+
+        Algorithm:
+        1. Normalize query to lowercase tokens
+        2. Score each known parent by keyword overlap
+        3. If best score > 0.2: determine sub-industry slug
+        4. Check taxonomy display_names for known sub-industry
+        5. Return result with confidence score
+        """
+        if not query or not _taxonomy:
+            return self._unknown(query)
+
+        normalized = query.lower().strip()
+        tokens = set(re.split(r"[\s\-/&,]+", normalized))
+
+        # Step 1: Score each parent
+        parent_keywords: dict = _taxonomy.get("parent_keywords", {})
+        scores: dict[str, float] = {}
+
+        for parent, keywords in parent_keywords.items():
+            keyword_tokens_list = [
+                set(re.split(r"[\s\-/&,]+", kw.lower())) for kw in keywords
+            ]
+            # Score = max overlap ratio across all keywords for this parent
+            best = 0.0
+            for kw_tokens in keyword_tokens_list:
+                overlap = len(tokens & kw_tokens)
+                union = len(tokens | kw_tokens)
+                if union > 0:
+                    ratio = overlap / union
+                    if ratio > best:
+                        best = ratio
+                # Also check if full keyword is substring of query
+                for kw in keywords:
+                    if kw.lower() in normalized:
+                        best = max(best, 0.8)  # Strong signal for substring match
+            scores[parent] = best
+
+        # Step 2: Find best parent
+        best_parent = max(scores, key=scores.get) if scores else None
+        best_score = scores.get(best_parent, 0.0) if best_parent else 0.0
+
+        if best_score < 0.1:
+            return self._unknown(query)
+
+        # Step 3: Build sub-industry slug
+        # Remove parent keywords from query to isolate the differentiator
+        sub_keywords = parent_keywords.get(best_parent, [])
+        residual = normalized
+        for kw in sorted(sub_keywords, key=len, reverse=True):
+            residual = residual.replace(kw.lower(), "").strip()
+
+        # Normalize residual to slug component
+        sub_slug = re.sub(r"[^a-z0-9]+", "_", residual.strip()).strip("_")[:30]
+
+        if sub_slug:
+            candidate_slug = f"{best_parent}/{sub_slug}"
+        else:
+            candidate_slug = best_parent
+
+        # Step 4: Check taxonomy display_names for known sub-industry
+        display_names: dict = _taxonomy.get("sub_industry_display_names", {})
+        display_name = display_names.get(candidate_slug)
+
+        if not display_name:
+            # Generate display name from query
+            display_name = query.strip().title()
+
+        return IndustryMatchResult(
+            slug=candidate_slug,
+            parent_slug=best_parent if best_parent in _known_slugs else None,
+            display_name=display_name,
+            is_known_parent=best_parent in _known_slugs,
+            confidence=round(min(best_score * 1.2, 1.0), 2),
+            reasoning=f"Matched '{best_parent}' parent with score {best_score:.2f}",
+        )
+
+    def _unknown(self, query: str) -> IndustryMatchResult:
+        """Return result for completely unknown industry with no parent match."""
+        slug = re.sub(r"[^a-z0-9]+", "_", (query or "unknown").lower().strip())[:40].strip("_")
+        return IndustryMatchResult(
+            slug=slug,
+            parent_slug=None,
+            display_name=query.strip().title() if query else "Unknown",
+            is_known_parent=False,
+            confidence=0.0,
+            reasoning="No keyword overlap with known parent industries",
+        )
+
+
+industry_matcher = IndustryMatcherService()
+```
+
+---
+
+### New API Endpoint: `POST /api/v1/industries/match`
+
+**New file:** `backend/app/api/endpoints/industries.py`
+
+```python
+# backend/app/api/endpoints/industries.py
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+from app.api import deps
+from app.services.industry_matcher import industry_matcher
+
+router = APIRouter(prefix="/industries", tags=["Industries"])
+
+
+class IndustryMatchRequest(BaseModel):
+    query: str   # e.g. "Property Insurance" or "EdTech"
+
+
+class IndustryMatchResponse(BaseModel):
+    slug: str
+    parent_slug: str | None
+    display_name: str
+    parent_label: str | None
+    is_known_parent: bool
+    confidence: float
+    reasoning: str
+
+
+@router.post("/match", response_model=IndustryMatchResponse)
+def match_industry(
+    body: IndustryMatchRequest,
+    current_user=Depends(deps.get_current_active_user),
+):
+    """
+    Match a free-text industry description to the best slug + parent.
+    Used by the onboarding wizard and admin settings for custom industry input.
+    Pure deterministic matching — zero AI cost, <10ms response time.
+    """
+    from app.services.ai.industry_context import _INDUSTRY_CONTEXT  # reuse loaded dict
+
+    result = industry_matcher.match(body.query)
+
+    # Resolve parent display label
+    parent_label = None
+    if result.parent_slug and result.parent_slug in _INDUSTRY_CONTEXT:
+        # Get a friendly label from the known parent slug
+        _PARENT_LABELS = {
+            "fintech": "Fintech",
+            "banking": "Banking",
+            "healthcare": "Healthcare",
+            "saas": "SaaS / Software",
+            "ecommerce": "E-commerce",
+            "logistics": "Logistics",
+            "devtools": "Developer Tools",
+        }
+        parent_label = _PARENT_LABELS.get(result.parent_slug, result.parent_slug.title())
+
+    return IndustryMatchResponse(
+        slug=result.slug,
+        parent_slug=result.parent_slug,
+        display_name=result.display_name,
+        parent_label=parent_label,
+        is_known_parent=result.is_known_parent,
+        confidence=result.confidence,
+        reasoning=result.reasoning,
+    )
+
+
+@router.get("/known")
+def list_known_industries(
+    current_user=Depends(deps.get_current_active_user),
+):
+    """Return all known industry slugs. Useful for admin tooling."""
+    from app.services.ai.industry_context import _INDUSTRY_CONTEXT
+    return {
+        "industries": [k for k in _INDUSTRY_CONTEXT if not k.startswith("__")]
+    }
+```
+
+**Register in `backend/app/api/api.py`:**
+```python
+from app.api.endpoints import industries
+api_router.include_router(industries.router, prefix="/api/v1")
+```
+
+---
+
+### Update `PromptContextBuilder` to Use Parent Matching
+
+**File:** `backend/app/services/ai/prompt_context_builder.py`
+
+The existing Step 2 already does a basic parent lookup. Enhance it to also use the `IndustryMatcherService` for unknown slugs:
+
+```python
+# ── Step 2 (enhanced): Look up industry context library ──────────────────
+if ctx.industry and _INDUSTRY_CONTEXT:
+    industry_data = _INDUSTRY_CONTEXT.get(ctx.industry, {})
+
+    if not industry_data:
+        # Try known parent slug (e.g. "banking/insurance" → "banking")
+        parts = ctx.industry.split("/")
+        parent = parts[0]
+        industry_data = _INDUSTRY_CONTEXT.get(parent, {})
+
+        if industry_data:
+            # Known parent found — enrich with sub-industry display name note
+            sub_label = settings.get("industry_display_name", parts[1] if len(parts) > 1 else "")
+            if sub_label and industry_data.get("prompt_injection"):
+                industry_data = dict(industry_data)  # copy so we don't mutate module-level
+                industry_data["prompt_injection"] = (
+                    industry_data["prompt_injection"]
+                    + f"
+
+SUB-INDUSTRY NOTE: This tenant operates specifically in "
+                    f"{sub_label} within the broader {parent.title()} sector."
+                )
+
+    # Step 2b: Check generated profiles DB (P5-13 adds this)
+    # (placeholder — P5-13 adds the actual DB lookup here)
+
+    ctx.regulatory = industry_data.get("regulatory", [])
+    ctx.industry_vocabulary = industry_data.get("vocabulary", {})
+    ctx.prompt_injection = industry_data.get("prompt_injection", "")
+```
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Taxonomy loaded:
+python3 -c "
+from app.services.industry_matcher import industry_matcher, _taxonomy
+print('Taxonomy keys:', list(_taxonomy.keys()))
+print('Parent count:', len(_taxonomy.get('parent_keywords', {})))
+"
+# Expected: Taxonomy keys: ['parent_keywords', 'sub_industry_display_names']
+
+# 2. Match tests:
+python3 -c "
+from app.services.industry_matcher import industry_matcher
+tests = [
+    ('Property Insurance', 'banking'),
+    ('EdTech learning platform', 'saas'),
+    ('Telemedicine startup', 'healthcare'),
+    ('Crypto exchange DeFi', 'fintech'),
+    ('Restaurant supply chain', 'logistics'),
+    ('totally unique niche', None),
+]
+for query, expected_parent in tests:
+    result = industry_matcher.match(query)
+    status = 'OK' if result.parent_slug == expected_parent else 'FAIL'
+    print(f'{status}: "{query}" -> {result.slug} (parent={result.parent_slug}, conf={result.confidence})')
+"
+
+# 3. API endpoint:
+curl -X POST http://localhost:8000/api/v1/industries/match \
+  -H 'Authorization: Bearer \$TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Insurance & InsurTech"}' | python3 -m json.tool
+# Expected: {"slug": "banking/insurance", "parent_slug": "banking", "is_known_parent": true, ...}
+```
+
+---
+
+### Developer Checklist (P5-12)
+
+- [ ] Add `"__taxonomy__"` block to `industry_context.json` (parent_keywords + sub_industry_display_names)
+- [ ] Create `backend/app/services/industry_matcher.py` with `IndustryMatcherService` and `industry_matcher` singleton
+- [ ] Create `backend/app/api/endpoints/industries.py` with `POST /match` and `GET /known`
+- [ ] Register industries router in `backend/app/api/api.py`
+- [ ] Update `PromptContextBuilder` Step 2 to add sub-industry note in `prompt_injection`
+- [ ] Write unit tests for `IndustryMatcherService.match()` covering: exact known, sub-industry, no match
+- [ ] Test `POST /industries/match` returns correct `parent_label` for known parents
+- [ ] Verify sub-industry note appears in prompt injection for a tenant with `industry: "banking/insurance"`
+
+
+---
+
+## P5-13 — Dynamic Industry Profile Generation + DB Cache
+
+**Owner:** Backend Dev 2  
+**Estimate:** 2 days  
+**Priority:** P1 — Without this, tenants with unknown industries get zero domain context in every Gemini call  
+**New migration:** `backend/alembic/versions/s18a1_generated_industry_profiles.py`  
+**New files:** `backend/app/models/generated_industry_profile.py`, `backend/app/crud/crud_generated_industry_profile.py`, `backend/app/tasks/industry_tasks.py`  
+**Depends on:** P5-12 (matcher knows whether parent exists), P5-02 (industry_context.json structure known)
+
+---
+
+### Why
+
+When a tenant's industry slug has no match in `industry_context.json` (e.g. `"real_estate"`, `"education"`, `"government"`), `PromptContextBuilder` currently returns empty context — every Gemini analysis runs with zero domain knowledge. This task generates a full industry profile via a single Gemini call and caches it in the DB, shared across all tenants with the same industry. The generation cost is paid once; every subsequent tenant with the same industry gets it for free.
+
+---
+
+### DB Migration: `s18a1_generated_industry_profiles`
+
+**New file:** `backend/alembic/versions/s18a1_generated_industry_profiles.py`
+
+```python
+"""Add generated_industry_profiles table for dynamic industry context
+
+Revision ID: s18a1
+Revises: s15a1
+Create Date: 2026-04-08
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TEXT
+
+revision = 's18a1'
+down_revision = 's15a1'
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    op.create_table(
+        'generated_industry_profiles',
+        sa.Column('id', sa.Integer, primary_key=True, autoincrement=True),
+        # The slug this profile is for (e.g. "real_estate", "banking/insurance")
+        sa.Column('industry_slug', sa.String(100), nullable=False, unique=True),
+        # Parent slug if this is a sub-industry (e.g. "banking" for "banking/insurance")
+        sa.Column('parent_slug', sa.String(100), nullable=True),
+        # Human-readable name (e.g. "Insurance & InsurTech")
+        sa.Column('display_name', sa.String(200), nullable=False),
+        # Generated content
+        sa.Column('regulatory', ARRAY(TEXT), server_default='{}', nullable=False),
+        sa.Column('vocabulary', JSONB, server_default='{}', nullable=False),
+        sa.Column('prompt_injection', sa.Text, nullable=True),
+        # Metadata
+        sa.Column('generation_model', sa.String(50), nullable=True),
+        sa.Column('generation_prompt_version', sa.Integer, server_default='1', nullable=False),
+        sa.Column('is_ai_generated', sa.Boolean, server_default='true', nullable=False),
+        sa.Column('is_verified', sa.Boolean, server_default='false', nullable=False),
+        # How many tenants use this profile (for prioritising manual review)
+        sa.Column('usage_count', sa.Integer, server_default='0', nullable=False),
+        sa.Column('created_at', sa.DateTime, server_default=sa.func.now(), nullable=False),
+        sa.Column('updated_at', sa.DateTime, server_default=sa.func.now(),
+                  onupdate=sa.func.now(), nullable=False),
+    )
+    op.create_index('ix_gip_slug', 'generated_industry_profiles', ['industry_slug'], unique=True)
+    op.create_index('ix_gip_parent', 'generated_industry_profiles', ['parent_slug'])
+    op.create_index('ix_gip_usage', 'generated_industry_profiles', ['usage_count'])
+
+
+def downgrade():
+    op.drop_table('generated_industry_profiles')
+```
+
+---
+
+### New Model: `backend/app/models/generated_industry_profile.py`
+
+```python
+from datetime import datetime
+from typing import Optional
+from sqlalchemy import Integer, String, Text, Boolean, DateTime, ARRAY
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base_class import Base
+
+
+class GeneratedIndustryProfile(Base):
+    __tablename__ = "generated_industry_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    industry_slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    parent_slug: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    regulatory: Mapped[list] = mapped_column(ARRAY(Text), default=list, nullable=False)
+    vocabulary: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    prompt_injection: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    generation_model: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    generation_prompt_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_ai_generated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                   onupdate=datetime.utcnow)
+```
+
+**Register in `backend/app/models/__init__.py`:**
+```python
+from .generated_industry_profile import GeneratedIndustryProfile  # noqa
+```
+
+---
+
+### New CRUD: `backend/app/crud/crud_generated_industry_profile.py`
+
+```python
+from sqlalchemy.orm import Session
+from app.models.generated_industry_profile import GeneratedIndustryProfile
+
+
+class CRUDGeneratedIndustryProfile:
+
+    def get_by_slug(self, db: Session, *, slug: str) -> GeneratedIndustryProfile | None:
+        return db.query(GeneratedIndustryProfile).filter_by(industry_slug=slug).first()
+
+    def create(self, db: Session, *, slug: str, parent_slug: str | None,
+                display_name: str, regulatory: list, vocabulary: dict,
+                prompt_injection: str, model: str) -> GeneratedIndustryProfile:
+        obj = GeneratedIndustryProfile(
+            industry_slug=slug,
+            parent_slug=parent_slug,
+            display_name=display_name,
+            regulatory=regulatory,
+            vocabulary=vocabulary,
+            prompt_injection=prompt_injection,
+            generation_model=model,
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    def increment_usage(self, db: Session, *, slug: str) -> None:
+        db.query(GeneratedIndustryProfile).filter_by(industry_slug=slug).update(
+            {"usage_count": GeneratedIndustryProfile.usage_count + 1}
+        )
+        db.commit()
+
+    def get_all_unverified(self, db: Session, *, min_usage: int = 2) -> list:
+        """Return AI-generated profiles with enough usage to warrant manual review."""
+        return (
+            db.query(GeneratedIndustryProfile)
+            .filter_by(is_verified=False, is_ai_generated=True)
+            .filter(GeneratedIndustryProfile.usage_count >= min_usage)
+            .order_by(GeneratedIndustryProfile.usage_count.desc())
+            .all()
+        )
+
+
+crud_generated_industry_profile = CRUDGeneratedIndustryProfile()
+```
+
+---
+
+### New Celery Task: `backend/app/tasks/industry_tasks.py`
+
+```python
+# backend/app/tasks/industry_tasks.py
+"""
+generate_industry_profile: On-demand Gemini profile generation for unknown industries.
+Triggered when a tenant completes onboarding with a custom/unknown industry slug.
+Result is shared across all tenants with the same slug.
+"""
+import asyncio
+from app.core.celery_app import celery_app
+from app.core.logging import get_logger
+
+logger = get_logger("industry_tasks")
+
+GENERATION_PROMPT_VERSION = 1
+
+PROFILE_GENERATION_PROMPT = """
+You are a domain expert. Generate a comprehensive industry knowledge profile for use
+in AI-powered document analysis systems.
+
+INDUSTRY: {display_name}
+SLUG: {slug}
+PARENT INDUSTRY (if applicable): {parent_display}
+
+Generate a JSON response with EXACTLY this structure:
+{{
+  "regulatory": ["List of 3-6 key regulations, standards, or compliance frameworks"],
+  "vocabulary": {{
+    "term1": "clear definition relevant to this industry",
+    "term2": "clear definition",
+    ... (8-12 terms total)
+  }},
+  "prompt_injection": "A 2-4 sentence paragraph starting with 'REGULATORY CONTEXT:' or 'CONTEXT:' that summarises the most important compliance requirements and technical considerations for this industry. This text will be prepended to AI analysis prompts."
+}}
+
+Rules:
+- regulatory: real, specific frameworks (e.g. "GDPR", "ISO 27001") not generic statements
+- vocabulary: industry-specific jargon a developer must know to understand requirements
+- prompt_injection: actionable guidance for document analysis AI, not marketing copy
+- Respond ONLY with the JSON object, no explanation, no markdown code fences
+"""
+
+
+@celery_app.task(
+    name="generate_industry_profile",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def generate_industry_profile(
+    self,
+    slug: str,
+    display_name: str,
+    parent_slug: str | None = None,
+):
+    """
+    Generate and store an industry profile for an unknown industry slug.
+    Idempotent: if the slug already exists in the DB, increments usage_count only.
+    """
+    from app.db.session import SessionLocal
+    from app.crud.crud_generated_industry_profile import crud_generated_industry_profile
+
+    db = SessionLocal()
+    try:
+        # Idempotency check: if profile already exists, just increment usage
+        existing = crud_generated_industry_profile.get_by_slug(db, slug=slug)
+        if existing:
+            crud_generated_industry_profile.increment_usage(db, slug=slug)
+            logger.info(f"Profile already exists for '{slug}' — incremented usage")
+            return {"status": "already_exists", "slug": slug}
+
+        # Determine parent display name for prompt
+        _PARENT_LABELS = {
+            "fintech": "Fintech & Financial Technology",
+            "banking": "Banking & Financial Services",
+            "healthcare": "Healthcare & Life Sciences",
+            "saas": "SaaS / Software",
+            "ecommerce": "E-commerce & Retail",
+            "logistics": "Logistics & Supply Chain",
+            "devtools": "Developer Tools & Infrastructure",
+        }
+        parent_display = _PARENT_LABELS.get(parent_slug or "", "None")
+
+        prompt = PROFILE_GENERATION_PROMPT.format(
+            display_name=display_name,
+            slug=slug,
+            parent_display=parent_display,
+        )
+
+        # Call Gemini
+        from app.services.ai.gemini import gemini_service
+        import json as _json
+
+        loop = asyncio.new_event_loop()
+        try:
+            response = loop.run_until_complete(
+                gemini_service.generate_content(prompt)
+            )
+        finally:
+            loop.close()
+
+        raw = (response.text or "").strip()
+        # Strip markdown fences if Gemini wraps in ```json
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        profile_data = _json.loads(raw)
+
+        # Validate structure
+        assert isinstance(profile_data.get("regulatory"), list), "regulatory must be list"
+        assert isinstance(profile_data.get("vocabulary"), dict), "vocabulary must be dict"
+        assert isinstance(profile_data.get("prompt_injection"), str), "prompt_injection must be str"
+
+        # Store in DB
+        profile = crud_generated_industry_profile.create(
+            db=db,
+            slug=slug,
+            parent_slug=parent_slug,
+            display_name=display_name,
+            regulatory=profile_data["regulatory"],
+            vocabulary=profile_data["vocabulary"],
+            prompt_injection=profile_data["prompt_injection"],
+            model="gemini-1.5-flash",
+        )
+        crud_generated_industry_profile.increment_usage(db, slug=slug)
+
+        logger.info(
+            f"Generated profile for '{slug}': "
+            f"{len(profile_data['regulatory'])} regulations, "
+            f"{len(profile_data['vocabulary'])} vocab terms"
+        )
+        return {
+            "status": "generated",
+            "slug": slug,
+            "regulatory_count": len(profile_data["regulatory"]),
+            "vocab_count": len(profile_data["vocabulary"]),
+        }
+
+    except Exception as exc:
+        logger.error(f"Profile generation failed for '{slug}': {exc}")
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+```
+
+**Register in `backend/app/worker.py`:**
+```python
+include=[
+    ...
+    "app.tasks.industry_tasks",   # ← ADD
+]
+```
+
+---
+
+### Trigger Generation from Onboarding Completion
+
+**File:** `backend/app/api/endpoints/tenants.py` — in the `PATCH /me/settings` handler
+
+After saving settings, if the industry is unknown (not in `industry_context.json`), dispatch the generation task:
+
+```python
+@router.patch("/me/settings")
+def update_tenant_settings(settings_update: dict, ...):
+    # ... existing merge-update logic ...
+
+    # P5-13: Dispatch profile generation if unknown industry was saved
+    new_industry = settings_update.get("industry")
+    if new_industry:
+        from app.services.ai.industry_context import _INDUSTRY_CONTEXT
+        from app.services.industry_matcher import industry_matcher
+
+        is_known = new_industry in _INDUSTRY_CONTEXT
+        parent = new_industry.split("/")[0]
+        parent_known = parent in _INDUSTRY_CONTEXT
+
+        if not is_known and not parent_known:
+            # Completely unknown industry — generate full profile
+            display_name = settings_update.get("industry_display_name", new_industry.title())
+            parent_slug = settings_update.get("parent_industry")
+            try:
+                from app.tasks.industry_tasks import generate_industry_profile
+                generate_industry_profile.delay(
+                    slug=new_industry,
+                    display_name=display_name,
+                    parent_slug=parent_slug,
+                )
+                logger.info(f"Dispatched profile generation for unknown industry '{new_industry}'")
+            except Exception as e:
+                logger.warning(f"Could not dispatch industry profile generation: {e}")
+
+    return {"status": "updated", "settings": current}
+```
+
+---
+
+### Update `PromptContextBuilder` — Tier 3 DB Lookup
+
+**File:** `backend/app/services/ai/prompt_context_builder.py`
+
+Complete the Step 2b placeholder from P5-12:
+
+```python
+# ── Step 2b: Check generated_industry_profiles DB ────────────────────────
+if not industry_data and ctx.industry:
+    try:
+        from app.crud.crud_generated_industry_profile import crud_generated_industry_profile
+        generated = crud_generated_industry_profile.get_by_slug(db, slug=ctx.industry)
+        if generated:
+            industry_data = {
+                "regulatory": generated.regulatory or [],
+                "vocabulary": generated.vocabulary or {},
+                "prompt_injection": generated.prompt_injection or "",
+            }
+            logger.debug(
+                f"Using AI-generated profile for industry '{ctx.industry}' "
+                f"(verified={generated.is_verified})"
+            )
+    except Exception as db_err:
+        logger.warning(f"Could not load generated profile: {db_err}")
+```
+
+This gives `PromptContextBuilder` a **4-tier resolution chain:**
+
+```
+Tier 1: industry_context.json exact match        → O(1) dict lookup
+Tier 2: industry_context.json parent match       → O(1) + sub-industry note
+Tier 3: generated_industry_profiles DB lookup    → 1 DB query, <5ms
+Tier 4: Empty context (fallback)                  → generic prompt
+```
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Migration:
+alembic upgrade s18a1
+psql $DATABASE_URL -c "\d generated_industry_profiles"
+
+# 2. Generate a profile manually:
+python3 -c "
+from app.tasks.industry_tasks import generate_industry_profile
+result = generate_industry_profile('real_estate', 'Real Estate & PropTech', None)
+print(result)
+"
+# Expected: {"status": "generated", "slug": "real_estate", ...}
+
+# 3. Verify stored in DB:
+psql $DATABASE_URL -c "SELECT industry_slug, display_name, array_length(regulatory,1) as regs, usage_count FROM generated_industry_profiles;"
+
+# 4. Verify PromptContextBuilder uses generated profile:
+python3 -c "
+from app.db.session import SessionLocal
+from app.services.ai.prompt_context_builder import build_prompt_context
+db = SessionLocal()
+# Assume tenant_id=1 has industry='real_estate' in settings
+ctx = build_prompt_context(db, tenant_id=1)
+print('Has prompt_injection:', bool(ctx.prompt_injection))
+print('Regulatory count:', len(ctx.regulatory))
+db.close()
+"
+# Expected: Has prompt_injection: True
+
+# 5. Idempotency — run generate twice, check usage_count:
+psql $DATABASE_URL -c "SELECT usage_count FROM generated_industry_profiles WHERE industry_slug='real_estate'"
+# Expected: 2 (first run creates, second increments)
+
+# 6. Full onboarding flow test:
+# Register → set industry to "Government Tech" (unknown) → complete onboarding
+# Wait 30s for Celery → check DB:
+psql $DATABASE_URL -c "SELECT * FROM generated_industry_profiles WHERE industry_slug LIKE 'government%'"
+```
+
+---
+
+### Developer Checklist (P5-13)
+
+- [ ] Write `s18a1_generated_industry_profiles.py` migration (`down_revision = 's15a1'`)
+- [ ] Run migration locally: `alembic upgrade s18a1`
+- [ ] Create `backend/app/models/generated_industry_profile.py`
+- [ ] Register model in `backend/app/models/__init__.py` and `backend/app/db/base.py`
+- [ ] Create `backend/app/crud/crud_generated_industry_profile.py` (4 methods)
+- [ ] Register CRUD in `backend/app/crud/__init__.py`
+- [ ] Create `backend/app/tasks/industry_tasks.py` with `generate_industry_profile` Celery task
+- [ ] Register `app.tasks.industry_tasks` in `backend/app/worker.py`
+- [ ] Update `PATCH /me/settings` to dispatch generation task for unknown industries
+- [ ] Update `PromptContextBuilder` Step 2b — add Tier 3 DB lookup
+- [ ] Test: Complete onboarding with "Government Tech" → task dispatched → profile in DB after 30s
+- [ ] Test: Second tenant with same slug → `usage_count` incremented, no duplicate generation
+- [ ] Test: `PromptContextBuilder` returns non-empty context for tenant with `real_estate` industry
+
+
+---
+
+## P5-14 — Enhanced Auto-Detection Supporting Unknown Industries
+
+**Owner:** Backend Dev 1  
+**Estimate:** 1 day  
+**Priority:** P1 — The current detection task rejects any industry outside the 8 known slugs  
+**Modifies:** `backend/app/tasks/tenant_tasks.py` (the `detect_tenant_industry` task from P5-04)  
+**Depends on:** P5-12 (taxonomy), P5-13 (generation task exists)
+
+---
+
+### Root Cause
+
+The current `detect_tenant_industry` task (P5-04) hardcodes this validation:
+```python
+if detected_slug not in VALID_INDUSTRY_SLUGS:
+    logger.warning(f"DETECT_INDUSTRY: invalid slug returned '{detected_slug}'")
+    return   # ← SILENTLY DROPS the result
+```
+
+The Gemini prompt also constrains to `VALID_INDUSTRY_SLUGS`, so even if a company is clearly in insurance or real estate, Gemini is instructed to pick the "closest" of 8 known values — degrading accuracy. This task upgrades both the prompt and the handling logic.
+
+---
+
+### New Gemini Classification Prompt
+
+**File:** `backend/app/tasks/tenant_tasks.py`
+
+Replace the existing `classification_prompt` string with:
+
+```python
+KNOWN_SLUGS_STR = "\n".join(f"  - {s}" for s in sorted(VALID_INDUSTRY_SLUGS))
+
+classification_prompt = f"""
+Analyze the following website text and classify the company's industry.
+
+KNOWN INDUSTRY SLUGS (use these if they match well):
+{KNOWN_SLUGS_STR}
+
+INSTRUCTIONS:
+1. If the company fits a KNOWN SLUG well (confidence >= 0.7), return that slug.
+2. If the company fits a SUB-DOMAIN of a known industry (e.g. insurance under banking),
+   return "parent/sub" format: e.g. "banking/insurance", "healthcare/telemedicine",
+   "saas/edtech", "fintech/crypto".
+   The parent MUST be one of the known slugs above.
+3. If the company is in a completely different industry not related to any known slug,
+   return a new snake_case slug: e.g. "real_estate", "government", "education",
+   "media", "telecom", "travel", "energy", "agriculture".
+
+Return ONLY a valid JSON object, no explanation:
+{{
+  "industry_slug": "the best slug",
+  "parent_slug": "parent if sub-industry, else null",
+  "is_known": true or false,
+  "display_name": "Human readable name e.g. Insurance & InsurTech",
+  "confidence": 0.85,
+  "reasoning": "one sentence explanation"
+}}
+
+WEBSITE TEXT:
+{website_text}
+"""
+```
+
+---
+
+### Updated Step 4 — Handle Unknown Slugs
+
+**File:** `backend/app/tasks/tenant_tasks.py`
+
+Replace the existing Step 4 (slug validation) and Step 5 (settings update) with this enhanced version:
+
+```python
+        # ── Step 4: Parse Gemini JSON response ───────────────────────────────
+        import json as _json
+        raw = (response.text or "").strip()
+        # Strip markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        try:
+            classification = _json.loads(raw)
+        except _json.JSONDecodeError:
+            # Fallback: old-style single slug response (backward compat)
+            detected_slug = raw.lower().strip('"').strip("'")
+            classification = {
+                "industry_slug": detected_slug,
+                "parent_slug": None,
+                "is_known": detected_slug in VALID_INDUSTRY_SLUGS,
+                "display_name": detected_slug.replace("_", " ").title(),
+                "confidence": 0.5,
+                "reasoning": "Legacy plain-text response",
+            }
+
+        detected_slug = classification.get("industry_slug", "").lower().strip()
+        parent_slug = classification.get("parent_slug")
+        is_known = classification.get("is_known", detected_slug in VALID_INDUSTRY_SLUGS)
+        display_name = classification.get("display_name", detected_slug.replace("_", " ").title())
+        confidence = float(classification.get("confidence", 0.5))
+
+        # Validate slug format (snake_case or parent/sub)
+        import re as _re
+        if not _re.match(r"^[a-z][a-z0-9_/]{1,60}$", detected_slug):
+            logger.warning(
+                f"DETECT_INDUSTRY: malformed slug '{detected_slug}' for tenant {tenant_id}"
+            )
+            return
+
+        # Low confidence: don't auto-set, let user choose in onboarding
+        if confidence < 0.4:
+            logger.info(
+                f"DETECT_INDUSTRY: confidence {confidence} too low for tenant {tenant_id} "
+                f"— leaving industry unset so user selects manually"
+            )
+            return
+
+        # ── Step 5: Update tenant.settings ───────────────────────────────────
+        tenant = crud.tenant.get(db, id=tenant_id)
+        if not tenant:
+            logger.error(f"DETECT_INDUSTRY: tenant {tenant_id} not found")
+            return
+
+        current_settings = dict(tenant.settings or {})
+
+        # Only set if not already set by the user
+        if not current_settings.get("industry"):
+            current_settings["industry"] = detected_slug
+            current_settings["industry_display_name"] = display_name
+            current_settings["industry_is_known"] = is_known
+            if parent_slug:
+                current_settings["parent_industry"] = parent_slug
+
+            crud.tenant.update(
+                db, db_obj=tenant, obj_in={"settings": current_settings}
+            )
+            db.commit()
+            logger.info(
+                f"DETECT_INDUSTRY: set industry='{detected_slug}' "
+                f"(known={is_known}, confidence={confidence}) for tenant {tenant_id}"
+            )
+
+            # ── Step 6: Trigger profile generation for unknown industry ───────
+            if not is_known:
+                # Check if parent is known (sub-industry case)
+                parent_known = (parent_slug in VALID_INDUSTRY_SLUGS) if parent_slug else False
+                if not parent_known:
+                    # Completely unknown — generate full AI profile
+                    try:
+                        from app.tasks.industry_tasks import generate_industry_profile
+                        generate_industry_profile.delay(
+                            slug=detected_slug,
+                            display_name=display_name,
+                            parent_slug=parent_slug,
+                        )
+                        logger.info(
+                            f"DETECT_INDUSTRY: dispatched profile generation "
+                            f"for unknown industry '{detected_slug}'"
+                        )
+                    except Exception as task_err:
+                        logger.warning(
+                            f"DETECT_INDUSTRY: could not dispatch generation: {task_err}"
+                        )
+        else:
+            logger.info(
+                f"DETECT_INDUSTRY: tenant {tenant_id} already has industry set — skipping"
+            )
+```
+
+---
+
+### Updated `VALID_INDUSTRY_SLUGS` Constant
+
+**File:** `backend/app/tasks/tenant_tasks.py`
+
+The set is now used as a "known list" reference, not a whitelist that rejects unknowns:
+
+```python
+# Rename from VALID_INDUSTRY_SLUGS to KNOWN_INDUSTRY_SLUGS to signal intent change
+KNOWN_INDUSTRY_SLUGS = {
+    "fintech/payments",
+    "fintech/lending",
+    "banking",
+    "healthcare",
+    "saas",
+    "ecommerce",
+    "logistics",
+    "devtools",
+}
+```
+
+---
+
+### What Changes in the Full Detection Flow
+
+**Before (P5-04):**
+```
+website → Gemini → must be one of 8 slugs → if unknown: DROP and return
+```
+
+**After (P5-14):**
+```
+website → Gemini → JSON response with slug + confidence
+    │
+    ├── confidence < 0.4 → skip (let user choose manually)
+    ├── is_known = true → save slug → done
+    ├── is_known = false + parent_slug in known → save "banking/insurance" → done
+    └── is_known = false + no known parent → save slug → dispatch generate_industry_profile task
+                                                              ↓ (30s async)
+                                                        GeneratedIndustryProfile in DB
+                                                              ↓ (next analysis)
+                                                        PromptContextBuilder uses generated profile
+```
+
+---
+
+### Backward Compatibility
+
+The detection task still handles the old plain-text response format via the `json.JSONDecodeError` fallback path. If for any reason Gemini returns a plain slug string instead of JSON, the existing behavior is preserved.
+
+---
+
+### Verification Commands
+
+```bash
+# 1. Test with an insurance company website:
+python3 -c "
+from app.tasks.tenant_tasks import detect_tenant_industry
+# Call directly (not via .delay) for testing
+detect_tenant_industry(
+    tenant_id=999,
+    website_url='https://lemonade.com'
+)
+"
+psql \$DATABASE_URL -c "SELECT settings FROM tenants WHERE id=999;"
+# Expected: settings contains industry='banking/insurance' or 'fintech/insurtech'
+
+# 2. Test with an education company:
+# Expected: industry='education' (unknown), generate_industry_profile task dispatched
+
+# 3. Test low-confidence handling:
+# A generic consulting firm website should NOT set industry (confidence < 0.4)
+# Expected: settings.industry remains unset
+
+# 4. Test JSON parse fallback:
+# Simulate old plain-text Gemini response → should still work
+
+# 5. After generate_industry_profile completes:
+psql \$DATABASE_URL -c "
+SELECT industry_slug, display_name, array_length(regulatory,1)
+FROM generated_industry_profiles WHERE industry_slug='education';
+"
+```
+
+---
+
+### Developer Checklist (P5-14)
+
+- [ ] Replace `classification_prompt` string in `detect_tenant_industry` with new JSON-response prompt
+- [ ] Add `KNOWN_INDUSTRY_SLUGS` constant (rename from `VALID_INDUSTRY_SLUGS`)
+- [ ] Replace Step 4 validation with JSON parse + structured handling
+- [ ] Add confidence threshold check (skip if < 0.4)
+- [ ] Save `industry_display_name`, `parent_industry`, `industry_is_known` to settings
+- [ ] Add Step 6: dispatch `generate_industry_profile.delay()` for unknown industries without known parent
+- [ ] Add `json.JSONDecodeError` fallback for backward compatibility with plain-text response
+- [ ] Test: Lemonade / insurance company → slug contains "insurance" sub-industry
+- [ ] Test: Education company → unknown industry → profile generation dispatched
+- [ ] Test: Generic consulting website → low confidence → industry NOT set
+- [ ] Test: Plain-text Gemini response → fallback path works → no crash
+
+---
+
+## P5-11 to P5-14 — Combined Gap Analysis Summary
+
+### Three-Tier Industry Resolution (after all 4 tasks)
+
+```
+User registers with company_website = "lemonade.com"
+        │
+        ▼
+detect_tenant_industry task (P5-14 enhanced)
+        │
+        ├── Gemini returns: { industry_slug: "banking/insurance", is_known: false,
+        │                     parent_slug: "banking", confidence: 0.85 }
+        │
+        ├── parent "banking" IS known → save slug + dispatch generate delta profile
+        │
+        ▼
+User reaches onboarding Step 2 (P5-11)
+        │
+        ├── Poll detects industry="banking/insurance" after 8s
+        ├── Green banner: "Auto-detected from your website"
+        ├── "Banking" card NOT selected (it's a sub-industry)
+        ├── "Other" card IS selected with "Insurance & InsurTech" pre-filled
+        └── "Looks like sub-industry of Banking" match result shown ✓
+        │
+        ▼
+User completes onboarding
+        │
+        ▼
+Next document analysis
+        │
+        ├── PromptContextBuilder Tier 1: "banking/insurance" not in JSON
+        ├── PromptContextBuilder Tier 2: parent "banking" IS in JSON
+        │   → inherits banking regulations + adds "Sub-industry: Insurance" note
+        └── Full domain context injected ✓
+
+
+User registers with company_website = "opendoor.com" (real estate)
+        │
+        ▼
+detect_tenant_industry (P5-14)
+        │
+        ├── Gemini returns: { industry_slug: "real_estate", is_known: false,
+        │                     parent_slug: null, confidence: 0.92 }
+        │
+        ├── No known parent → dispatch generate_industry_profile("real_estate", "Real Estate")
+        │
+        ▼
+30s later: GeneratedIndustryProfile stored in DB
+        │
+        ▼
+Next document analysis
+        │
+        └── PromptContextBuilder Tier 3: DB lookup → returns generated profile ✓
+```
+
+### New Files Introduced (P5-11 to P5-14)
+
+| File | Task | Type |
+|------|------|------|
+| `frontend/lib/constants/industry-options.ts` | P5-11 | MODIFIED (extends P5-10) |
+| `backend/app/services/industry_matcher.py` | P5-12 | NEW |
+| `backend/app/api/endpoints/industries.py` | P5-12 | NEW |
+| `backend/app/services/ai/industry_context.json` | P5-12 | MODIFIED (adds `__taxonomy__`) |
+| `backend/alembic/versions/s18a1_generated_industry_profiles.py` | P5-13 | NEW |
+| `backend/app/models/generated_industry_profile.py` | P5-13 | NEW |
+| `backend/app/crud/crud_generated_industry_profile.py` | P5-13 | NEW |
+| `backend/app/tasks/industry_tasks.py` | P5-13 | NEW |
+| `backend/app/services/ai/prompt_context_builder.py` | P5-12 + P5-13 | MODIFIED |
+| `backend/app/tasks/tenant_tasks.py` | P5-14 | MODIFIED |
+| `backend/app/api/endpoints/tenants.py` | P5-13 | MODIFIED |
+| `frontend/app/dashboard/onboarding/page.tsx` | P5-11 | MODIFIED |
+| `frontend/app/dashboard/admin/page.tsx` | P5-11 | MODIFIED |
+
+
+---
+
 ## Phase 5 — Migration Summary
 
 Only one migration for Phase 5:
