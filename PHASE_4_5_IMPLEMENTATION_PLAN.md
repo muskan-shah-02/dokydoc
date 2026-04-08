@@ -3266,6 +3266,439 @@ Add the industry profile card in JSX:
 
 ---
 
+## P5-10 — Registration & Onboarding Gap Fixes (5 Critical Gaps)
+
+**Owner:** Backend Dev 1 (items A, B, D) + Frontend Dev (items C, E)
+**Estimate:** 1.5 days
+**Priority:** P0 — Without these fixes, auto-detection never fires and the onboarding wizard never activates for any real user
+**Depends on:** P5-04 (detection task), P5-07 (onboarding wizard), P5-09 (settings card)
+
+---
+
+### Root Cause Summary
+
+A gap analysis across the registration → auto-detection → onboarding wizard user flow found 5 issues. Two are **showstoppers** that completely prevent the feature from working:
+
+1. **GAP-1 (CRITICAL):** `company_website` input missing from the registration UI → auto-detection task never receives a URL → never dispatches → feature dead for all tenants
+2. **GAP-2 (CRITICAL):** `onboarding_complete: false` only set as a side-effect of the detection task → if no website provided, `tenant.settings` is `{}` → dashboard guard checks `=== false` on an undefined value → never triggers → new tenants bypass onboarding entirely
+3. **GAP-3 (HIGH):** Onboarding Step 2 loads `detectedIndustry` once on mount — Celery task hasn't finished yet → industry always shows as null → auto-detected pre-selection never works
+4. **GAP-4 (HIGH):** `GET /api/v1/tenants/me/settings` endpoint not defined anywhere → P5-07 and P5-09 both crash on initial data load
+5. **GAP-5 (MEDIUM):** `INDUSTRY_OPTIONS` array hardcoded separately in P5-07 and P5-09 → drift risk when new industries are added
+
+---
+
+### Fix A — Add `company_website` Field to Registration Form UI (GAP-1)
+
+**File:** `frontend/app/auth/register/page.tsx` (or wherever the tenant signup form lives — search for the registration form component)
+
+**Step 1 — Find the form:** Search the frontend codebase for the registration/signup form:
+```bash
+grep -r "register\|signup\|TenantCreate\|company_name" frontend/app --include="*.tsx" -l
+```
+
+**Step 2 — Add the field:** Inside the registration form, after the "Company Name" input and before the submit button, add:
+
+```tsx
+{/* Company Website — optional, used for auto industry detection */}
+<div className="space-y-1.5">
+  <label htmlFor="company_website"
+    className="block text-sm font-medium text-gray-700">
+    Company Website
+    <span className="ml-1 text-xs text-gray-400 font-normal">(optional — helps us personalise your experience)</span>
+  </label>
+  <div className="relative">
+    <span className="absolute inset-y-0 left-3 flex items-center text-gray-400 text-sm">
+      https://
+    </span>
+    <input
+      id="company_website"
+      type="url"
+      value={companyWebsite}
+      onChange={(e) => setCompanyWebsite(e.target.value)}
+      placeholder="yourcompany.com"
+      className="block w-full rounded-lg border border-gray-300 pl-16 pr-3 py-2.5
+                 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+    />
+  </div>
+  <p className="text-xs text-gray-400">
+    We'll automatically detect your industry to pre-configure your workspace.
+  </p>
+</div>
+```
+
+**Step 3 — Add state variable** at the top of the component:
+```tsx
+const [companyWebsite, setCompanyWebsite] = useState("");
+```
+
+**Step 4 — Include in form submission payload:**
+```tsx
+// In the registration submit handler, add company_website to the request body:
+const payload = {
+  email,
+  password,
+  company_name: companyName,
+  company_website: companyWebsite.trim()
+    ? (companyWebsite.startsWith("http") ? companyWebsite.trim() : `https://${companyWebsite.trim()}`)
+    : undefined,
+  // ... other existing fields
+};
+```
+
+> **URL normalisation:** The `https://` prefix is prepended if missing so the Celery task always receives a valid URL. The `https://` label in the input is cosmetic — the user types `yourcompany.com`, the code sends `https://yourcompany.com`.
+
+---
+
+### Fix B — Set `onboarding_complete: false` at Tenant Creation (GAP-2)
+
+**File:** `backend/app/api/endpoints/tenants.py`
+
+Find the tenant registration handler (the `POST /register` or `POST /` endpoint that creates a new tenant). **Immediately after** the tenant record is committed to the DB — and **before** the optional `detect_tenant_industry.delay()` call — add:
+
+```python
+# ── P5-10 Fix B: Ensure onboarding_complete is always initialised ─────────
+# Must be set unconditionally so the dashboard guard triggers even when
+# company_website is absent and the auto-detection task is not dispatched.
+_initial_settings = dict(tenant.settings or {})
+_initial_settings["onboarding_complete"] = False
+crud.tenant.update(db, db_obj=tenant, obj_in={"settings": _initial_settings})
+db.commit()
+# ─────────────────────────────────────────────────────────────────────────
+
+# THEN: dispatch auto-detection (existing P5-04 logic):
+company_website = getattr(tenant_in, "company_website", None)
+if company_website:
+    try:
+        detect_tenant_industry.delay(tenant.id, company_website)
+    except Exception:
+        pass   # Never block registration
+```
+
+> **Order matters:** Set `onboarding_complete: false` FIRST, then dispatch the task. The task's `setdefault("onboarding_complete", False)` in P5-04 is now redundant (but harmless) — it will skip setting the key since it already exists. Remove the `setdefault` line from the task to keep the logic clean.
+
+**Also update `TenantCreate` schema** to include `company_website` if not already present:
+
+```python
+# backend/app/schemas/tenant.py
+class TenantCreate(BaseModel):
+    name: str
+    subdomain: str
+    email: str                                   # admin email
+    password: str
+    company_website: Optional[str] = None        # ← ADD if missing
+    # ... other existing fields
+```
+
+---
+
+### Fix C — Poll for Auto-Detection Result in Onboarding Step 2 (GAP-3)
+
+**File:** `frontend/app/dashboard/onboarding/page.tsx`
+
+Add a polling `useEffect` that activates when the user enters Step 2 and `detectedIndustry` is still null. Polls every 3 seconds for up to 24 seconds, then gives up and lets the user select manually.
+
+**Step 1 — Add polling state:**
+```tsx
+// Add alongside the existing state declarations:
+const [isDetecting, setIsDetecting] = useState(false);
+```
+
+**Step 2 — Add polling effect** (add after the existing mount `useEffect`):
+```tsx
+useEffect(() => {
+  // Only poll on Step 2, and only if no industry detected yet
+  if (step !== 2 || detectedIndustry) return;
+
+  setIsDetecting(true);
+  let attempts = 0;
+  const MAX_ATTEMPTS = 8;   // 8 × 3s = 24s max wait
+
+  const poll = setInterval(async () => {
+    attempts++;
+    try {
+      const res = await api.get("/api/v1/tenants/me/settings");
+      const industry = res.data?.settings?.industry;
+      if (industry) {
+        setDetectedIndustry(industry);
+        setSelectedIndustry(industry);
+        setIsDetecting(false);
+        clearInterval(poll);
+      } else if (attempts >= MAX_ATTEMPTS) {
+        setIsDetecting(false);   // Give up — show manual selection
+        clearInterval(poll);
+      }
+    } catch {
+      setIsDetecting(false);
+      clearInterval(poll);
+    }
+  }, 3000);
+
+  return () => {
+    clearInterval(poll);
+    setIsDetecting(false);
+  };
+}, [step, detectedIndustry]);
+```
+
+**Step 3 — Update Step 2 JSX** to show detection status:
+```tsx
+{/* Replace or augment the existing Step 2 industry selection section: */}
+
+{/* Detection status banner */}
+{isDetecting && (
+  <div className="flex items-center gap-2 rounded-lg bg-indigo-50 border border-indigo-100
+                  px-4 py-3 mb-4">
+    <Loader2 className="h-4 w-4 animate-spin text-indigo-500 flex-shrink-0" />
+    <div>
+      <p className="text-sm font-medium text-indigo-700">
+        Analysing your website...
+      </p>
+      <p className="text-xs text-indigo-500 mt-0.5">
+        We're detecting your industry automatically. This takes up to 20 seconds.
+      </p>
+    </div>
+  </div>
+)}
+
+{detectedIndustry && !isDetecting && (
+  <div className="flex items-center gap-2 rounded-lg bg-green-50 border border-green-200
+                  px-4 py-3 mb-4">
+    <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" />
+    <p className="text-sm text-green-700 font-medium">
+      Industry auto-detected from your website
+      <span className="ml-1 font-normal text-green-600">— you can change it below</span>
+    </p>
+  </div>
+)}
+
+{!detectedIndustry && !isDetecting && (
+  <p className="text-sm text-gray-500 mb-4">
+    We couldn't auto-detect your industry. Please select below.
+  </p>
+)}
+
+{/* Industry selection — disable while detecting */}
+<div className={`grid grid-cols-2 gap-3 ${isDetecting ? "opacity-50 pointer-events-none" : ""}`}>
+  {INDUSTRY_OPTIONS.map((opt) => (
+    <button
+      key={opt.value}
+      onClick={() => setSelectedIndustry(opt.value)}
+      className={`rounded-lg border px-4 py-3 text-left text-sm transition-all ${
+        selectedIndustry === opt.value
+          ? "border-indigo-500 bg-indigo-50 text-indigo-700 font-medium"
+          : "border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50"
+      }`}
+    >
+      {opt.label}
+      {opt.value === detectedIndustry && (
+        <span className="ml-1.5 text-[10px] font-semibold text-green-600 uppercase tracking-wide">
+          Detected
+        </span>
+      )}
+    </button>
+  ))}
+</div>
+```
+
+---
+
+### Fix D — Define `GET /api/v1/tenants/me/settings` Endpoint (GAP-4)
+
+**File:** `backend/app/api/endpoints/tenants.py`
+
+Add the `GET` endpoint **immediately before** the `PATCH /me/settings` endpoint (specified in P5-07). Both endpoints live in the same router:
+
+```python
+# GET /api/v1/tenants/me/settings
+@router.get("/me/settings")
+def get_tenant_settings(
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_active_user),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """
+    Return current tenant settings JSON.
+
+    Used by:
+    - Onboarding wizard (P5-07) to load pre-detected industry
+    - Industry Profile card (P5-09) to populate the settings form
+    - Dashboard layout guard to check onboarding_complete flag
+    - Auto-detection polling (P5-10) to check if industry is ready
+
+    Returns:
+      { "settings": { ... }, "tenant_id": N }
+    """
+    tenant = crud.tenant.get(db, id=tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {
+        "settings": tenant.settings or {},
+        "tenant_id": tenant_id,
+    }
+
+
+# PATCH /api/v1/tenants/me/settings  ← already in P5-07, place immediately after GET
+@router.patch("/me/settings")
+def update_tenant_settings(
+    settings_update: dict,
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_active_user),
+    tenant_id: int = Depends(deps.get_tenant_id),
+):
+    """PATCH /api/v1/tenants/me/settings — Merge-update tenant.settings JSON."""
+    tenant = crud.tenant.get(db, id=tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    current = dict(tenant.settings or {})
+    current.update(settings_update)
+    crud.tenant.update(db, db_obj=tenant, obj_in={"settings": current})
+    db.commit()
+    return {"status": "updated", "settings": current}
+```
+
+> **Important:** Both routes must be registered in the same `router` object in `tenants.py`. No new router registration needed — they share the existing `/tenants` prefix.
+
+---
+
+### Fix E — Extract Shared `INDUSTRY_OPTIONS` Constant (GAP-5)
+
+**New file:** `frontend/lib/constants/industry-options.ts`
+
+```typescript
+// frontend/lib/constants/industry-options.ts
+/**
+ * Canonical list of industry options used across:
+ * - Onboarding wizard (P5-07)
+ * - Industry Profile settings card (P5-09)
+ * - Auto-detection Gemini prompt (P5-04 — backend Python mirrors this list)
+ *
+ * When adding a new industry: update this file AND the Python INDUSTRY_PROMPT
+ * in backend/app/tasks/tenant_tasks.py.
+ */
+export const INDUSTRY_OPTIONS = [
+  { value: "fintech/payments",  label: "Fintech — Payments" },
+  { value: "fintech/lending",   label: "Fintech — Lending" },
+  { value: "banking",           label: "Banking" },
+  { value: "healthcare",        label: "Healthcare" },
+  { value: "saas",              label: "SaaS / Software" },
+  { value: "ecommerce",         label: "E-commerce" },
+  { value: "logistics",         label: "Logistics" },
+  { value: "devtools",          label: "Developer Tools" },
+] as const;
+
+export type IndustryValue = typeof INDUSTRY_OPTIONS[number]["value"];
+export type IndustryOption = typeof INDUSTRY_OPTIONS[number];
+```
+
+**Update `frontend/app/dashboard/onboarding/page.tsx`:**
+```tsx
+// Remove the local INDUSTRY_OPTIONS array defined in P5-07
+// Add import at top:
+import { INDUSTRY_OPTIONS } from "@/lib/constants/industry-options";
+```
+
+**Update `frontend/app/dashboard/admin/page.tsx`:**
+```tsx
+// Replace the hardcoded <option> list in the settings card with:
+import { INDUSTRY_OPTIONS } from "@/lib/constants/industry-options";
+
+// In JSX:
+<select value={selectedNewIndustry} onChange={...}>
+  <option value="">Select industry...</option>
+  {INDUSTRY_OPTIONS.map((opt) => (
+    <option key={opt.value} value={opt.value}>{opt.label}</option>
+  ))}
+</select>
+```
+
+---
+
+### P5-10 Verification Commands
+
+```bash
+# ── Fix A: Registration form captures website ──────────────────────────────
+# 1. Open /register in the browser
+# Expected: "Company Website (optional)" field visible below "Company Name"
+# 2. Register with website = "stripe.com"
+# Expected: payload sent includes company_website: "https://stripe.com"
+
+# ── Fix B: onboarding_complete set at creation ─────────────────────────────
+# Register a test tenant WITHOUT providing a website:
+curl -X POST http://localhost:8000/api/v1/tenants/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"NoWebsiteCo","subdomain":"nowebsite99","email":"a@a.com","password":"pass"}'
+
+# Check settings immediately:
+psql $DATABASE_URL -c \
+  "SELECT settings FROM tenants WHERE subdomain = 'nowebsite99';"
+# Expected: {"onboarding_complete": false}   ← NOT empty {}
+
+# ── Fix D: GET /me/settings works ─────────────────────────────────────────
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/tenants/me/settings | python3 -m json.tool
+# Expected: { "settings": {"onboarding_complete": false, ...}, "tenant_id": N }
+
+# ── Dashboard guard triggers ───────────────────────────────────────────────
+# Log in as the no-website tenant → navigate to /dashboard
+# Expected: browser redirects to /dashboard/onboarding
+
+# ── Fix C: Auto-detection polling works ───────────────────────────────────
+# Register WITH website = "stripe.com"
+# Log in → navigate to /dashboard → redirected to /dashboard/onboarding
+# Click "Next" to reach Step 2
+# Expected: spinning "Analysing your website..." banner shown
+# After 5–20 seconds:
+# Expected: banner changes to green "Industry auto-detected from your website"
+# Expected: "Fintech — Payments" card is pre-selected with "Detected" badge
+
+# ── Fix E: Shared constant used in both pages ─────────────────────────────
+grep -r "INDUSTRY_OPTIONS" frontend/ --include="*.ts" --include="*.tsx"
+# Expected: only ONE definition (in lib/constants/industry-options.ts)
+# Expected: imports in onboarding/page.tsx and admin/page.tsx
+```
+
+---
+
+### P5-10 Developer Checklist
+
+**Backend Dev 1:**
+- [ ] **Fix B** — Add `onboarding_complete: false` write immediately after tenant record creation in registration handler (before `detect_tenant_industry.delay()`)
+- [ ] **Fix B** — Add `company_website: Optional[str] = None` to `TenantCreate` schema if not already present
+- [ ] **Fix B** — Remove now-redundant `setdefault("onboarding_complete", False)` from `detect_tenant_industry` Celery task
+- [ ] **Fix D** — Add `GET /me/settings` endpoint to `tenants.py` immediately before the existing `PATCH /me/settings`
+- [ ] **Fix D** — Write test: unauthenticated request → 401; authenticated request → 200 with `settings` dict
+- [ ] **Fix D** — Write test: newly registered tenant → `settings.onboarding_complete === false`
+
+**Frontend Dev:**
+- [ ] **Fix A** — Find the registration/signup form component (search for company_name input)
+- [ ] **Fix A** — Add `companyWebsite` state and "Company Website (optional)" URL input field
+- [ ] **Fix A** — Add `https://` prefix normalisation before including in payload
+- [ ] **Fix C** — Add `isDetecting` state to onboarding page
+- [ ] **Fix C** — Add polling `useEffect` that fires on Step 2, polls `GET /me/settings` every 3s, max 8 attempts
+- [ ] **Fix C** — Add "Analysing your website..." spinner banner (shown while `isDetecting`)
+- [ ] **Fix C** — Add green "Auto-detected" success banner (shown after detection completes)
+- [ ] **Fix C** — Add "Detected" badge inside the pre-selected industry card
+- [ ] **Fix C** — Disable industry card grid while `isDetecting` (opacity + pointer-events-none)
+- [ ] **Fix E** — Create `frontend/lib/constants/industry-options.ts` with shared `INDUSTRY_OPTIONS` array
+- [ ] **Fix E** — Replace local `INDUSTRY_OPTIONS` array in `onboarding/page.tsx` with import
+- [ ] **Fix E** — Replace hardcoded `<option>` list in `admin/page.tsx` settings card with import
+
+---
+
+### Files Modified by P5-10
+
+| File | Change |
+|------|--------|
+| `backend/app/schemas/tenant.py` | Add `company_website: Optional[str] = None` to `TenantCreate` |
+| `backend/app/api/endpoints/tenants.py` | Add `GET /me/settings`; add `onboarding_complete: false` write at registration; remove `setdefault` from task |
+| `backend/app/tasks/tenant_tasks.py` | Remove `setdefault("onboarding_complete", False)` (now done at creation) |
+| `frontend/app/auth/register/page.tsx` | Add `company_website` field + state + payload inclusion |
+| `frontend/app/dashboard/onboarding/page.tsx` | Add `isDetecting` state + polling effect + Step 2 UX (banners, "Detected" badge, disabled state); replace local INDUSTRY_OPTIONS with import |
+| `frontend/app/dashboard/admin/page.tsx` | Replace hardcoded industry `<option>` list with imported INDUSTRY_OPTIONS |
+| `frontend/lib/constants/industry-options.ts` | **NEW** — shared INDUSTRY_OPTIONS constant + IndustryValue type |
+
+---
+
 ## Phase 5 — Migration Summary
 
 Only one migration for Phase 5:
