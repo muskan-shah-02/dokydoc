@@ -5260,9 +5260,627 @@ Next document analysis
 | `backend/app/services/ai/prompt_context_builder.py` | P5-12 + P5-13 | MODIFIED |
 | `backend/app/tasks/tenant_tasks.py` | P5-14 | MODIFIED |
 | `backend/app/api/endpoints/tenants.py` | P5-13 | MODIFIED |
-| `frontend/app/dashboard/onboarding/page.tsx` | P5-11 | MODIFIED |
+| `frontend/app/dashboard/onboarding/page.tsx` | P5-11 + P5-15 | MODIFIED |
 | `frontend/app/dashboard/admin/page.tsx` | P5-11 | MODIFIED |
+| `backend/app/services/business_ontology_service.py` | P5-15 | MODIFIED (discrimination logic) |
+| `backend/app/services/ai/prompt_context.py` | P5-15 | MODIFIED (new fields) |
+| `backend/app/services/ai/prompt_context_builder.py` | P5-15 | MODIFIED (tier separation) |
+| `backend/app/api/endpoints/industries.py` | P5-15 | MODIFIED (adds vocabulary endpoint) |
 
+
+
+
+---
+
+## P5-15 — Three-Tier Glossary Separation (Industry Vocabulary vs Tenant-Specific Terms)
+
+### Problem Statement
+
+The current glossary design (P5-05 and P5-11) has a critical architectural flaw: it stores ALL unknown terms — whether they are industry-standard vocabulary or company-specific product names — into `tenant.settings.glossary`. This means:
+
+- When **Emami Limited** uses DokyDoc and adds "Navratna" (their hair oil brand) to the glossary, it goes into their tenant settings.
+- When **Hindustan Unilever Limited (HUL)** registers in the same FMCG industry, Navratna must NOT appear in their prompts.
+- But "planogram" (a standard FMCG industry term for shelf layout diagrams) SHOULD appear for both Emami and HUL — it is industry vocabulary, not Emami's property.
+
+**The conflation breaks prompt quality for all tenants in the same industry.** If industry terms bleed into the tenant glossary, and tenant terms bleed into the industry vocabulary, every FMCG company's prompts get polluted with each other's product names.
+
+### Three-Tier Glossary Architecture
+
+```
+Tier 1: Industry Vocabulary (shared — all tenants with same industry slug)
+  Storage:  generated_industry_profiles.vocabulary  (JSONB)
+  Examples: planogram, beat, SKU, off-take, trade margin, channel partner, GT, MT
+  Scope:    Available to ALL tenants in "fmcg" industry automatically
+  Ownership: System-level — enriched via industry profile generation (P5-13)
+  Injection label in prompt: "INDUSTRY VOCABULARY (FMCG & Consumer Goods):"
+
+Tier 2: Tenant Business Glossary (isolated — per-tenant only)
+  Storage:  tenant.settings.glossary  (JSONB)
+  Examples: Navratna (Emami's hair oil), BoroPlus (Emami's antiseptic cream)
+            Surf Excel (HUL's detergent), Dove (HUL's soap brand)
+  Scope:    ONLY for the specific tenant — never shared or leaked to others
+  Ownership: Tenant-level — populated during onboarding and document analysis
+  Injection label in prompt: "COMPANY-SPECIFIC TERMINOLOGY (<Tenant Name>):"
+
+Tier 3: Document Glossary (future — per-document, per-run)
+  Storage:  Not yet implemented — reserved for v2
+  Examples: Abbreviations defined within a specific BRD (e.g., "POG = Planogram")
+  Scope:    Only for the duration of one document analysis run
+```
+
+### Current Plan Gaps (4 gaps to fix)
+
+**Gap A — Onboarding Step 3 UX doesn't communicate the distinction**
+Current copy asks users to "add terms your team uses" with no explanation of what belongs here vs what's already in the industry profile. Users will type "planogram" (industry term) instead of "Navratna" (company term), polluting the tenant glossary with terms that belong in Tier 1.
+
+**Gap B — P5-05 Self-Learning discriminates incorrectly**
+`_surface_unknown_terms()` in `business_ontology_service.py` flags ALL low-confidence concepts for the tenant glossary review panel. It cannot tell whether "planogram" is an industry term (Tier 1, already covered) or "Navratna" is a brand name (Tier 2, must be captured). This means Emami's document analysis will ask them to define "planogram" in their tenant glossary, even though the FMCG industry profile already defines it.
+
+**Gap C — PromptContextBuilder injects both tiers without clear separation**
+The current `render_full_preamble()` produces one combined "COMPANY-SPECIFIC TERMS" block mixing industry vocabulary and tenant brand names. Gemini cannot distinguish "planogram means shelf layout" (universal) from "Navratna is Emami's hair oil brand" (Emami-only). This reduces prompt precision.
+
+**Gap D — P5-11 polling effect doesn't auto-activate "Other" card for unknown industries**
+When `detect_tenant_industry` returns an unknown industry slug (e.g., "fmcg") and `isKnownIndustry("fmcg")` returns false, the polling effect updates `detectedIndustry` state but none of the 8 known industry cards highlight. The user is left with no card selected and no visual indication of what was detected. The "Other" card must auto-activate with the detected display name pre-filled.
+
+---
+
+### P5-15-A — Fix Onboarding Step 3 UX Copy
+
+**File:** `frontend/app/dashboard/onboarding/page.tsx`
+
+Update Step 3 (Glossary Kickstart) to make the distinction explicit:
+
+```tsx
+// BEFORE (current copy in P5-10):
+<h2 className="text-xl font-semibold">Add your team's vocabulary</h2>
+<p className="text-gray-500">
+  Add 5 company-specific terms to help DokyDoc understand your BRDs better.
+</p>
+
+// AFTER:
+<h2 className="text-xl font-semibold">Your Company's Specific Terminology</h2>
+<p className="text-gray-500 mt-1">
+  Add brand names, product names, and internal jargon that is specific to{' '}
+  <strong>{companyName}</strong>.
+</p>
+<div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-3 text-sm text-blue-700">
+  <p className="font-medium mb-1">What to add here:</p>
+  <ul className="list-disc list-inside space-y-0.5">
+    <li>Your product/brand names (e.g. Navratna, BoroPlus)</li>
+    <li>Internal project codenames (e.g. Project Phoenix)</li>
+    <li>Company-specific abbreviations your team uses</li>
+  </ul>
+  <p className="mt-2 text-blue-600 text-xs">
+    ✓ Industry-standard terms (like "planogram", "trade margin") are automatically included
+    from your industry profile — you don't need to add those.
+  </p>
+</div>
+```
+
+Update the input placeholders in the 5 term fields:
+
+```tsx
+// BEFORE:
+placeholder="e.g. Sprint, Scrum Master, Backlog"
+
+// AFTER (dynamic — uses company name if available):
+placeholder={index === 0 ? "e.g. your flagship product name" :
+             index === 1 ? "e.g. an internal project codename" :
+             "e.g. a company-specific abbreviation"}
+```
+
+Add a subtle "Already included from your industry profile" link that, when clicked, shows a popover with the industry vocabulary terms:
+
+```tsx
+{industryVocab && industryVocab.length > 0 && (
+  <button
+    onClick={() => setShowIndustryVocab(true)}
+    className="text-xs text-blue-500 hover:underline mt-2"
+  >
+    See {industryVocab.length} industry terms already included →
+  </button>
+)}
+
+{showIndustryVocab && (
+  <div className="border border-blue-200 bg-blue-50 rounded-lg p-3 mt-2">
+    <p className="text-xs font-medium text-blue-700 mb-2">
+      Industry vocabulary (auto-included for {industryLabel}):
+    </p>
+    <div className="flex flex-wrap gap-1">
+      {industryVocab.map(term => (
+        <span key={term} className="text-xs px-2 py-0.5 bg-white border rounded-full text-gray-600">
+          {term}
+        </span>
+      ))}
+    </div>
+  </div>
+)}
+```
+
+**Fetch industry vocabulary:** After Step 2 completes and `tenantSlug` is resolved, call:
+```
+GET /api/v1/industries/{slug}/vocabulary
+→ Returns: { slug, display_name, vocabulary: { term: definition, ... } }
+```
+Store result in `industryVocab: string[]` state (keys only, for the popover chips).
+
+---
+
+### P5-15-B — Fix P5-05 Glossary Self-Learning Discrimination
+
+**File:** `backend/app/services/business_ontology_service.py`
+
+The `_surface_unknown_terms()` method currently flags all low-confidence concepts for tenant glossary review. Add a discrimination step using the industry vocabulary:
+
+```python
+def _surface_unknown_terms(
+    self,
+    db: Session,
+    extracted_concepts: list[OntologyConcept],
+    tenant: Tenant,
+    document_id: int
+) -> None:
+    """
+    Flags genuinely tenant-specific unknown terms for glossary review.
+    Does NOT flag industry-standard terms that are already covered by
+    the industry profile vocabulary.
+    """
+    existing_tenant_glossary = tenant.settings.get("glossary", {})
+    industry_slug = tenant.settings.get("industry")
+
+    # Build industry vocabulary set for fast O(1) lookup
+    industry_vocab_set: set[str] = set()
+    if industry_slug:
+        # Tier 1: Check industry_context.json (known industries)
+        industry_block = self._get_industry_block(industry_slug)
+        if industry_block and "vocabulary" in industry_block:
+            industry_vocab_set.update(
+                k.lower() for k in industry_block["vocabulary"].keys()
+            )
+
+        # Tier 3: Check generated_industry_profiles table (AI-generated industries)
+        generated = crud_generated_industry_profile.get_by_slug(db, industry_slug)
+        if generated and generated.vocabulary:
+            industry_vocab_set.update(
+                k.lower() for k in generated.vocabulary.keys()
+            )
+
+    pending_terms = []
+
+    for concept in extracted_concepts:
+        term = concept.name.strip()
+        term_lower = term.lower()
+
+        # Skip: empty or too long (not a glossary term)
+        if not term or len(term.split()) > 4:
+            continue
+
+        # Skip: already in tenant glossary
+        if term_lower in {k.lower() for k in existing_tenant_glossary}:
+            continue
+
+        # Skip: already defined in industry vocabulary (Tier 1 — not tenant-specific)
+        if term_lower in industry_vocab_set:
+            continue
+
+        # Skip: high confidence (AI already understood it)
+        if concept.confidence_score >= 0.75:
+            continue
+
+        # Classify term type to decide routing
+        term_type = _classify_term_type(term)
+
+        if term_type == "industry_candidate":
+            # Looks like a generic industry term (all lowercase, common noun pattern)
+            # Do NOT add to tenant glossary — suggest adding to industry profile instead
+            # Log for potential industry profile enrichment (future P5-16)
+            logger.info(
+                "Industry candidate term found — skipping tenant glossary",
+                extra={"term": term, "industry": industry_slug, "document_id": document_id}
+            )
+            continue
+
+        # At this point: term is likely tenant-specific (brand name, product, project)
+        pending_terms.append({
+            "term": term,
+            "context": concept.description[:200] if concept.description else "",
+            "concept_id": concept.id,
+            "document_id": document_id,
+            "term_type": term_type,  # "brand_name", "project_name", "abbreviation", "unknown"
+        })
+
+    if not pending_terms:
+        return
+
+    # Limit to 10 per run to avoid overwhelming the user
+    pending_terms = pending_terms[:10]
+
+    # Store in tenant.settings.pending_glossary_confirmations
+    _store_pending_confirmations(db, tenant.id, pending_terms)
+
+    # Notify document owner
+    notification_service.create(
+        db,
+        tenant_id=tenant.id,
+        title="New company-specific terms found",
+        body=(
+            f"DokyDoc found {len(pending_terms)} terms specific to your company. "
+            f"Adding definitions will improve analysis accuracy."
+        ),
+        action_url=f"/dashboard/documents/{document_id}?tab=glossary",
+        notification_type="glossary_review",
+    )
+
+
+def _classify_term_type(term: str) -> str:
+    """
+    Heuristic classification of a term to distinguish tenant-specific
+    from generic industry candidates.
+
+    Rules:
+    - Title Case or ALL CAPS short term → likely brand/product name → "brand_name"
+    - Acronym (2-5 uppercase letters) → "abbreviation"
+    - Contains digits or special chars → likely product code → "brand_name"
+    - All lowercase, common noun → likely industry candidate → "industry_candidate"
+    """
+    words = term.split()
+
+    # ALL CAPS acronym (2-5 chars, no spaces)
+    if len(words) == 1 and term.isupper() and 2 <= len(term) <= 5:
+        return "abbreviation"
+
+    # Title Case with 1-3 words → brand/product pattern
+    title_case_words = [w for w in words if w and w[0].isupper()]
+    if len(title_case_words) == len(words) and 1 <= len(words) <= 3:
+        return "brand_name"
+
+    # Contains digits (product codes, model numbers)
+    if any(char.isdigit() for char in term):
+        return "brand_name"
+
+    # All lowercase → generic industry term candidate
+    if term == term.lower():
+        return "industry_candidate"
+
+    return "unknown"
+```
+
+**New CRUD helper:** `crud_generated_industry_profile.get_by_slug()` (already defined in P5-13 — reuse it).
+
+---
+
+### P5-15-C — Fix PromptContextBuilder Separation Labels
+
+**File:** `backend/app/services/ai/prompt_context_builder.py`
+
+Update `PromptContext.render_full_preamble()` to use clearly separated injection blocks for each tier, with tenant name in the label:
+
+```python
+def render_full_preamble(self, tenant_name: str | None = None) -> str:
+    """
+    Renders the full context preamble to inject before every prompt.
+    Produces TWO clearly labelled blocks so Gemini understands the scope
+    of each terminology set.
+
+    Block 1: Industry vocabulary — universal, applies to all companies
+             in this industry.
+    Block 2: Company-specific terminology — applies ONLY to this tenant.
+    """
+    blocks: list[str] = []
+
+    # === BLOCK 1: Industry context (Layer 1) ===
+    # Contains: regulatory context, industry patterns, industry vocabulary
+    if self.industry or self.sub_domain:
+        industry_label = f"{self.industry_display_name or self.industry or 'Unknown'}"
+        if self.sub_domain and self.sub_domain != self.industry:
+            industry_label += f" — {self.sub_domain.replace('_', ' ').title()}"
+
+        industry_lines = []
+
+        if self.regulatory:
+            regs = ", ".join(self.regulatory)
+            industry_lines.append(f"Regulatory frameworks: {regs}")
+
+        if self.industry_patterns:
+            for pattern in self.industry_patterns[:3]:  # Top 3 patterns
+                industry_lines.append(f"- {pattern}")
+
+        if self.industry_vocabulary:
+            vocab_lines = "\n".join(
+                f"  • {term}: {definition}"
+                for term, definition in list(self.industry_vocabulary.items())[:15]
+            )
+            industry_lines.append(
+                f"Industry-standard vocabulary:\n{vocab_lines}"
+            )
+
+        if industry_lines:
+            blocks.append(
+                f"=== INDUSTRY CONTEXT ({industry_label}) ===\n"
+                + "\n".join(industry_lines)
+            )
+
+    # === BLOCK 2: Tenant-specific glossary (Layer 2) ===
+    # Contains ONLY company-specific terms — brand names, product names,
+    # internal jargon. NOT industry-standard vocabulary.
+    if self.glossary:
+        tenant_label = f"COMPANY-SPECIFIC TERMINOLOGY"
+        if tenant_name:
+            tenant_label += f" ({tenant_name})"
+
+        glossary_lines = "\n".join(
+            f"  • {term}: {definition}"
+            for term, definition in list(self.glossary.items())[:20]
+        )
+        blocks.append(
+            f"=== {tenant_label} ===\n"
+            f"Note: These terms are specific to this company and may not be standard "
+            f"industry vocabulary.\n"
+            + glossary_lines
+        )
+
+    # === BLOCK 3: Few-shot examples (Layer 3) ===
+    if self.few_shot_examples:
+        examples_text = self._format_few_shot(self.few_shot_examples)
+        blocks.append(
+            "=== EXAMPLES FROM YOUR TEAM ===\n"
+            + examples_text
+        )
+
+    if not blocks:
+        return ""
+
+    return "\n\n".join(blocks) + "\n\n---\n\n"
+```
+
+**Update `build_prompt_context()` to pass tenant name:**
+
+```python
+# backend/app/services/ai/prompt_context_builder.py
+
+def build_prompt_context(
+    db: Session,
+    tenant_id: int,
+    example_type: str | None = None
+) -> PromptContext:
+    """Builds PromptContext from tenant settings + industry profile. Cached 5 min in Redis."""
+
+    cache_key = f"prompt_context:{tenant_id}"
+    cached = cache_service.get(cache_key)
+    if cached:
+        return PromptContext(**cached)
+
+    tenant = crud.tenant.get(db, tenant_id)
+    if not tenant:
+        return PromptContext()
+
+    settings = tenant.settings or {}
+    industry_slug = settings.get("industry")
+    sub_domain = settings.get("sub_domain")
+
+    # Resolve industry vocabulary (Tier 1: known industry_context.json)
+    industry_block = None
+    industry_vocabulary: dict[str, str] = {}
+    regulatory: list[str] = []
+    industry_patterns: list[str] = []
+    industry_display_name: str | None = None
+
+    if industry_slug:
+        # Try known industry_context.json first
+        industry_block = _get_industry_block(industry_slug, sub_domain)
+        if industry_block:
+            industry_vocabulary = industry_block.get("vocabulary", {})
+            regulatory = industry_block.get("regulatory", [])
+            industry_patterns = industry_block.get("common_patterns", [])
+
+        if not industry_block:
+            # Try generated_industry_profiles table (Tier 3)
+            generated = crud_generated_industry_profile.get_by_slug(db, industry_slug)
+            if generated:
+                industry_vocabulary = generated.vocabulary or {}
+                regulatory = generated.regulatory or []
+                industry_display_name = generated.display_name
+
+    # Tenant-specific glossary (Tier 2 — ONLY company-specific terms)
+    tenant_glossary: dict[str, str] = settings.get("glossary", {})
+    # Ensure NO industry vocabulary terms have leaked into tenant glossary
+    # (defensive: remove any term that exists in industry_vocabulary)
+    if industry_vocabulary:
+        industry_keys_lower = {k.lower() for k in industry_vocabulary.keys()}
+        tenant_glossary = {
+            k: v for k, v in tenant_glossary.items()
+            if k.lower() not in industry_keys_lower
+        }
+
+    # Few-shot examples (Layer 3)
+    examples: list[dict] = []
+    if example_type:
+        raw_examples = crud.training_example.get_export_batch(
+            db, tenant_id, example_type=example_type, limit=5
+        )
+        examples = [
+            {**e.input_context, "human_label": e.human_label}
+            for e in raw_examples
+        ]
+
+    context = PromptContext(
+        industry=industry_slug,
+        sub_domain=sub_domain,
+        industry_display_name=industry_display_name or settings.get("industry_display_name"),
+        regulatory=regulatory,
+        industry_vocabulary=industry_vocabulary,
+        industry_patterns=industry_patterns,
+        glossary=tenant_glossary,  # Tier 2 only — tenant-specific
+        few_shot_examples=examples,
+        tenant_name=tenant.name,  # For labelling the Tier 2 block
+    )
+
+    cache_service.set(cache_key, context.__dict__, ttl=300)
+    return context
+```
+
+**Update `PromptContext` dataclass to include new fields:**
+
+```python
+# backend/app/services/ai/prompt_context.py
+
+@dataclass
+class PromptContext:
+    # Layer 1: Industry
+    industry: str | None = None
+    sub_domain: str | None = None
+    industry_display_name: str | None = None
+    regulatory: list[str] = field(default_factory=list)
+    industry_vocabulary: dict[str, str] = field(default_factory=dict)  # NEW — Tier 1 separate
+    industry_patterns: list[str] = field(default_factory=list)
+
+    # Layer 2: Tenant-specific (NOT industry terms)
+    glossary: dict[str, str] = field(default_factory=dict)  # Tier 2 only
+    tenant_name: str | None = None  # NEW — for prompt labelling
+
+    # Layer 3: Few-shot examples
+    few_shot_examples: list[dict] = field(default_factory=list)
+```
+
+**Note:** The old `PromptContext.glossary` field still exists but is now strictly Tier 2 (tenant-specific only). The new `industry_vocabulary` field carries Tier 1 (industry-standard terms). The `render_full_preamble()` method injects them in separate clearly-labelled blocks.
+
+---
+
+### P5-15-D — Fix Industry Vocabulary API Endpoint
+
+**File:** `backend/app/api/endpoints/industries.py`
+
+Add a vocabulary lookup endpoint used by the onboarding Step 3 "see what's already included" popover (P5-15-A):
+
+```python
+@router.get("/{slug}/vocabulary")
+def get_industry_vocabulary(
+    slug: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    """
+    Returns the industry vocabulary for a given slug.
+    Checks known industry_context.json first, then generated_industry_profiles.
+    Used by onboarding Step 3 to show users what terms are auto-included.
+    """
+    # Tier 1: known industry_context.json
+    industry_block = _get_industry_block_by_slug(slug)
+    if industry_block and "vocabulary" in industry_block:
+        return {
+            "slug": slug,
+            "display_name": industry_block.get("display_name", slug),
+            "vocabulary": industry_block["vocabulary"],
+            "source": "known_industry",
+        }
+
+    # Tier 3: generated_industry_profiles
+    generated = crud_generated_industry_profile.get_by_slug(db, slug)
+    if generated and generated.vocabulary:
+        return {
+            "slug": slug,
+            "display_name": generated.display_name or slug,
+            "vocabulary": generated.vocabulary,
+            "source": "generated_industry",
+        }
+
+    # Nothing found yet (industry profile still being generated)
+    return {
+        "slug": slug,
+        "display_name": slug,
+        "vocabulary": {},
+        "source": "pending",
+    }
+```
+
+---
+
+### P5-15-E — Fix P5-11 Polling Effect for Unknown Detected Industries
+
+**File:** `frontend/app/dashboard/onboarding/page.tsx`
+
+The polling effect in P5-11 updates `detectedIndustry` when auto-detection completes, but if the detected slug is not in the known 8 industry categories (e.g., `"fmcg"`), no card highlights and the "Other" card is not activated. Add this check inside the polling success branch:
+
+```tsx
+// Inside the polling useEffect, in the success branch where
+// res.data?.settings?.industry is truthy:
+
+const industry = res.data.settings.industry as string;
+const displayName = res.data.settings.industry_display_name as string | undefined;
+setDetectedIndustry(industry);
+
+if (isKnownIndustry(industry)) {
+  // Known card — highlight it
+  setSelectedIndustry(industry);
+  setIsOther(false);
+} else {
+  // Unknown industry detected (e.g., "fmcg", "logistics", "telecom")
+  // Auto-activate "Other" card with the detected display name pre-filled
+  setIsOther(true);
+  setSelectedIndustry(null);
+  setCustomIndustry(
+    displayName ||
+    industry.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  );
+  // Show the match result panel so user can see what was detected
+  // The matchResult will be populated from the POST /industries/match call
+  // triggered by debounced watch on customIndustry change (already in P5-11)
+}
+```
+
+This ensures that for an FMCG company like Emami, after auto-detection:
+1. The "Other" card is activated (highlighted border)
+2. The custom input is pre-filled with "Fmcg" or the AI-provided display name
+3. The match result panel shows "Detected parent: Consumer Goods & Retail" (from `IndustryMatcherService`)
+4. The user can refine the name if needed, or accept and proceed
+
+---
+
+### P5-15 Summary: What Changes
+
+| File | Change | Why |
+|------|--------|-----|
+| `frontend/app/dashboard/onboarding/page.tsx` | Update Step 3 copy, add industry vocab popover, fix polling for unknown industries | Gap A + Gap D |
+| `backend/app/services/business_ontology_service.py` | Add `_classify_term_type()`, skip industry candidates in `_surface_unknown_terms()` | Gap B |
+| `backend/app/services/ai/prompt_context.py` | Add `industry_vocabulary`, `industry_patterns`, `tenant_name` fields to `PromptContext` | Gap C |
+| `backend/app/services/ai/prompt_context_builder.py` | Separate Tier 1 and Tier 2 in context build; defensive filter to prevent industry terms leaking into `tenant_glossary` | Gap C |
+| `backend/app/api/endpoints/industries.py` | Add `GET /{slug}/vocabulary` endpoint | Gap A (popover) |
+
+**No new migrations required.** All changes are within existing schemas:
+- `generated_industry_profiles.vocabulary` already stores industry terms (P5-13)
+- `tenant.settings.glossary` already stores tenant terms (P5-05)
+- This task only clarifies the separation and enforces it in code
+
+**Backward compatible:** Existing tenants with mixed-content glossaries are not broken — the defensive filter in `build_prompt_context()` silently removes industry terms from the Tier 2 injection, and they appear in Tier 1 instead. Net effect: cleaner, more accurate prompts.
+
+---
+
+### P5-15 Verification
+
+1. **Tier separation in prompt:** For an FMCG tenant (Emami) with `glossary: { "Navratna": "hair oil brand" }` and industry `fmcg`:
+   - Call `build_prompt_context(db, tenant_id)` → `PromptContext.industry_vocabulary` contains `planogram`, `beat`, etc. and `PromptContext.glossary` contains only `Navratna`
+   - Call `render_full_preamble()` → output contains two separate `===` blocks:
+     - `=== INDUSTRY CONTEXT (FMCG & Consumer Goods) ===` with planogram, beat
+     - `=== COMPANY-SPECIFIC TERMINOLOGY (Emami Limited) ===` with Navratna only
+
+2. **Defensive filter:** Manually add `"planogram": "shelf layout"` to `tenant.settings.glossary` via psql, then call `build_prompt_context()` → `planogram` does NOT appear in the `=== COMPANY-SPECIFIC TERMINOLOGY ===` block (filtered out)
+
+3. **Self-learning discrimination:** Upload a BRD that uses both "planogram" (industry term) and "Navratna" (brand name):
+   - `_classify_term_type("planogram")` → `"industry_candidate"` → skipped
+   - `_classify_term_type("Navratna")` → `"brand_name"` → flagged for tenant glossary review
+   - Verify: only Navratna appears in the document's unknown-terms panel
+
+4. **HUL isolation:** Register a second tenant (Hindustan Unilever). Check their `tenant.settings.glossary` → `Navratna` is NOT present. Check prompt for HUL → `=== COMPANY-SPECIFIC TERMINOLOGY (Hindustan Unilever) ===` block is empty or contains only HUL's own terms.
+
+5. **Onboarding Step 3 copy:** Navigate to `/dashboard/onboarding` as new tenant → Step 3 shows "Your Company's Specific Terminology" title, blue info box listing what to add, "See N industry terms already included →" link
+
+6. **Industry vocab popover:** Click the link → popover shows chips for planogram, beat, SKU, etc.
+
+7. **Unknown industry polling fix:** Register as FMCG tenant with website `emami.com`:
+   - Wait for auto-detection → `detect_tenant_industry` sets `industry = "fmcg"`
+   - Navigate to Step 2 → "Other" card is highlighted (not blank selection)
+   - Custom input field shows "Fmcg" or "FMCG & Consumer Goods"
+   - Match result panel shows parent: "Consumer Goods & Retail"
 
 ---
 
@@ -5318,6 +5936,16 @@ Before marking Phase 5 done, every item below must be verified:
 - [ ] Industry profile card renders in admin/settings page
 - [ ] Industry can be changed from settings card and persists to DB
 - [ ] Phase 4 developer has added `db=db` to the `call_gemini_for_typed_validation` call in validation_service.py (P5-08 coordination step)
+- [ ] **P5-15:** Onboarding Step 3 shows "Your Company's Specific Terminology" title with blue info box
+- [ ] **P5-15:** "See N industry terms already included →" link appears and popover shows industry vocab chips
+- [ ] **P5-15:** `GET /api/v1/industries/{slug}/vocabulary` returns vocabulary for known and generated slugs
+- [ ] **P5-15:** `PromptContext` has separate `industry_vocabulary` and `glossary` fields
+- [ ] **P5-15:** `render_full_preamble()` produces two `===` blocks with distinct labels
+- [ ] **P5-15:** Defensive filter in `build_prompt_context()` removes industry terms from `tenant.settings.glossary` injection
+- [ ] **P5-15:** `_classify_term_type("planogram")` → `"industry_candidate"` (skipped in self-learning)
+- [ ] **P5-15:** `_classify_term_type("Navratna")` → `"brand_name"` (flagged for tenant glossary)
+- [ ] **P5-15:** Two FMCG tenants (Emami + HUL) have completely independent `glossary` entries
+- [ ] **P5-15:** Unknown industry polling fix: "Other" card auto-activates when detected slug not in known 8 industries
 
 ---
 
