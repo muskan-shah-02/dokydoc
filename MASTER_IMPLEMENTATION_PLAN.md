@@ -3138,6 +3138,168 @@ def check_usage_alerts(db, tenant_id):
 
 ---
 
+### Phase 9 Nice-to-Haves — Deferred to Future Phases (N1–N10)
+
+> **Why deferred:** These features are all valuable but NONE of them block the core goal of Phase 9 (start charging customers). Ship the PAYG wallet first, let real customers tell us which of these matter most, then build them based on actual demand. See `PHASE_9_STRATEGY.md` Section 12 for the plain-English version.
+
+#### N1 — Auto-Refill Wallet (Razorpay Subscriptions)
+**Effort:** 2–3 days | **Depends:** Phase 9 (G7–G10 Razorpay live), GSTIN acquired
+**File:** `backend/app/services/wallet_autorefill_service.py` (new)
+
+**What:** Customer sets a rule: "when my wallet drops below ₹500, automatically top up ₹1,000 from my saved card." Uses Razorpay Subscriptions API with tokenized card.
+
+**Why nice-to-have:** Removes the "oh I ran out of credit mid-analysis" friction. But manual recharge works fine for v1.
+
+**Implementation sketch:**
+- Add `autorefill_enabled`, `autorefill_trigger_inr`, `autorefill_amount_inr` to `tenant_billing`
+- Celery beat task `check_wallet_autorefill` runs every 15 min
+- On trigger: call Razorpay create-subscription-payment API, on success call existing `deduct_cost` inverse (credit)
+- Write to `wallet_transactions` with `txn_type="autorefill_topup"`
+
+---
+
+#### N2 — Volume-Based Cost Alerts
+**Effort:** 1 day | **Depends:** Phase 9 core
+**File:** `backend/app/tasks/cost_anomaly_tasks.py` (new)
+
+**What:** "Your spending jumped 63% this week vs last week. Is this expected?" Catches runaway automation, leaked API keys, or legitimate growth spikes.
+
+**Implementation sketch:**
+- Nightly Celery task compares `sum(usage_logs.cost_inr)` for last 7 days vs previous 7 days
+- If delta > configurable threshold (default 50%), create notification + email
+- Admin can mute per-tenant from settings
+- Add `cost_alert_threshold_pct` column to `tenant_billing`
+
+---
+
+#### N3 — Per-User Monthly Spend Caps
+**Effort:** 1 day | **Depends:** Phase 9 core
+**File:** `backend/app/models/user_spend_cap.py` (new), enforcement hook in `billing_enforcement_service.py`
+
+**What:** Admin sets "Rajesh cannot spend more than ₹500/month on AI analysis." Enforcement happens at pre-check time, blocks with friendly error.
+
+**Implementation sketch:**
+- New table `user_spend_caps(id, user_id, tenant_id, cap_inr, period='monthly', cap_used_inr, resets_at)`
+- `check_can_afford_analysis()` reads cap, rejects if would exceed
+- Admin UI under Settings → Team → per-user cap slider
+- Celery task resets `cap_used_inr` on 1st of month
+
+---
+
+#### N4 — One-Click Invoice PDF Download from History
+**Effort:** 1 day | **Depends:** N after GSTIN, Razorpay live
+**File:** `backend/app/services/invoice_pdf_service.py` (new)
+
+**What:** Every wallet top-up generates a downloadable GST-compliant invoice PDF. Customer sees a "Download Invoice" button next to each past recharge in their billing history.
+
+**Why nice-to-have:** Phase 9 core already generates invoices via Razorpay's own PDF service (sent by email). This is a nicer in-app experience.
+
+**Implementation sketch:**
+- Use `reportlab` or `weasyprint` to generate PDFs matching GST format (our GSTIN, HSN code 998315, CGST/SGST split, etc.)
+- Store PDFs in S3 / local filesystem with link in `wallet_transactions.extra_data`
+- Add `GET /billing/invoices/{txn_id}/download` endpoint
+
+---
+
+#### N5 — In-App Notification Center for Billing Events
+**Effort:** 1–2 days | **Depends:** Phase 9 core + existing notification system
+**File:** Frontend `components/billing/NotificationBell.tsx` + backend notification categories
+
+**What:** A bell icon with unread counter showing billing events: "₹500 recharge successful", "Wallet is at ₹87", "Invoice generated", "Auto-refill failed — check your card". Clicking jumps to the relevant page.
+
+**Implementation sketch:**
+- Extend existing `notification_service` with `category="billing"`
+- Backend writes notifications on events (already have most of the hooks)
+- Frontend bell reads from `/notifications?category=billing&unread=true`
+
+---
+
+#### N6 — AI-Based Cost Forecasting
+**Effort:** 3–4 days | **Depends:** Phase 9 core + 30+ days of usage data
+**File:** `backend/app/services/cost_forecast_service.py` (new)
+
+**What:** "At your current rate you'll spend ₹3,200 this month." Simple ML model (moving average + seasonality detection) trained on historical `usage_logs`.
+
+**Implementation sketch:**
+- Start with simple 7-day moving average extrapolated to month-end (not ML at all)
+- Later: exponential smoothing (statsmodels) if we see weekend dips or Monday spikes
+- Show on billing dashboard with confidence band
+- Warn if forecast exceeds `monthly_limit_inr`
+
+---
+
+#### N7 — Shareable Public Cost Reports
+**Effort:** 2 days | **Depends:** Phase 9 core (export endpoint)
+**File:** New model `public_cost_report(id, tenant_id, slug, expires_at, view_count)`, endpoint `/public/reports/{slug}`
+
+**What:** User clicks "Share" on a cost report → gets a tokenized URL that their CFO or auditor can view without logging in. Read-only, expires in 30 days by default.
+
+**Security notes:**
+- Slug must be cryptographically random (secrets.token_urlsafe(32))
+- Rate-limited per IP
+- Never expose raw `tenant_id` in the URL
+- Revocable by the owner at any time
+
+---
+
+#### N8 — Slack / Teams Billing Alerts
+**Effort:** 2 days | **Depends:** Phase 9 core
+**File:** `backend/app/integrations/slack_billing.py`, `backend/app/integrations/teams_billing.py`
+
+**What:** "Post low-balance and auto-refill failures to my #finance Slack channel." OAuth flow to install a Slack/Teams bot, webhook to post messages.
+
+**Implementation sketch:**
+- Reuse existing integration pattern (we already have Jira/Confluence OAuth)
+- New columns on `tenant_billing`: `slack_webhook_url`, `teams_webhook_url`
+- Post JSON message on low_balance, autorefill_failed, monthly_limit_approaching
+
+---
+
+#### N9 — Multi-Currency Display
+**Effort:** 1–2 days | **Depends:** Phase 9 core
+**File:** `frontend/lib/currency.ts`, backend `exchange_rate_service.py` expansion
+
+**What:** Indian customer sees ₹ everywhere. International customer (once Stripe is added) sees USD or EUR. Costs are stored in INR internally (source of truth) but displayed converted.
+
+**Implementation sketch:**
+- Add `preferred_currency` to `users` table (default "INR")
+- Frontend `formatCurrency(amount_inr, user.preferred_currency)` helper
+- Daily Celery task caches rates for USD, EUR, GBP, SGD, AED
+- Important: always show "₹X / ~$Y" tooltip so the customer knows the true billing currency
+
+---
+
+#### N10 — Budget vs Actual Variance Tracking
+**Effort:** 2 days | **Depends:** Phase 9 core
+**File:** New model `tenant_budget(id, tenant_id, month, budgeted_inr, actual_inr)`, service, endpoint
+
+**What:** CFO sets "budget = ₹2,000 for April". Dashboard shows "Actual so far: ₹2,400 (120% of budget)" with red indicator. Historical variance chart across months.
+
+**Implementation sketch:**
+- Admin UI: Settings → Budgets → set monthly budget per tenant (or per team in a future iteration)
+- Monthly Celery task snapshots actual from `current_month_cost` into `tenant_budget` on the 1st
+- Analytics endpoint returns budget vs actual for last 12 months
+- Variance alert notifications at 80%, 100%, 120%
+
+---
+
+### Nice-to-Have Priority Order (Recommended)
+
+If/when we get time for these, build them in this order based on customer value per engineering day:
+
+1. **N1 (Auto-refill)** — removes the biggest friction point in the wallet UX
+2. **N5 (Notification center)** — makes the whole billing experience feel more alive
+3. **N3 (Per-user spend caps)** — #1 enterprise-customer ask, easy to build
+4. **N4 (Invoice PDF download)** — finance teams love this
+5. **N2 (Volume alerts)** — catches genuine problems (leaked keys, runaway scripts)
+6. **N10 (Budget vs actual)** — strong CFO appeal
+7. **N6 (Cost forecasting)** — nice demo feature but not urgent
+8. **N8 (Slack/Teams alerts)** — high value for the subset of customers who already live in Slack
+9. **N7 (Shareable reports)** — specific use case, ship when a customer asks
+10. **N9 (Multi-currency)** — only relevant once we have international customers (Stripe phase)
+
+---
+
 ## PHASE 10 — LLM Strategy Foundation (Training Pipeline, LoRA Groundwork, Evaluation)
 **Priority: Strategic — not urgent today, but every week without it loses training data value**
 **Parallel-safe: YES [PARALLEL-SAFE]**
