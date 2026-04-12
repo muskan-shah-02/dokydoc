@@ -1879,3 +1879,1441 @@ B5  ─────────────────────────�
 | All existing tests | No interface changes in any public method |
 
 ✅ **PART B COMPLETE** — 6 tickets, 4.25 days. Zero breaking changes to existing callers. All Track A (no GSTIN required).
+
+---
+
+## PART C — BACKEND PAYMENTS
+
+> **Context:** Part C covers everything that moves real money. Most tickets here are Track B (blocked by GSTIN — Razorpay will not activate a merchant without one). However, the code is written and tested now so that the day GSTIN arrives, flipping `RAZORPAY_ENABLED=true` in `.env` is the only deploy needed.
+>
+> **Feature flag:** Every Razorpay-touching endpoint checks `settings.RAZORPAY_ENABLED` at runtime and returns `HTTP 503 {"detail": "Payments not yet available in your region. Contact support."}` when false. This is not a code gate — it is a config gate. No re-deployment required to go live.
+>
+> **Track A tickets in Part C:** C5 (enterprise contact form) and C6 (wallet balance endpoints) and C7 (nightly reconciliation) ship immediately. They do not touch Razorpay.
+>
+> **Existing stub:** `POST /billing/topup` currently adds balance directly with no Razorpay. It is NOT removed — it stays as a manual admin top-up path (used by B5 signup bonus internally and by admin grant scenarios). It is renamed in docs but the route stays.
+
+---
+
+### TICKET C1 — Razorpay SDK Setup & Config
+**Owner:** Backend
+**Effort:** 0.25 day
+**Track:** B (GSTIN-blocked — but write the code now)
+**Depends on:** Nothing
+
+#### Context
+
+Razorpay provides an official Python SDK (`razorpay`). All API calls (create order, fetch payment, verify signature) go through it. The webhook signature verification uses HMAC-SHA256 with the webhook secret.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/requirements.txt` (or `pyproject.toml`) | Add `razorpay>=1.4.1` |
+| `backend/app/core/config.py` | Add 4 new settings |
+| `backend/app/services/razorpay_service.py` | **New file** |
+
+#### Step 1 — `requirements.txt`
+
+```
+razorpay>=1.4.1
+```
+
+#### Step 2 — `config.py` additions
+
+Add after the Anthropic settings block:
+
+```python
+# --- Razorpay Payment Gateway (Phase 9 — Track B, D8) ---
+# Set RAZORPAY_ENABLED=true ONLY after GSTIN is registered and Razorpay account is activated
+RAZORPAY_ENABLED: bool = Field(default=False, env="RAZORPAY_ENABLED")
+RAZORPAY_KEY_ID: str = Field(default="", env="RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET: str = Field(default="", env="RAZORPAY_KEY_SECRET")
+RAZORPAY_WEBHOOK_SECRET: str = Field(default="", env="RAZORPAY_WEBHOOK_SECRET")
+```
+
+> **Security note:** `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` must never be committed to source control. Add to `.env.example` as empty strings with comments. Add to production secrets manager.
+
+#### Step 3 — `razorpay_service.py` (new file)
+
+```python
+"""
+Razorpay Service — Phase 9 (Track B, D8)
+Wrapper around the razorpay Python SDK.
+All methods check RAZORPAY_ENABLED and raise PaymentsDisabledException if false.
+"""
+import hmac
+import hashlib
+import razorpay
+from typing import Optional
+from decimal import Decimal
+from app.core.config import settings
+from app.core.logging import get_logger
+from app.core.exceptions import DokyDocException
+
+logger = get_logger("services.razorpay")
+
+# Minimum and maximum recharge amounts (Decision D2)
+RECHARGE_PRESETS_INR = [100, 200, 500, 1000, 2500, 5000]
+MIN_RECHARGE_INR = 100
+# No maximum enforced per D2
+
+
+class PaymentsDisabledException(DokyDocException):
+    """Raised when Razorpay is accessed before GSTIN is registered."""
+    def __init__(self):
+        super().__init__(
+            message="Payments are not yet available. Contact support@dokydoc.ai to enable.",
+            details={"reason": "RAZORPAY_ENABLED=false", "action": "acquire_gstin"}
+        )
+
+
+class RazorpayService:
+    """
+    Thin wrapper around razorpay SDK.
+    Raises PaymentsDisabledException on all methods when RAZORPAY_ENABLED=false.
+    """
+
+    def _client(self) -> razorpay.Client:
+        """Returns authenticated Razorpay client. Raises if payments disabled."""
+        if not settings.RAZORPAY_ENABLED:
+            raise PaymentsDisabledException()
+        return razorpay.Client(
+            auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+        )
+
+    def create_order(self, amount_inr: float, tenant_id: int, idempotency_key: str) -> dict:
+        """
+        Create a Razorpay order.
+
+        Razorpay amounts are in paise (1 INR = 100 paise).
+        Returns the full Razorpay order dict (includes 'id' = razorpay_order_id).
+        """
+        if amount_inr < MIN_RECHARGE_INR:
+            raise ValueError(f"Minimum recharge is ₹{MIN_RECHARGE_INR}. Got ₹{amount_inr}")
+
+        amount_paise = int(Decimal(str(amount_inr)) * 100)  # Never use float multiplication for money
+
+        client = self._client()
+        order = client.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": idempotency_key,          # Our internal key, echoed back in webhook
+            "notes": {
+                "tenant_id": str(tenant_id),
+                "platform": "dokydoc",
+            },
+            "payment_capture": 1,                # Auto-capture on payment (not manual capture)
+        })
+        logger.info(f"Razorpay order created: {order['id']} for tenant={tenant_id}, amount=₹{amount_inr}")
+        return order
+
+    def fetch_payment(self, razorpay_payment_id: str) -> dict:
+        """Fetch payment details by payment ID."""
+        client = self._client()
+        return client.payment.fetch(razorpay_payment_id)
+
+    def verify_payment_signature(
+        self,
+        razorpay_order_id: str,
+        razorpay_payment_id: str,
+        razorpay_signature: str,
+    ) -> bool:
+        """
+        Verify the HMAC-SHA256 signature from Razorpay checkout callback.
+        Must be called after customer completes payment on frontend.
+        Returns True if valid, False if tampered/invalid.
+        """
+        if not settings.RAZORPAY_ENABLED:
+            raise PaymentsDisabledException()
+
+        message = f"{razorpay_order_id}|{razorpay_payment_id}"
+        expected = hmac.new(
+            settings.RAZORPAY_KEY_SECRET.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        is_valid = hmac.compare_digest(expected, razorpay_signature)
+        if not is_valid:
+            logger.warning(
+                f"Payment signature mismatch! order={razorpay_order_id}, "
+                f"payment={razorpay_payment_id}"
+            )
+        return is_valid
+
+    def verify_webhook_signature(self, body: bytes, signature: str) -> bool:
+        """
+        Verify the HMAC-SHA256 signature on incoming Razorpay webhooks.
+        body must be the raw request bytes (before JSON parsing).
+        Returns True if valid, False if not.
+        """
+        if not settings.RAZORPAY_WEBHOOK_SECRET:
+            logger.error("RAZORPAY_WEBHOOK_SECRET is not set — cannot verify webhook")
+            return False
+
+        expected = hmac.new(
+            settings.RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+
+# Singleton instance
+razorpay_service = RazorpayService()
+```
+
+#### Acceptance Criteria
+
+- [ ] `razorpay_service.create_order(...)` raises `PaymentsDisabledException` when `RAZORPAY_ENABLED=false`
+- [ ] `razorpay_service.verify_payment_signature(...)` returns False for tampered signature (unit testable without network)
+- [ ] `razorpay_service.verify_webhook_signature(...)` returns False for mismatched HMAC
+- [ ] `pytest backend/tests/` — all existing tests pass (new file only)
+
+---
+
+### TICKET C2 — Create Order Endpoint
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** B (GSTIN-blocked)
+**Depends on:** A3 (razorpay_orders table), C1 (razorpay_service)
+
+#### Context
+
+Step 1 of the payment flow: customer clicks "Recharge ₹500", frontend calls this endpoint to get a Razorpay `order_id`. The frontend then opens the Razorpay checkout popup using that `order_id` + our `key_id`. Without this endpoint, the frontend has nothing to hand to Razorpay.
+
+**Why we create an order server-side (not client-side):**
+Razorpay requires a signed order from your server before showing checkout. This prevents a customer from manipulating the amount in the browser.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add new endpoint |
+| `backend/app/schemas/billing.py` | Add request/response schemas |
+| `backend/app/crud/crud_razorpay_order.py` | **New file** |
+| `backend/app/crud/__init__.py` | Register new CRUD |
+
+#### CRUD — `crud_razorpay_order.py`
+
+```python
+"""CRUD for RazorpayOrder — Phase 9"""
+from sqlalchemy.orm import Session
+from app.models.razorpay_order import RazorpayOrder
+from typing import Optional
+
+
+class CRUDRazorpayOrder:
+
+    def create(self, db: Session, *, obj_in: dict) -> RazorpayOrder:
+        order = RazorpayOrder(**obj_in)
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+        return order
+
+    def get_by_razorpay_order_id(self, db: Session, *, razorpay_order_id: str) -> Optional[RazorpayOrder]:
+        return db.query(RazorpayOrder).filter(
+            RazorpayOrder.razorpay_order_id == razorpay_order_id
+        ).first()
+
+    def get_by_idempotency_key(self, db: Session, *, key: str) -> Optional[RazorpayOrder]:
+        return db.query(RazorpayOrder).filter(
+            RazorpayOrder.idempotency_key == key
+        ).first()
+
+    def update_status(
+        self, db: Session, *, razorpay_order_id: str,
+        status: str, razorpay_payment_id: str = None
+    ) -> Optional[RazorpayOrder]:
+        order = self.get_by_razorpay_order_id(db, razorpay_order_id=razorpay_order_id)
+        if order:
+            order.status = status
+            if razorpay_payment_id:
+                order.razorpay_payment_id = razorpay_payment_id
+            db.add(order)
+            db.commit()
+            db.refresh(order)
+        return order
+
+
+razorpay_order = CRUDRazorpayOrder()
+```
+
+#### Schemas — `billing.py` additions
+
+```python
+class CreateOrderRequest(BaseModel):
+    amount_inr: float = Field(..., ge=100, description="Recharge amount in INR. Minimum ₹100.")
+
+    @validator("amount_inr")
+    def round_to_two_decimal(cls, v):
+        return round(v, 2)
+
+
+class CreateOrderResponse(BaseModel):
+    razorpay_order_id: str       # Pass to Razorpay checkout: options.order_id
+    razorpay_key_id: str         # Pass to Razorpay checkout: options.key
+    amount_inr: float
+    amount_paise: int            # Razorpay's native unit — for frontend validation
+    currency: str = "INR"
+    internal_order_id: int       # Our razorpay_orders.id — for tracking
+```
+
+#### Endpoint — add to `billing.py`
+
+```python
+@router.post("/create-order", response_model=schemas.billing.CreateOrderResponse)
+@limiter.limit("10/minute")
+def create_recharge_order(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: schemas.billing.CreateOrderRequest,
+):
+    """
+    Create a Razorpay payment order for wallet recharge.
+    [TRACK B — returns 503 until RAZORPAY_ENABLED=true]
+
+    Step 1 of payment flow:
+      1. Frontend calls this → gets razorpay_order_id + key_id
+      2. Frontend opens Razorpay checkout popup
+      3. Customer pays
+      4. Frontend calls POST /billing/verify-payment (C3)
+
+    Presets: ₹100, ₹200, ₹500, ₹1,000, ₹2,500, ₹5,000 or any custom amount ≥ ₹100.
+    """
+    if not settings.RAZORPAY_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Payments not yet available. Contact support@dokydoc.ai"
+        )
+
+    # Idempotency key — prevents duplicate orders on network retry
+    idempotency_key = f"order:{tenant_id}:{current_user.id}:{int(body.amount_inr * 100)}"
+
+    # Check if a pending order already exists for same amount (prevent double-click)
+    existing = crud.razorpay_order.get_by_idempotency_key(db, key=idempotency_key)
+    if existing and existing.status == "created":
+        logger.info(f"Returning existing pending order for tenant {tenant_id}: {existing.razorpay_order_id}")
+        return schemas.billing.CreateOrderResponse(
+            razorpay_order_id=existing.razorpay_order_id,
+            razorpay_key_id=settings.RAZORPAY_KEY_ID,
+            amount_inr=body.amount_inr,
+            amount_paise=int(body.amount_inr * 100),
+            internal_order_id=existing.id,
+        )
+
+    # Create order via Razorpay API
+    from app.services.razorpay_service import razorpay_service
+    rp_order = razorpay_service.create_order(
+        amount_inr=body.amount_inr,
+        tenant_id=tenant_id,
+        idempotency_key=idempotency_key,
+    )
+
+    # Persist to razorpay_orders table (A3)
+    internal_order = crud.razorpay_order.create(db, obj_in={
+        "tenant_id": tenant_id,
+        "user_id": current_user.id,
+        "amount_inr": body.amount_inr,
+        "razorpay_order_id": rp_order["id"],
+        "status": "created",
+        "idempotency_key": idempotency_key,
+    })
+
+    logger.info(
+        f"Order created: internal_id={internal_order.id}, "
+        f"razorpay_order_id={rp_order['id']}, amount=₹{body.amount_inr}, tenant={tenant_id}"
+    )
+
+    return schemas.billing.CreateOrderResponse(
+        razorpay_order_id=rp_order["id"],
+        razorpay_key_id=settings.RAZORPAY_KEY_ID,
+        amount_inr=body.amount_inr,
+        amount_paise=int(body.amount_inr * 100),
+        internal_order_id=internal_order.id,
+    )
+```
+
+#### Acceptance Criteria
+
+- [ ] `POST /billing/create-order` with `RAZORPAY_ENABLED=false` → HTTP 503
+- [ ] `POST /billing/create-order {"amount_inr": 50}` → HTTP 422 (below ₹100 minimum)
+- [ ] `POST /billing/create-order {"amount_inr": 500}` with `RAZORPAY_ENABLED=true` → `razorpay_order_id` returned, row in `razorpay_orders` with `status="created"`
+- [ ] Second call with same amount before paying → returns same `razorpay_order_id` (idempotent)
+- [ ] `amount_paise = amount_inr * 100` (e.g. ₹500 → 50000 paise)
+- [ ] Rate limit: 11th call/min → 429
+
+---
+
+### TICKET C3 — Verify Payment Endpoint (Frontend-Triggered)
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** B (GSTIN-blocked)
+**Depends on:** C1, C2, B3 (wallet_service)
+
+#### Context
+
+After the customer completes payment in the Razorpay popup, Razorpay calls the frontend's `handler` callback with three values:
+- `razorpay_order_id` — the order we created in C2
+- `razorpay_payment_id` — the new payment ID (format: `pay_XXXX`)
+- `razorpay_signature` — HMAC-SHA256 proof that the payment is real
+
+The frontend sends these three values to this endpoint. We verify the HMAC signature and, only if valid, credit the wallet. This is the **primary** success path for standard checkout.
+
+**Why this AND a webhook (C4)?** The frontend call happens in seconds. The webhook (C4) is an async backup for cases where the user closes the browser before the frontend handler fires. Together they guarantee the wallet is credited. Both are idempotent — the second to arrive is a no-op.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add endpoint |
+| `backend/app/schemas/billing.py` | Add schemas |
+
+#### Schemas
+
+```python
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class VerifyPaymentResponse(BaseModel):
+    status: str           # "credited" | "already_processed"
+    amount_inr: float
+    new_wallet_balance_inr: float
+    transaction_id: int
+    message: str
+```
+
+#### Endpoint
+
+```python
+@router.post("/verify-payment", response_model=schemas.billing.VerifyPaymentResponse)
+@limiter.limit("20/minute")
+def verify_payment(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: schemas.billing.VerifyPaymentRequest,
+):
+    """
+    Verify Razorpay payment signature and credit the tenant wallet.
+    [TRACK B — returns 503 until RAZORPAY_ENABLED=true]
+
+    Step 3 of payment flow (after create-order and customer completing payment).
+    Idempotent: safe to call multiple times — wallet is credited exactly once.
+
+    Security: HMAC-SHA256 signature verification prevents fake credit requests.
+    """
+    if not settings.RAZORPAY_ENABLED:
+        raise HTTPException(status_code=503, detail="Payments not yet available.")
+
+    from app.services.razorpay_service import razorpay_service, PaymentsDisabledException
+    from app.services.wallet_service import wallet_service
+
+    # 1. Verify HMAC signature — reject if invalid, no exceptions
+    is_valid = razorpay_service.verify_payment_signature(
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        razorpay_signature=body.razorpay_signature,
+    )
+    if not is_valid:
+        logger.warning(
+            f"Invalid payment signature from tenant {tenant_id}: "
+            f"order={body.razorpay_order_id}, payment={body.razorpay_payment_id}"
+        )
+        raise HTTPException(status_code=400, detail="Payment signature verification failed.")
+
+    # 2. Look up internal order record
+    internal_order = crud.razorpay_order.get_by_razorpay_order_id(
+        db, razorpay_order_id=body.razorpay_order_id
+    )
+    if not internal_order:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    # 3. Verify order belongs to this tenant (prevent cross-tenant fraud)
+    if internal_order.tenant_id != tenant_id:
+        logger.error(
+            f"Tenant mismatch! order.tenant_id={internal_order.tenant_id}, "
+            f"calling tenant={tenant_id}"
+        )
+        raise HTTPException(status_code=403, detail="Order does not belong to this account.")
+
+    # 4. Idempotency — idempotency_key = "rp:{razorpay_payment_id}"
+    idempotency_key = f"rp:{body.razorpay_payment_id}"
+
+    # 5. Credit wallet (idempotent — safe if webhook already processed it)
+    wallet_result = wallet_service.record_credit(
+        db,
+        tenant_id=tenant_id,
+        amount_inr=float(internal_order.amount_inr),
+        txn_type="razorpay_topup",
+        idempotency_key=idempotency_key,
+        user_id=current_user.id,
+        razorpay_order_id=body.razorpay_order_id,
+        razorpay_payment_id=body.razorpay_payment_id,
+        notes=f"Razorpay top-up via frontend verify. Payment: {body.razorpay_payment_id}",
+    )
+
+    # 6. Mark order as paid in razorpay_orders table
+    crud.razorpay_order.update_status(
+        db,
+        razorpay_order_id=body.razorpay_order_id,
+        status="paid",
+        razorpay_payment_id=body.razorpay_payment_id,
+    )
+
+    # 7. Flip has_recharged_ever on tenant (unlocks paid models — D3)
+    from app.models.tenant import Tenant
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant and not getattr(tenant, "has_recharged_ever", True):
+        tenant.has_recharged_ever = True
+        db.add(tenant)
+        db.commit()
+        logger.info(f"Tenant {tenant_id} has_recharged_ever flipped to True — paid models unlocked")
+
+    already_processed = wallet_result.get("status") == "already_processed"
+
+    balance_after = wallet_result.get("new_balance_inr", 0)
+    if already_processed:
+        # Re-read balance for response
+        billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
+        balance_after = float(billing.balance_inr)
+
+    logger.info(
+        f"Payment {'already processed' if already_processed else 'credited'}: "
+        f"tenant={tenant_id}, amount=₹{internal_order.amount_inr}, "
+        f"payment={body.razorpay_payment_id}"
+    )
+
+    return schemas.billing.VerifyPaymentResponse(
+        status="already_processed" if already_processed else "credited",
+        amount_inr=float(internal_order.amount_inr),
+        new_wallet_balance_inr=balance_after,
+        transaction_id=wallet_result.get("transaction_id", 0),
+        message=(
+            "Payment already processed — no double credit applied."
+            if already_processed
+            else f"₹{internal_order.amount_inr} added to your wallet."
+        ),
+    )
+```
+
+#### Acceptance Criteria
+
+- [ ] Valid signature + new payment → `status="credited"`, wallet balance increased, `has_recharged_ever=True` on tenant
+- [ ] Valid signature + same `razorpay_payment_id` called twice → `status="already_processed"`, wallet NOT credited twice
+- [ ] Tampered/invalid signature → HTTP 400
+- [ ] Order belonging to different tenant → HTTP 403
+- [ ] `razorpay_orders.status` updated to `"paid"` after successful verify
+- [ ] `has_recharged_ever` is set to `True` only on first successful payment (not on free credit use)
+
+---
+
+### TICKET C4 — Razorpay Webhook Handler
+**Owner:** Backend
+**Effort:** 1 day
+**Track:** B (GSTIN-blocked)
+**Depends on:** C1, C2, C3, B3
+
+#### Context
+
+Razorpay retries webhooks up to 3 times on failure (HTTP non-2xx). Our handler must be:
+1. **Idempotent** — process `payment.captured` exactly once even if Razorpay retries
+2. **Signature-verified** — reject any request without a valid HMAC-SHA256 header
+3. **Non-blocking** — return HTTP 200 immediately, do wallet crediting synchronously (Razorpay's retry window is 30 minutes)
+4. **Never raise** — any internal error must be caught and logged; always return 200 to prevent Razorpay from retrying valid payments indefinitely
+
+**Why a separate route from verify-payment (C3)?** The webhook comes directly from Razorpay's servers (no user session, no JWT). It bypasses all auth middleware. The verify-payment endpoint requires a logged-in user. Both write to the same idempotency key `"rp:{razorpay_payment_id}"` — so exactly one of them does the actual crediting.
+
+**Webhook route registration:** The webhook endpoint must be **excluded from JWT auth middleware**. Add `"/api/v1/billing/webhook/razorpay"` to the public routes allowlist in `backend/app/api/deps.py` or `backend/main.py` middleware configuration.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add webhook endpoint |
+| `backend/app/api/deps.py` or `backend/main.py` | Add webhook route to auth bypass list |
+
+#### Endpoint
+
+```python
+@router.post("/webhook/razorpay", include_in_schema=False)
+async def razorpay_webhook(request: Request, db: Session = Depends(deps.get_db)):
+    """
+    Razorpay webhook receiver.
+    [TRACK B — silently returns 200 when RAZORPAY_ENABLED=false to avoid Razorpay retries]
+
+    NO JWT AUTH — this endpoint is called by Razorpay servers directly.
+    Must be added to auth bypass list in middleware.
+
+    Signature: X-Razorpay-Signature header (HMAC-SHA256 of raw body)
+
+    Events handled:
+      payment.captured  — customer paid successfully
+      payment.failed    — payment failed (log only, no wallet action)
+      order.paid        — order fully paid (backup to payment.captured)
+
+    Events ignored (logged and 200 returned):
+      Any other event type.
+    """
+    # Early return when payments disabled (Razorpay retries otherwise)
+    if not settings.RAZORPAY_ENABLED:
+        return {"status": "payments_disabled"}
+
+    # 1. Read raw body BEFORE parsing (signature is over raw bytes)
+    raw_body = await request.body()
+
+    # 2. Verify webhook signature
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    from app.services.razorpay_service import razorpay_service
+    if not razorpay_service.verify_webhook_signature(raw_body, signature):
+        logger.warning(f"Razorpay webhook signature verification FAILED. IP: {request.client.host}")
+        # Return 200 anyway — a 4xx would cause Razorpay to retry
+        # Instead we log and discard. Legitimate payments go through C3 (verify-payment).
+        return {"status": "signature_invalid"}
+
+    # 3. Parse event
+    import json
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        logger.error("Razorpay webhook: invalid JSON body")
+        return {"status": "invalid_json"}
+
+    event = payload.get("event", "")
+    logger.info(f"Razorpay webhook received: event={event}")
+
+    # 4. Route by event type
+    try:
+        if event == "payment.captured":
+            await _handle_payment_captured(db, payload)
+        elif event == "payment.failed":
+            _handle_payment_failed(payload)
+        elif event == "order.paid":
+            await _handle_order_paid(db, payload)
+        else:
+            logger.debug(f"Razorpay webhook: ignoring event type '{event}'")
+
+    except Exception as e:
+        # CRITICAL: Never raise from webhook handler — would cause Razorpay to retry
+        logger.error(f"Razorpay webhook handler error (event={event}): {e}", exc_info=True)
+
+    return {"status": "ok"}
+
+
+async def _handle_payment_captured(db: Session, payload: dict) -> None:
+    """
+    Handle payment.captured event — the primary success event.
+    Idempotent via razorpay_payment_id idempotency key.
+    """
+    from app.services.wallet_service import wallet_service
+
+    payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    razorpay_payment_id = payment.get("id")
+    razorpay_order_id = payment.get("order_id")
+    amount_paise = payment.get("amount", 0)
+    amount_inr = amount_paise / 100
+
+    if not razorpay_payment_id or not razorpay_order_id:
+        logger.error(f"payment.captured missing payment_id or order_id: {payload}")
+        return
+
+    # Look up our internal order to get tenant_id
+    internal_order = crud.razorpay_order.get_by_razorpay_order_id(
+        db, razorpay_order_id=razorpay_order_id
+    )
+    if not internal_order:
+        logger.error(f"payment.captured: razorpay_order_id={razorpay_order_id} not found in our DB")
+        return
+
+    tenant_id = internal_order.tenant_id
+    idempotency_key = f"rp:{razorpay_payment_id}"
+
+    # Credit wallet — idempotent (C3 may have already processed this)
+    result = wallet_service.record_credit(
+        db,
+        tenant_id=tenant_id,
+        amount_inr=amount_inr,
+        txn_type="razorpay_topup",
+        idempotency_key=idempotency_key,
+        razorpay_order_id=razorpay_order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        notes=f"Razorpay webhook: payment.captured. Payment: {razorpay_payment_id}",
+    )
+
+    # Update order status
+    crud.razorpay_order.update_status(
+        db,
+        razorpay_order_id=razorpay_order_id,
+        status="paid",
+        razorpay_payment_id=razorpay_payment_id,
+    )
+
+    # Flip has_recharged_ever if not already set
+    from app.models.tenant import Tenant
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant and not getattr(tenant, "has_recharged_ever", True):
+        tenant.has_recharged_ever = True
+        db.add(tenant)
+        db.commit()
+
+    if result.get("status") == "already_processed":
+        logger.info(f"Webhook: payment.captured already processed by C3: {razorpay_payment_id}")
+    else:
+        logger.info(f"Webhook: payment.captured processed: tenant={tenant_id}, ₹{amount_inr}")
+
+
+def _handle_payment_failed(payload: dict) -> None:
+    """Log payment failures. No wallet action needed."""
+    payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    logger.warning(
+        f"Razorpay payment.failed: payment_id={payment.get('id')}, "
+        f"order_id={payment.get('order_id')}, "
+        f"error={payment.get('error_description', 'unknown')}"
+    )
+
+
+async def _handle_order_paid(db: Session, payload: dict) -> None:
+    """order.paid is a backup signal — delegate to payment.captured logic."""
+    # Extract payment details from order.paid payload and re-use handler
+    order = payload.get("payload", {}).get("order", {}).get("entity", {})
+    payments = payload.get("payload", {}).get("payment", {}).get("entity", {})
+    if payments:
+        await _handle_payment_captured(db, {
+            "payload": {"payment": {"entity": payments}}
+        })
+```
+
+#### Auth Bypass — `main.py` or `deps.py`
+
+Add the webhook URL to the JWT skip list. The exact implementation depends on how middleware is structured:
+
+```python
+# In backend/main.py, wherever JWT middleware is applied:
+WEBHOOK_PATHS_NO_AUTH = [
+    "/api/v1/billing/webhook/razorpay",
+]
+# Skip JWT verification for these paths in the middleware
+```
+
+#### Acceptance Criteria
+
+- [ ] Valid `payment.captured` webhook with correct signature → wallet credited, `razorpay_orders.status="paid"`
+- [ ] Same webhook delivered twice (Razorpay retry) → idempotent, wallet credited only once
+- [ ] Invalid/missing `X-Razorpay-Signature` → always returns HTTP 200 (not 401/400), logs warning
+- [ ] `payment.failed` event → HTTP 200, warning logged, no wallet change
+- [ ] Unknown event type → HTTP 200, debug logged, no action
+- [ ] Any exception inside handler → caught, logged, HTTP 200 returned (never propagates)
+- [ ] `has_recharged_ever` flipped to True on first successful webhook credit
+- [ ] Webhook route returns 200 without JWT token in Authorization header
+
+---
+
+### TICKET C5 — Wallet Balance & Ledger Endpoints
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** A (no GSTIN required — reads ledger, doesn't move money)
+**Depends on:** B3 (wallet_service), A2 (wallet_transactions table)
+
+#### Context
+
+Customers need to see their live balance (both pools) and a full history of every credit and debit. This powers the billing page in the frontend (Part E). The `/topup` endpoint already exists but returns stale `billing.balance_inr` only — it does not show free credit or ledger history.
+
+These are read-only endpoints. Track A — ship immediately.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add 2 endpoints |
+| `backend/app/schemas/billing.py` | Add response schemas |
+
+#### Schemas
+
+```python
+class WalletBalanceResponse(BaseModel):
+    free_credit_remaining_inr: float   # Signup bonus pool
+    wallet_balance_inr: float          # Paid recharge pool
+    total_available_inr: float         # Combined
+    has_recharged_ever: bool           # Unlocks paid models
+    low_balance_alert: bool            # true if total < low_balance_threshold
+
+
+class WalletTransactionResponse(BaseModel):
+    id: int
+    direction: str                     # "credit" | "debit"
+    amount_inr: float
+    balance_after_inr: float
+    txn_type: str
+    notes: Optional[str]
+    created_at: datetime
+
+
+class WalletLedgerResponse(BaseModel):
+    transactions: List[WalletTransactionResponse]
+    total_count: int
+    page: int
+    limit: int
+```
+
+#### Endpoints
+
+```python
+@router.get("/wallet", response_model=schemas.billing.WalletBalanceResponse)
+@limiter.limit(RateLimits.BILLING)
+def get_wallet_balance(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """
+    Get current wallet balance (both free credit pool and paid wallet pool).
+    [TRACK A — available immediately]
+    """
+    from app.services.wallet_service import wallet_service
+    from app.models.tenant import Tenant
+
+    balance = wallet_service.get_balance(db, tenant_id=tenant_id)
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+
+    total = balance["total_available_inr"]
+    threshold = float(billing.low_balance_threshold)
+
+    return schemas.billing.WalletBalanceResponse(
+        free_credit_remaining_inr=balance["free_credit_remaining_inr"],
+        wallet_balance_inr=balance["wallet_balance_inr"],
+        total_available_inr=total,
+        has_recharged_ever=getattr(tenant, "has_recharged_ever", False) if tenant else False,
+        low_balance_alert=total < threshold,
+    )
+
+
+@router.get("/wallet/transactions", response_model=schemas.billing.WalletLedgerResponse)
+@limiter.limit(RateLimits.BILLING)
+def get_wallet_ledger(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """
+    Get paginated wallet transaction history (credits and debits).
+    [TRACK A — available immediately]
+    Shows every wallet movement: signup bonus, recharges, analysis charges.
+    """
+    from app.services.wallet_service import wallet_service
+
+    offset = (page - 1) * limit
+    transactions = wallet_service.get_ledger(
+        db, tenant_id=tenant_id, limit=limit, offset=offset
+    )
+    total = crud.wallet_transaction.get_total_credits(db, tenant_id=tenant_id)  # approximate count
+
+    return schemas.billing.WalletLedgerResponse(
+        transactions=[
+            schemas.billing.WalletTransactionResponse(
+                id=t.id,
+                direction=t.direction,
+                amount_inr=float(t.amount_inr),
+                balance_after_inr=float(t.balance_after_inr),
+                txn_type=t.txn_type,
+                notes=t.notes,
+                created_at=t.created_at,
+            )
+            for t in transactions
+        ],
+        total_count=len(transactions),   # TODO: replace with COUNT query in next iteration
+        page=page,
+        limit=limit,
+    )
+```
+
+#### Acceptance Criteria
+
+- [ ] `GET /billing/wallet` → `total_available_inr = free_credit + wallet_balance`
+- [ ] After signup: `free_credit_remaining_inr=100.0`, `wallet_balance_inr=0.0`, `has_recharged_ever=false`
+- [ ] After first recharge: `has_recharged_ever=true`, `wallet_balance_inr > 0`
+- [ ] `GET /billing/wallet/transactions?page=1&limit=5` → max 5 rows, sorted newest-first
+- [ ] `GET /billing/wallet/transactions?limit=101` → HTTP 422 (exceeds max)
+
+---
+
+### TICKET C6 — Enterprise Contact Request Endpoint
+**Owner:** Backend
+**Effort:** 0.25 day
+**Track:** A (no GSTIN required — stores a record and sends an email)
+**Depends on:** A5 (enterprise_contact_requests table)
+
+#### Context
+
+Decision D7: Postpaid is manually enabled per enterprise customer — no self-serve. The entry point is a contact form on the billing page. When a customer submits it, we store the request and alert the sales team.
+
+This is Track A because it does not touch Razorpay.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add endpoint |
+| `backend/app/schemas/billing.py` | Add schema |
+| `backend/app/crud/crud_enterprise_contact.py` | **New file** |
+
+#### CRUD — `crud_enterprise_contact.py`
+
+```python
+from sqlalchemy.orm import Session
+from app.models.enterprise_contact_request import EnterpriseContactRequest
+
+
+class CRUDEnterpriseContact:
+    def create(self, db: Session, *, obj_in: dict) -> EnterpriseContactRequest:
+        record = EnterpriseContactRequest(**obj_in)
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        return record
+
+    def get_pending(self, db: Session, limit: int = 50):
+        return (
+            db.query(EnterpriseContactRequest)
+            .filter(EnterpriseContactRequest.status == "pending")
+            .order_by(EnterpriseContactRequest.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+
+enterprise_contact = CRUDEnterpriseContact()
+```
+
+#### Schema
+
+```python
+class EnterpriseContactRequest(BaseModel):
+    company_name: str = Field(..., min_length=2, max_length=200)
+    contact_name: str = Field(..., min_length=2, max_length=200)
+    contact_email: EmailStr
+    phone: Optional[str] = Field(default=None, max_length=20)
+    estimated_monthly_spend_inr: Optional[float] = Field(default=None, ge=0)
+    message: Optional[str] = Field(default=None, max_length=2000)
+    use_case: Optional[str] = Field(default=None, max_length=500)
+```
+
+#### Endpoint
+
+```python
+@router.post("/enterprise-contact", status_code=202)
+@limiter.limit("3/minute")
+def submit_enterprise_contact(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: schemas.billing.EnterpriseContactRequest,
+):
+    """
+    Submit a request to be contacted about enterprise/postpaid billing.
+    [TRACK A — available immediately, no GSTIN required]
+
+    Stores the request in enterprise_contact_requests table (A5).
+    Sends an internal alert to the sales team (currently via logger;
+    wire up email/Slack in Part D or future sprint).
+    """
+    record = crud.enterprise_contact.create(db, obj_in={
+        "tenant_id": tenant_id,
+        "user_id": current_user.id,
+        "company_name": body.company_name,
+        "contact_name": body.contact_name,
+        "contact_email": body.contact_email,
+        "phone": body.phone,
+        "estimated_monthly_spend_inr": body.estimated_monthly_spend_inr,
+        "message": body.message,
+        "use_case": body.use_case,
+        "status": "pending",
+    })
+
+    # Sales team alert — replace with email/Slack webhook in next iteration
+    logger.info(
+        f"[ENTERPRISE LEAD] New enterprise contact request: "
+        f"company={body.company_name}, email={body.contact_email}, "
+        f"tenant={tenant_id}, record_id={record.id}"
+    )
+
+    return {
+        "status": "received",
+        "message": "We'll reach out within 1 business day.",
+        "reference_id": record.id,
+    }
+```
+
+#### Acceptance Criteria
+
+- [ ] Valid request → HTTP 202, row in `enterprise_contact_requests` with `status="pending"`
+- [ ] Missing required fields → HTTP 422
+- [ ] Rate limit: 4th call/minute → 429
+- [ ] `reference_id` returned so frontend can show confirmation
+- [ ] Logger outputs `[ENTERPRISE LEAD]` line with contact details (for manual monitoring until email is wired)
+
+---
+
+### TICKET C7 — Nightly Reconciliation Celery Task
+**Owner:** Backend
+**Effort:** 1 day
+**Track:** A (runs locally against our own DB; Google Cloud Billing API integration is optional enhancement)
+**Depends on:** A4 (raw_cost_inr in usage_logs), B1 (markup logic writes raw_cost_inr)
+
+#### Context
+
+Decision D9: Nightly reconciliation that compares what we charged customers against what Google/Anthropic charged us. Alerts if drift > 5%.
+
+**Why this matters:** If `raw_cost_inr` in `usage_logs` drifts from actual Google Cloud bills, we are either over-charging or under-charging customers. Over-charging is a legal and reputational risk. Under-charging means we are losing money. This task is the safety net that catches both.
+
+**Two-tier implementation:**
+
+- **Tier 1 (Track A — ship now):** Internal consistency check. Sums `usage_logs.cost_inr` (customer-facing marked-up total) and `usage_logs.raw_cost_inr` (raw AI cost). Verifies `markup = cost_inr - raw_cost_inr` equals exactly 15% of raw. Catches bugs in B1 markup logic.
+
+- **Tier 2 (Track A — adds Google Cloud API call):** Fetches actual daily spend from Google Cloud Billing API. Compares against `SUM(usage_logs.raw_cost_inr)` for the same date. Alerts if drift > 5%. This requires `GOOGLE_CLOUD_BILLING_ACCOUNT_ID` env var.
+
+Both tiers produce a daily reconciliation record in a new `reconciliation_reports` table.
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/tasks/billing_tasks.py` | **New file** — Celery task |
+| `backend/app/models/reconciliation_report.py` | **New file** — result storage |
+| `backend/app/core/config.py` | Add `GOOGLE_CLOUD_BILLING_ACCOUNT_ID` setting |
+| `backend/app/worker.py` | Register new task module |
+| `backend/app/tasks/celery_beat_schedule.py` (or `worker.py`) | Add nightly beat schedule |
+
+#### Model — `reconciliation_report.py`
+
+```python
+"""
+ReconciliationReport — daily record of billing consistency check.
+Phase 9 (D9)
+"""
+from datetime import date, datetime
+from typing import Optional
+from sqlalchemy import Integer, String, DateTime, Numeric, Date, JSON, Boolean
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base_class import Base
+
+
+class ReconciliationReport(Base):
+    __tablename__ = "reconciliation_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True, unique=True)
+
+    # What our usage_logs say
+    total_raw_cost_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+    total_markup_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+    total_charged_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+    usage_log_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Internal consistency check (Tier 1)
+    markup_pct_actual: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)  # Should be 15.00
+    markup_drift_pct: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)   # |actual - 15| / 15 * 100
+    tier1_passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Google Cloud Billing API comparison (Tier 2 — nullable if API not configured)
+    google_actual_cost_inr: Mapped[Optional[float]] = mapped_column(Numeric(12, 4), nullable=True)
+    google_drift_pct: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+    tier2_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    tier2_skipped: Mapped[bool] = mapped_column(Boolean, default=False)  # True if API not configured
+
+    # Alert status
+    alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    alert_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # Raw results for debugging
+    raw_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+```
+
+**Migration:** `backend/alembic/versions/s9p7_reconciliation_reports.py`
+- Down revision: `s9p6` (card-on-file)
+- Creates `reconciliation_reports` table
+
+#### Config addition
+
+```python
+# Google Cloud Billing API (Phase 9 — D9 Tier 2 reconciliation)
+# Leave empty to skip Tier 2 (only Tier 1 internal check runs)
+GOOGLE_CLOUD_BILLING_ACCOUNT_ID: str = Field(default="", env="GOOGLE_CLOUD_BILLING_ACCOUNT_ID")
+```
+
+#### Task — `billing_tasks.py`
+
+```python
+"""
+Billing Celery Tasks — Phase 9
+Nightly reconciliation: internal consistency (Tier 1) + Google Cloud API (Tier 2)
+"""
+from celery import shared_task
+from datetime import date, timedelta, datetime
+from decimal import Decimal
+from sqlalchemy import func
+from app.db.session import SessionLocal
+from app.core.config import settings
+from app.core.logging import get_logger
+from app.models.usage_log import UsageLog
+from app.models.reconciliation_report import ReconciliationReport
+
+logger = get_logger("tasks.billing_reconciliation")
+
+DRIFT_ALERT_THRESHOLD_PCT = 5.0   # Alert if drift > 5% (D9)
+MARKUP_EXPECTED_PCT = 15.0        # Must match MARKUP_PERCENT in cost_service.py
+
+
+@shared_task(name="nightly_billing_reconciliation", bind=True, max_retries=2)
+def nightly_billing_reconciliation(self, target_date: str = None):
+    """
+    Nightly reconciliation task. Runs at 01:00 UTC.
+    target_date: ISO date string (YYYY-MM-DD). Defaults to yesterday.
+
+    Tier 1: Internal consistency — verifies markup math in our own DB
+    Tier 2: External comparison — compares against Google Cloud Billing API
+    """
+    db = SessionLocal()
+    try:
+        check_date = (
+            date.fromisoformat(target_date)
+            if target_date
+            else date.today() - timedelta(days=1)
+        )
+
+        logger.info(f"Starting billing reconciliation for {check_date}")
+
+        # --- TIER 1: Internal consistency check ---
+        result = _run_tier1(db, check_date)
+
+        # --- TIER 2: Google Cloud API comparison (optional) ---
+        if settings.GOOGLE_CLOUD_BILLING_ACCOUNT_ID:
+            result = _run_tier2(db, check_date, result)
+        else:
+            result["tier2_skipped"] = True
+            result["tier2_passed"] = None
+            logger.info("Tier 2 skipped: GOOGLE_CLOUD_BILLING_ACCOUNT_ID not configured")
+
+        # --- Save report ---
+        _save_report(db, check_date, result)
+
+        # --- Alert if needed ---
+        if not result.get("tier1_passed") or result.get("tier2_passed") is False:
+            _send_alert(result, check_date)
+
+        logger.info(
+            f"Reconciliation complete for {check_date}: "
+            f"tier1={'PASS' if result.get('tier1_passed') else 'FAIL'}, "
+            f"tier2={'SKIP' if result.get('tier2_skipped') else ('PASS' if result.get('tier2_passed') else 'FAIL')}"
+        )
+
+    except Exception as e:
+        logger.error(f"Reconciliation task failed: {e}", exc_info=True)
+        raise self.retry(exc=e, countdown=3600)   # Retry in 1 hour
+    finally:
+        db.close()
+
+
+def _run_tier1(db, check_date: date) -> dict:
+    """
+    Tier 1: Sum usage_logs for the day. Verify:
+    - total_charged = total_raw * 1.15 (±0.01 INR rounding tolerance)
+    - markup_pct ≈ 15.00%
+    """
+    from_dt = datetime.combine(check_date, datetime.min.time())
+    to_dt = datetime.combine(check_date + timedelta(days=1), datetime.min.time())
+
+    rows = db.query(
+        func.count(UsageLog.id).label("count"),
+        func.sum(UsageLog.cost_inr).label("total_charged"),
+        func.coalesce(func.sum(UsageLog.raw_cost_inr), 0).label("total_raw"),
+        func.coalesce(func.sum(UsageLog.markup_inr), 0).label("total_markup"),
+    ).filter(
+        UsageLog.created_at >= from_dt,
+        UsageLog.created_at < to_dt,
+    ).first()
+
+    count = rows.count or 0
+    total_charged = float(rows.total_charged or 0)
+    total_raw = float(rows.total_raw or 0)
+    total_markup = float(rows.total_markup or 0)
+
+    # Calculate actual markup percentage
+    actual_markup_pct = (
+        (total_markup / total_raw * 100) if total_raw > 0 else MARKUP_EXPECTED_PCT
+    )
+    markup_drift_pct = abs(actual_markup_pct - MARKUP_EXPECTED_PCT) / MARKUP_EXPECTED_PCT * 100
+
+    # Tier 1 passes if markup within 1% of expected (handles rounding noise)
+    tier1_passed = markup_drift_pct <= 1.0 or count == 0
+
+    result = {
+        "usage_log_count": count,
+        "total_raw_cost_inr": total_raw,
+        "total_markup_inr": total_markup,
+        "total_charged_inr": total_charged,
+        "markup_pct_actual": round(actual_markup_pct, 2),
+        "markup_drift_pct": round(markup_drift_pct, 2),
+        "tier1_passed": tier1_passed,
+    }
+
+    if not tier1_passed:
+        logger.warning(
+            f"Tier 1 FAILED for {check_date}: expected markup=15%, "
+            f"actual={actual_markup_pct:.2f}%, drift={markup_drift_pct:.2f}%"
+        )
+
+    return result
+
+
+def _run_tier2(db, check_date: date, result: dict) -> dict:
+    """
+    Tier 2: Compare our raw cost against Google Cloud Billing API.
+    Requires google-cloud-billing SDK and GOOGLE_CLOUD_BILLING_ACCOUNT_ID.
+    """
+    try:
+        from google.cloud import billing_v1
+        from google.cloud.billing_v1.services.cloud_billing import CloudBillingClient
+
+        client = CloudBillingClient()
+        account_name = f"billingAccounts/{settings.GOOGLE_CLOUD_BILLING_ACCOUNT_ID}"
+
+        # Fetch costs for the day from Google Cloud Billing API
+        # NOTE: Google Cloud Billing API requires the Billing Budget API or
+        # BigQuery export for per-day granularity. The simplest approach is
+        # to use the BigQuery billing export. See:
+        # https://cloud.google.com/billing/docs/how-to/export-data-bigquery
+        #
+        # If BigQuery export is not set up, set GOOGLE_CLOUD_BILLING_ACCOUNT_ID=""
+        # and Tier 2 will be skipped automatically.
+        #
+        # Placeholder implementation — wire up BigQuery query here:
+        google_cost_usd = _query_bigquery_billing(check_date)
+
+        if google_cost_usd is None:
+            result["tier2_skipped"] = True
+            result["tier2_passed"] = None
+            return result
+
+        # Convert to INR using same exchange rate logic as cost_service
+        from app.services.cost_service import cost_service
+        google_cost_inr = google_cost_usd * float(cost_service.usd_to_inr)
+
+        our_raw_inr = result["total_raw_cost_inr"]
+        drift_pct = abs(google_cost_inr - our_raw_inr) / google_cost_inr * 100 if google_cost_inr > 0 else 0
+
+        result["google_actual_cost_inr"] = round(google_cost_inr, 4)
+        result["google_drift_pct"] = round(drift_pct, 2)
+        result["tier2_passed"] = drift_pct <= DRIFT_ALERT_THRESHOLD_PCT
+        result["tier2_skipped"] = False
+
+        if not result["tier2_passed"]:
+            logger.error(
+                f"Tier 2 FAILED for {check_date}: "
+                f"our_raw=₹{our_raw_inr:.2f}, google=₹{google_cost_inr:.2f}, "
+                f"drift={drift_pct:.2f}% (threshold: {DRIFT_ALERT_THRESHOLD_PCT}%)"
+            )
+
+    except ImportError:
+        logger.warning("google-cloud-billing not installed. Skipping Tier 2.")
+        result["tier2_skipped"] = True
+        result["tier2_passed"] = None
+    except Exception as e:
+        logger.error(f"Tier 2 reconciliation error: {e}", exc_info=True)
+        result["tier2_skipped"] = True
+        result["tier2_passed"] = None
+
+    return result
+
+
+def _query_bigquery_billing(check_date: date):
+    """
+    Query Google Cloud Billing BigQuery export for daily AI spend.
+    Returns total cost in USD for the given date, or None if not available.
+
+    Setup required:
+    1. Enable BigQuery billing export in Google Cloud Console
+    2. Set GOOGLE_CLOUD_PROJECT and BIGQUERY_BILLING_DATASET in config
+    3. Install google-cloud-bigquery
+
+    Until this is set up, returns None (Tier 2 silently skipped).
+    """
+    # TODO: Implement BigQuery query when billing export is configured
+    # Example query:
+    # SELECT SUM(cost) FROM `{project}.{dataset}.gcp_billing_export_v1_*`
+    # WHERE DATE(usage_start_time) = '{check_date}'
+    #   AND service.description LIKE '%Generative Language%'
+    return None
+
+
+def _save_report(db, check_date: date, result: dict):
+    """Save reconciliation result to DB. Upsert by date."""
+    existing = db.query(ReconciliationReport).filter(
+        ReconciliationReport.report_date == check_date
+    ).first()
+
+    if existing:
+        for k, v in result.items():
+            if hasattr(existing, k):
+                setattr(existing, k, v)
+        db.add(existing)
+    else:
+        report = ReconciliationReport(
+            report_date=check_date,
+            raw_data=result,
+            alert_sent=False,
+            **{k: v for k, v in result.items() if k != "raw_data"},
+        )
+        db.add(report)
+
+    db.commit()
+
+
+def _send_alert(result: dict, check_date: date):
+    """
+    Send alert when reconciliation fails.
+    Currently: log at ERROR level (wire to email/PagerDuty in next sprint).
+    """
+    reasons = []
+    if not result.get("tier1_passed"):
+        reasons.append(
+            f"Tier 1: markup drift {result.get('markup_drift_pct', '?')}% "
+            f"(expected ~0%, got markup_actual={result.get('markup_pct_actual', '?')}%)"
+        )
+    if result.get("tier2_passed") is False:
+        reasons.append(
+            f"Tier 2: Google cost drift {result.get('google_drift_pct', '?')}% "
+            f"(our_raw=₹{result.get('total_raw_cost_inr', '?')}, "
+            f"google=₹{result.get('google_actual_cost_inr', '?')})"
+        )
+
+    alert_msg = f"[BILLING ALERT] Reconciliation FAILED for {check_date}: {'; '.join(reasons)}"
+    logger.error(alert_msg)
+    # TODO (Part D / future): send email to finance@dokydoc.ai + Slack #billing-alerts
+
+
+@shared_task(name="run_reconciliation_for_date")
+def run_reconciliation_for_date(target_date: str):
+    """Manual trigger for a specific date. Useful for backfill and debugging."""
+    nightly_billing_reconciliation.apply(args=[], kwargs={"target_date": target_date})
+```
+
+#### Celery Beat Schedule
+
+Add to the beat schedule (wherever other periodic tasks are registered):
+
+```python
+"nightly-billing-reconciliation": {
+    "task": "nightly_billing_reconciliation",
+    "schedule": crontab(hour=1, minute=0),  # 01:00 UTC daily
+    # Yesterday's data is complete by 01:00 UTC (accounting for late usage_log writes)
+},
+```
+
+#### Worker Registration
+
+In `backend/app/worker.py`, add to the `include` list:
+```python
+include=[
+    ...,
+    "app.tasks.billing_tasks",
+]
+```
+
+#### Acceptance Criteria
+
+- [ ] `nightly_billing_reconciliation.apply()` with no usage_logs for a day → `tier1_passed=True`, `usage_log_count=0`
+- [ ] 100 usage_log rows with correct 15% markup → `tier1_passed=True`, `markup_drift_pct ≤ 1.0`
+- [ ] 1 usage_log row with wrong markup (e.g. 20%) → `tier1_passed=False`, alert logged
+- [ ] `GOOGLE_CLOUD_BILLING_ACCOUNT_ID=""` → `tier2_skipped=True`, no crash
+- [ ] `ReconciliationReport` row created for each run date (upsert on re-run)
+- [ ] Task failure (DB unavailable) → retries in 1 hour (max 2 retries)
+- [ ] Beat schedule registered: `alembic check` + Celery worker shows task in scheduled list
+- [ ] Migration `s9p7_reconciliation_reports.py` created with correct `down_revision="s9p6"`
+
+---
+
+---
+
+## PART C SUMMARY
+
+| Ticket | Title | Track | Effort | Key Files |
+|--------|-------|-------|--------|-----------|
+| C1 | Razorpay SDK Setup + Config | B | 0.25d | razorpay_service.py (new), config.py |
+| C2 | Create Order Endpoint | B | 0.5d | billing.py, crud_razorpay_order.py (new) |
+| C3 | Verify Payment Endpoint | B | 0.5d | billing.py |
+| C4 | Webhook Handler | B | 1d | billing.py, deps.py (auth bypass) |
+| C5 | Wallet Balance & Ledger Endpoints | **A** | 0.5d | billing.py |
+| C6 | Enterprise Contact Request | **A** | 0.25d | billing.py, crud_enterprise_contact.py (new) |
+| C7 | Nightly Reconciliation Celery Task | **A** | 1d | billing_tasks.py (new), reconciliation_report.py (new) |
+| **Total Part C** | | | **4.0 days** | |
+
+### Payment Flow — End to End
+
+```
+Customer clicks "Recharge ₹500"
+         │
+         ▼
+POST /billing/create-order          [C2, Track B]
+  → Razorpay API creates order
+  → Returns razorpay_order_id + key_id
+         │
+         ▼
+Frontend opens Razorpay checkout popup
+Customer pays via UPI / card / netbanking
+         │
+    ┌────┴────┐
+    │         │  (both paths are idempotent — only one credits wallet)
+    ▼         ▼
+POST           Razorpay webhook
+/billing/      POST /billing/webhook/razorpay
+verify-payment [C4, Track B]
+[C3, Track B]
+    │         │
+    └────┬────┘
+         ▼
+wallet_service.record_credit()      [B3]
+  → idempotency_key = "rp:{payment_id}"
+  → Exactly one write, regardless of which path arrives first
+         │
+         ▼
+tenant.has_recharged_ever = True    [C3 or C4]
+  → Paid models unlocked in model_selector [B2]
+         │
+         ▼
+GET /billing/wallet                 [C5, Track A]
+  → Customer sees updated balance
+```
+
+### What Flips When GSTIN Arrives
+
+Only one change: set `RAZORPAY_ENABLED=true` in `.env`. No code deploy needed. C2, C3, C4 all check this flag at runtime. The entire payment flow activates immediately.
+
+### Additional Migration Created in Part C
+
+| Migration | What | Down revision |
+|-----------|------|---------------|
+| `s9p7_reconciliation_reports.py` | `reconciliation_reports` table | s9p6 |
+
+Updated migration chain: `s9d1 → s9p1 → s9p2 → s9p3 → s9p4 → s9p5 → s9p6 → s9p7`
+
+✅ **PART C COMPLETE** — 7 tickets, 4.0 days. Track B tickets are feature-flagged and activate on GSTIN. Track A tickets ship immediately.
