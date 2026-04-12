@@ -6344,3 +6344,1446 @@ ordered by dependency — top to bottom is a safe execution sequence.
 
 *End of PHASE_9_IMPLEMENTATION_PLAN.md*
 
+
+---
+
+# Part G — Corrections & Gap Closures
+
+## Why This Part Exists
+
+A cross-layer strategic review (strategy ↔ backend ↔ frontend ↔ DB) found **7 gaps**
+where the implementation plan diverged from `PHASE_9_STRATEGY.md`, or where the
+frontend and backend made different assumptions that would break at runtime.
+
+Every ticket in this part patches exactly one identified gap. Tickets are ordered
+from most critical (P0 runtime breaks) to P1 (business logic and UX promises).
+
+| Ticket | Gap | Severity | Layer(s) |
+|--------|-----|----------|---------|
+| G1 | `WalletState` TypeScript type ≠ C5 backend schema | P0 | Frontend + Backend |
+| G2 | `LOW_BALANCE_THRESHOLD_INR = 50` vs ₹100 in strategy + DB | P1 | Frontend |
+| G3 | `PRICING_REGISTRY` missing Claude pricing (40× undercharge) | P0 | Backend |
+| G4 | `MODEL_REGISTRY` has wrong/stale model IDs | P0 | Frontend |
+| G5 | Cost Preview Modal wrongly Track B — free users need it too | P1 | Frontend |
+| G6 | No `InsufficientFundsModal` (strategy §7 Day 3 experience missing) | P1 | Frontend |
+| G7 | Low balance email + GST invoice email are unimplemented TODOs | P1 | Backend |
+
+**All Part G tickets are Track A** unless noted otherwise.
+
+---
+
+## G1 — Fix WalletState API Contract (Frontend + Backend)
+
+**Owner:** Frontend + Backend
+**Effort:** 0.5 day
+**Track:** A
+**Priority:** P0 — runtime break; wallet shows `undefined` values in UI
+**Depends on:** C5 (wallet endpoint must exist first)
+
+### Root Cause
+
+E1 (`BillingContext.tsx`) defines `WalletState` with field names that **don't match**
+what C5's `WalletBalanceResponse` actually returns. Additionally, E1 expects
+`razorpay_enabled` from the wallet endpoint, but that field lives in `/billing/config`
+(C1), a separate endpoint.
+
+### Exact Mismatches
+
+| E1 Frontend expects | C5 Backend returns | Resolution |
+|---|---|---|
+| `balance_inr` | `wallet_balance_inr` | Rename backend field to `balance_inr` |
+| `free_credit_remaining_inr` | `free_credit_remaining_inr` | ✅ match |
+| `free_credit_total_inr` | *(not returned)* | Add to backend response |
+| `has_recharged_ever` | `has_recharged_ever` | ✅ match |
+| `razorpay_enabled` | *(not returned — wrong endpoint)* | Add to backend response (read from `settings`) |
+| `currency: "INR"` | *(not returned)* | Add to backend response (constant) |
+| *(absent)* | `low_balance_alert` | Add to TypeScript type |
+| *(absent)* | `total_available_inr` | Add to TypeScript type |
+
+### Fix 1 — Backend: Update `WalletBalanceResponse` schema (C5 file)
+
+In `backend/app/schemas/billing.py`, replace the `WalletBalanceResponse` class written
+in C5 with this corrected version:
+
+```python
+class WalletBalanceResponse(BaseModel):
+    # Wallet pools
+    balance_inr: float              # RENAMED from wallet_balance_inr — matches frontend
+    free_credit_remaining_inr: float
+    free_credit_total_inr: float    # NEW — original signup bonus amount (for progress bar in E2)
+    total_available_inr: float
+
+    # Tenant flags
+    has_recharged_ever: bool
+    razorpay_enabled: bool          # NEW — read from settings; frontend gates RechargeModal on this
+
+    # Alert
+    low_balance_alert: bool         # true if total_available < low_balance_threshold
+
+    # Meta
+    currency: str = "INR"          # NEW — constant; frontend type uses literal "INR"
+```
+
+### Fix 2 — Backend: Update `/billing/wallet` endpoint (C5 file)
+
+In `backend/app/api/endpoints/billing.py`, update the `get_wallet_balance` function
+body to populate the corrected schema:
+
+```python
+@router.get("/wallet", response_model=schemas.billing.WalletBalanceResponse)
+@limiter.limit(RateLimits.BILLING)
+def get_wallet_balance(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    from app.services.wallet_service import wallet_service
+    from app.models.tenant import Tenant
+
+    balance = wallet_service.get_balance(db, tenant_id=tenant_id)
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+
+    total = balance["total_available_inr"]
+    threshold = float(getattr(billing, "low_balance_threshold", 100.0))
+
+    # free_credit_total_inr: read from tenant signup grant column (A1 adds this as
+    # server_default=100.00; existing tenants have 100.00 unless manually adjusted)
+    free_credit_total = float(
+        getattr(tenant, "free_credit_total_inr", 100.0)  # A1 may not add this yet
+        if tenant else 100.0
+    )
+    # Fallback: if column not present, use 100 (the known signup bonus from D3)
+    if free_credit_total == 0:
+        free_credit_total = 100.0
+
+    return schemas.billing.WalletBalanceResponse(
+        balance_inr=balance["wallet_balance_inr"],
+        free_credit_remaining_inr=balance["free_credit_remaining_inr"],
+        free_credit_total_inr=free_credit_total,
+        total_available_inr=total,
+        has_recharged_ever=getattr(tenant, "has_recharged_ever", False) if tenant else False,
+        razorpay_enabled=settings.RAZORPAY_ENABLED,
+        low_balance_alert=total < threshold,
+        currency="INR",
+    )
+```
+
+> **Note on `free_credit_total_inr`:** A1 migration adds `free_credit_remaining_inr`
+> (the live counter) but not a `free_credit_total_inr` snapshot. Add this column in
+> a follow-up migration `s9p7_free_credit_total.py` so the E2 progress bar can show
+> "₹X of ₹100 remaining". Until then, the `getattr(..., 100.0)` fallback is correct
+> because the signup bonus is fixed at ₹100.
+
+### Fix 3 — Frontend: Update `WalletState` type (E1 file)
+
+In `frontend/src/types/billing.ts`, replace the `WalletState` interface:
+
+```typescript
+export interface WalletState {
+  // Wallet pools
+  balance_inr: number;               // Paid wallet (renamed from wallet_balance_inr)
+  free_credit_remaining_inr: number;
+  free_credit_total_inr: number;     // For E2 progress bar
+  total_available_inr: number;
+
+  // Tenant flags
+  has_recharged_ever: boolean;
+  razorpay_enabled: boolean;         // Gates E7 RechargeModal
+
+  // Alert
+  low_balance_alert: boolean;        // Backend-computed; use this, not hardcoded threshold
+
+  // Meta
+  currency: "INR";
+}
+```
+
+### Fix 4 — Frontend: Update `BillingContext` derived values (E1 file)
+
+In `frontend/src/contexts/BillingContext.tsx`, remove the hardcoded threshold constant
+and derive `isLowBalance` directly from the backend-computed field:
+
+```typescript
+// REMOVE this line:
+// const LOW_BALANCE_THRESHOLD_INR = 50;
+
+// REPLACE the isLowBalance computation with:
+const isLowBalance =
+  !isLoading &&
+  wallet !== null &&
+  wallet !== undefined &&
+  wallet.low_balance_alert;          // Use backend-computed value — respects DB threshold
+
+// isFreeLaneActive is unchanged:
+const isFreeLaneActive =
+  wallet !== null &&
+  wallet !== undefined &&
+  wallet.free_credit_remaining_inr > 0;
+```
+
+### Acceptance Criteria
+
+- [ ] `GET /billing/wallet` response has field `balance_inr` (not `wallet_balance_inr`)
+- [ ] `GET /billing/wallet` response includes `razorpay_enabled`, `free_credit_total_inr`, `total_available_inr`, `currency`
+- [ ] `GET /billing/wallet` response includes `low_balance_alert: true` when total < `billing.low_balance_threshold`
+- [ ] TypeScript `WalletState` compiles without errors against the live API response
+- [ ] `wallet.balance_inr` renders a number (not `undefined`) in the `LowBalanceAlert` component
+- [ ] `wallet.razorpay_enabled` correctly shows/hides `RechargeModal` in E7
+- [ ] `isLowBalance` in `BillingContext` uses `wallet.low_balance_alert` (no hardcoded `50`)
+- [ ] `FreeCreditBanner` (E2) progress bar renders correctly using `free_credit_total_inr`
+
+---
+
+## G2 — Fix Low Balance Threshold Inconsistency (Frontend)
+
+**Owner:** Frontend
+**Effort:** 0.25 day
+**Track:** A
+**Priority:** P1 — alert fires at wrong threshold (₹50 vs strategy's ₹100)
+**Depends on:** G1 (must be done together — G1 removes the hardcoded threshold)
+**Note:** G1 and G2 are one commit. G2 is listed separately for traceability.
+
+### Root Cause
+
+E1 `BillingContext.tsx` has `const LOW_BALANCE_THRESHOLD_INR = 50` on line 4841 of
+the implementation plan. Strategy §3 explicitly says "When your wallet drops below
+**₹100**, we send you a friendly reminder email." The DB default (A4 migration) sets
+`low_balance_threshold = Decimal("100.00")`.
+
+Having the frontend use a different threshold than the backend creates a UX split:
+- Backend sends the low-balance email at ₹100 (correct)
+- Frontend shows the amber alert at ₹50 (wrong — user sees no in-app warning between ₹100 and ₹50)
+- The "window of silence" from ₹100 to ₹50 is where a user depletes their wallet
+  and is neither warned by email nor shown the in-app alert
+
+### Fix
+
+This is fully covered by G1 Fix 4. The `isLowBalance` derivation switches to
+`wallet.low_balance_alert` (backend-computed from the DB threshold of ₹100). The
+hardcoded `LOW_BALANCE_THRESHOLD_INR` constant is deleted. No other changes needed.
+
+### Acceptance Criteria
+
+- [ ] `LOW_BALANCE_THRESHOLD_INR` constant does not exist in the codebase after this change
+- [ ] `LowBalanceAlert` renders when `wallet.low_balance_alert === true` (not at a hardcoded value)
+- [ ] If ops changes a tenant's `low_balance_threshold` in the DB to ₹200, the frontend alert
+  reflects that on next wallet refresh (no code change needed)
+
+---
+
+## G3 — Add Claude Pricing to `PRICING_REGISTRY` (Backend)
+
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** A
+**Priority:** P0 — every Claude analysis call undercharges by ~40× (revenue leak)
+**Depends on:** B0 (PRICING_REGISTRY must exist first)
+**File:** `backend/app/services/cost_service.py`
+
+### Root Cause
+
+B0 creates `PRICING_REGISTRY` with four Gemini entries only. B2 `model_selector.py`
+correctly lists `claude-sonnet-4-6` and `claude-haiku-4-5` as supported paid models.
+
+When a paid user picks Claude and an analysis runs:
+```python
+# In cost_service.py — B0 as written:
+def get_pricing_for_model(model_id: str) -> PricingTier:
+    return PRICING_REGISTRY.get(model_id, GEMINI_25_FLASH_PRICING)
+#                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+#   "claude-sonnet-4-6" not in registry → falls back to Gemini 2.5 Flash pricing
+#   Claude Sonnet 4.6: $3.00/M input vs Gemini 2.5 Flash: $0.075/M input = 40× too cheap
+```
+
+The user receives Claude quality at Gemini price. DokyDoc absorbs the full delta.
+
+### Step 1 — Add Claude pricing constants
+
+Add after `GEMINI_3_FLASH_LITE_PRICING` in `cost_service.py` (after B0 section):
+
+```python
+# ============================================================================
+# CLAUDE SONNET 4.6 PRICING — Deep reasoning, paid lane
+# Source: console.anthropic.com/settings/billing (verify at implementation time)
+# ============================================================================
+CLAUDE_SONNET_4_6_PRICING = PricingTier(
+    model="claude-sonnet-4-6",
+    input_per_1m_usd=Decimal("3.00"),
+    output_per_1m_usd=Decimal("15.00"),
+    thinking_per_1m_usd=Decimal("0.00"),    # Extended thinking priced separately if used
+    cached_per_1m_usd=Decimal("0.30"),      # Prompt cache reads
+    search_per_1k_usd=Decimal("0.00"),      # Claude doesn't have search grounding
+    description="Claude Sonnet 4.6 — paid lane, deep reasoning"
+)
+
+# ============================================================================
+# CLAUDE HAIKU 4.5 PRICING — Fast, economical, paid lane
+# Source: console.anthropic.com/settings/billing (verify at implementation time)
+# ============================================================================
+CLAUDE_HAIKU_4_5_PRICING = PricingTier(
+    model="claude-haiku-4-5",
+    input_per_1m_usd=Decimal("0.80"),
+    output_per_1m_usd=Decimal("4.00"),
+    thinking_per_1m_usd=Decimal("0.00"),
+    cached_per_1m_usd=Decimal("0.08"),
+    search_per_1k_usd=Decimal("0.00"),
+    description="Claude Haiku 4.5 — paid lane, fast and economical"
+)
+```
+
+> **IMPORTANT:** Verify both rate tables against `console.anthropic.com/settings/billing`
+> at the time of implementation. Anthropic updates pricing periodically. The values above
+> are correct as of April 2026 but must be confirmed before going live. Wrong rates
+> either overcharge customers (churn) or undercharge (revenue leak).
+
+### Step 2 — Add Claude entries to `PRICING_REGISTRY`
+
+Update `PRICING_REGISTRY` in `cost_service.py`:
+
+```python
+PRICING_REGISTRY: dict[str, PricingTier] = {
+    # Gemini — legacy
+    "gemini-1.5-flash":    GEMINI_15_FLASH_PRICING,
+    "gemini-2.5-flash":    GEMINI_25_FLASH_PRICING,   # Deprecated June 17, 2026 — keep for historical rows
+    # Gemini — Phase 9 active
+    "gemini-3-flash":      GEMINI_3_FLASH_PRICING,
+    "gemini-3-flash-lite": GEMINI_3_FLASH_LITE_PRICING,
+    # Claude — Phase 9 active (G3 addition)
+    "claude-sonnet-4-6":   CLAUDE_SONNET_4_6_PRICING,
+    "claude-haiku-4-5":    CLAUDE_HAIKU_4_5_PRICING,
+}
+```
+
+### Step 3 — Update `SUPPORTED_MODELS` in `model_selector.py` to include pricing hint
+
+Optionally, annotate `SUPPORTED_MODELS` in `model_selector.py` with an
+`approx_input_per_1m_usd` field so model routing tests can assert rough cost ratios.
+This is documentation-only and doesn't affect logic. Skip if team prefers minimal changes.
+
+### Why NOT add a `PricingTier` for Claude thinking tokens
+
+Claude 3.5+ models support extended thinking (similar to Gemini thinking tokens).
+However, DokyDoc does not currently enable extended thinking in Anthropic API calls.
+Set `thinking_per_1m_usd=Decimal("0.00")` in both Claude entries and add a comment:
+
+```python
+# thinking_per_1m_usd=0 because DokyDoc does not enable extended thinking at v1.
+# When/if extended thinking is enabled for Claude, update this and re-test billing.
+```
+
+### Acceptance Criteria
+
+- [ ] `get_pricing_for_model("claude-sonnet-4-6")` returns `CLAUDE_SONNET_4_6_PRICING` (not Gemini fallback)
+- [ ] `get_pricing_for_model("claude-haiku-4-5")` returns `CLAUDE_HAIKU_4_5_PRICING`
+- [ ] `calculate_cost_from_actual_tokens(1000, 500, model="claude-sonnet-4-6")` charges
+  ~40× more than the same call with `model="gemini-2.5-flash"` (rough sanity check)
+- [ ] `calculate_cost_from_actual_tokens(1000, 500, model="claude-haiku-4-5")` charges
+  between Gemini 3 Flash-Lite and Claude Sonnet 4.6 (haiku is mid-price)
+- [ ] `PRICING_REGISTRY` has exactly 6 entries (no entries removed — historical rows safe)
+- [ ] Unit test: `assert CLAUDE_SONNET_4_6_PRICING.input_per_1m_usd > GEMINI_3_FLASH_PRICING.input_per_1m_usd`
+- [ ] `pytest backend/tests/` — all existing tests pass
+
+---
+
+## G4 — Fix `MODEL_REGISTRY` Model IDs (Frontend)
+
+**Owner:** Frontend
+**Effort:** 0.25 day
+**Track:** A
+**Priority:** P0 — users select a model, wrong ID sent to backend, wrong model runs silently
+**Depends on:** Nothing (pure frontend fix)
+**File:** `frontend/src/constants/models.ts`
+
+### Root Cause
+
+E4 wrote `MODEL_REGISTRY` in `frontend/src/constants/models.ts` with model IDs that
+don't match the backend `SUPPORTED_MODELS` in `model_selector.py`. These IDs flow
+into every analysis API call as the `model_id` request field.
+
+| E4 (wrong) | B2 backend expects | Strategy §5 specifies |
+|---|---|---|
+| `"gemini-2.5-flash"` | `"gemini-3-flash"` | `"gemini-3-flash"` |
+| `"gemini-2.5-pro"` | *(not supported)* | *(not in strategy)* |
+| `"claude-3-7-sonnet"` | `"claude-sonnet-4-6"` | `"claude-sonnet-4-6"` |
+| *(missing)* | `"claude-haiku-4-5"` | `"claude-haiku-4-5"` |
+
+When an unsupported `model_id` reaches `ModelSelector.resolve()` in B2:
+```python
+if requested_model and requested_model in SUPPORTED_MODELS:
+    model = requested_model
+else:
+    model = tenant_default   # silent fallback — user picked Claude, gets Gemini
+```
+No error. No log entry at WARNING level. The user thinks their document ran on
+Claude Sonnet; it actually ran on `gemini-3-flash-lite`. The receipt shows the
+wrong model name. Trust destroyed silently.
+
+### Fix — Replace `MODEL_REGISTRY` in `frontend/src/constants/models.ts`
+
+Replace the entire `MODEL_REGISTRY` array (and the stale `ModelMeta` interface if
+present) with the following corrected version:
+
+```typescript
+// frontend/src/constants/models.ts
+
+export interface ModelMeta {
+  id: string;
+  display_name: string;
+  provider: "google" | "anthropic";
+  tier: "free" | "paid";
+  context_window: number;          // tokens
+  description: string;
+  est_cost_per_page_inr: number;   // rough estimate for cost preview UI (E5)
+}
+
+// Single source of truth for model IDs used across the frontend.
+// MUST stay in sync with backend/app/services/ai/model_selector.py SUPPORTED_MODELS.
+// When adding a new model: add here AND in SUPPORTED_MODELS AND in PRICING_REGISTRY.
+export const MODEL_REGISTRY: ModelMeta[] = [
+  {
+    id: "gemini-3-flash-lite",        // Free lane — do not change this ID
+    display_name: "Gemini 3 Flash-Lite",
+    provider: "google",
+    tier: "free",
+    context_window: 128_000,
+    description: "Fast & free — good for routine document checks",
+    est_cost_per_page_inr: 0.0,       // Deducted from free credit pool
+  },
+  {
+    id: "gemini-3-flash",             // FIXED: was "gemini-2.5-flash"
+    display_name: "Gemini 3 Flash",
+    provider: "google",
+    tier: "paid",
+    context_window: 1_000_000,
+    description: "Balanced speed & depth — best default for most documents",
+    est_cost_per_page_inr: 0.05,
+  },
+  {
+    id: "claude-sonnet-4-6",          // FIXED: was "claude-3-7-sonnet"
+    display_name: "Claude Sonnet 4.6",
+    provider: "anthropic",
+    tier: "paid",
+    context_window: 200_000,
+    description: "Deep reasoning — best for compliance, legal, and nuanced analysis",
+    est_cost_per_page_inr: 0.45,      // Updated to reflect Claude's higher price vs Gemini
+  },
+  {
+    id: "claude-haiku-4-5",           // NEW: was missing entirely
+    display_name: "Claude Haiku 4.5",
+    provider: "anthropic",
+    tier: "paid",
+    context_window: 200_000,
+    description: "Fast Anthropic model — good balance of quality and cost",
+    est_cost_per_page_inr: 0.12,
+  },
+  // REMOVED: "gemini-2.5-pro" — not in strategy, not in backend SUPPORTED_MODELS
+];
+
+export const FREE_MODEL_ID = "gemini-3-flash-lite";
+
+// Convenience: paid models only (shown in ModelSelector dropdown for paid users)
+export const PAID_MODELS = MODEL_REGISTRY.filter((m) => m.tier === "paid");
+```
+
+> **`est_cost_per_page_inr` note:** These are rough estimates for the cost preview UI
+> only — they are **not** the billing source of truth. Actual billing uses backend
+> `PRICING_REGISTRY` token rates. The estimates should be updated if the backend
+> pricing constants change significantly.
+
+### Validation Comment to Add
+
+Add this comment at the top of the file as a permanent guard:
+
+```typescript
+/**
+ * MODEL_REGISTRY — Frontend model definitions.
+ *
+ * ⚠️  SYNC REQUIREMENT:
+ * The `id` field of each entry MUST exactly match the keys in:
+ *   backend/app/services/ai/model_selector.py  → SUPPORTED_MODELS
+ *   backend/app/services/cost_service.py       → PRICING_REGISTRY
+ *
+ * If you add a model here, add it to both backend files too.
+ * If you change an ID here, change it in both backend files too.
+ * Stale IDs cause silent model fallback (user gets Gemini when they picked Claude).
+ */
+```
+
+### Acceptance Criteria
+
+- [ ] `MODEL_REGISTRY` has exactly 4 entries: `gemini-3-flash-lite`, `gemini-3-flash`,
+  `claude-sonnet-4-6`, `claude-haiku-4-5`
+- [ ] `"gemini-2.5-flash"` does not appear anywhere in `constants/models.ts`
+- [ ] `"gemini-2.5-pro"` does not appear anywhere in `constants/models.ts`
+- [ ] `"claude-3-7-sonnet"` does not appear anywhere in `constants/models.ts`
+- [ ] `PAID_MODELS` exports 3 entries (all paid models)
+- [ ] `FREE_MODEL_ID === "gemini-3-flash-lite"` (unchanged)
+- [ ] `ModelSelector` (E4) dropdown renders 3 paid options: Gemini 3 Flash,
+  Claude Sonnet 4.6, Claude Haiku 4.5
+- [ ] Sending `model_id: "gemini-3-flash"` to the backend → backend resolves it
+  correctly (not `tenant.default_model` fallback)
+
+---
+
+## G5 — Move Cost Preview Modal to Track A (Frontend)
+
+**Owner:** Frontend
+**Effort:** 0.5 day
+**Track:** A (was incorrectly Track B)
+**Priority:** P1 — free users have no visibility into costs before analysis runs
+**Depends on:** G1 (correct `WalletState` types), E1 (`BillingContext`)
+**File:** `frontend/src/components/billing/CostPreviewModal.tsx`
+
+### Root Cause
+
+E5 tagged `CostPreviewModal` as Track B (only show when `razorpay_enabled`).
+
+Strategy §7 Day 1 explicitly describes a free-lane user on their **very first document**
+seeing a cost preview:
+
+> *"Before analysis starts, a small modal appears: This document will use **Gemini 3
+> Flash-Lite (free lane)**. Estimated cost: **₹2.40**. Wallet balance after: ₹97.60.
+> [Cancel] [Continue]"*
+
+This experience has zero dependency on Razorpay. It only requires:
+- A wallet balance (Track A — C5 endpoint)
+- A model name (known at the time the user initiates analysis)
+- A page count (from the document metadata already in the browser)
+
+Hiding the cost preview behind GSTIN means every free user runs analyses without
+knowing the cost — breaking the core trust promise of the strategy.
+
+### What Changes
+
+The component logic changes in two ways:
+
+1. **Track flag:** `CostPreviewModal` is Track A. It shows for ALL users
+   (free and paid) before every analysis.
+
+2. **Free-lane variant:** When `isFreeLaneActive === true`, the modal renders
+   differently — it shows the free model, deducts from free credit pool display,
+   and has no "switch model" affordance (they can't switch on the free lane).
+
+### Updated `CostPreviewModal` (replaces E5 entirely)
+
+```typescript
+// frontend/src/components/billing/CostPreviewModal.tsx
+// TRACK A — shows for free AND paid users before every analysis
+
+import { useBillingContext } from "@/contexts/BillingContext";
+import { MODEL_REGISTRY, FREE_MODEL_ID } from "@/constants/models";
+
+interface CostPreviewModalProps {
+  isOpen: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  modelId: string;                 // Resolved model ID (from ModelSelector or FREE_MODEL_ID)
+  estimatedPages: number;
+  onModelChange?: (modelId: string) => void;  // Only shown for paid users
+}
+
+export function CostPreviewModal({
+  isOpen, onConfirm, onCancel, modelId, estimatedPages, onModelChange,
+}: CostPreviewModalProps) {
+  const { wallet, isFreeLaneActive } = useBillingContext();
+
+  if (!isOpen || !wallet) return null;
+
+  const model = MODEL_REGISTRY.find((m) => m.id === modelId);
+  const estCost = model ? model.est_cost_per_page_inr * estimatedPages : 0;
+
+  // For free lane: deduct from free_credit_remaining_inr
+  // For paid lane: deduct from balance_inr
+  const currentPool = isFreeLaneActive
+    ? wallet.free_credit_remaining_inr
+    : wallet.balance_inr;
+  const poolLabel = isFreeLaneActive ? "Free credit" : "Wallet balance";
+  const balanceAfter = currentPool - estCost;
+  const canAfford = balanceAfter >= 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+
+        <h2 className="text-lg font-semibold text-gray-900">
+          Estimated Analysis Cost
+        </h2>
+
+        {/* Free lane banner */}
+        {isFreeLaneActive && (
+          <div className="mt-3 flex items-center gap-2 rounded-md bg-green-50 px-3 py-2 text-xs text-green-700">
+            <span>✓</span>
+            <span>
+              This analysis uses <strong>free credit</strong> —
+              no charge to your paid wallet.
+            </span>
+          </div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          {/* Model */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Model</span>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">{model?.display_name ?? modelId}</span>
+              {isFreeLaneActive && (
+                <span className="rounded-full bg-green-100 px-1.5 py-0.5 text-xs text-green-700">
+                  free lane
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Pages */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Document pages</span>
+            <span className="font-medium">{estimatedPages}</span>
+          </div>
+
+          {/* Estimated cost */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Estimated cost</span>
+            <span className="font-semibold">
+              {isFreeLaneActive ? "Free" : `~₹${estCost.toFixed(2)}`}
+            </span>
+          </div>
+
+          <hr className="border-gray-100" />
+
+          {/* Pool balance */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">{poolLabel}</span>
+            <span>₹{currentPool.toFixed(2)}</span>
+          </div>
+
+          {/* Balance after */}
+          <div className="flex items-center justify-between text-sm font-semibold">
+            <span className="text-gray-700">After this analysis</span>
+            <span className={balanceAfter < 0 ? "text-red-600" : "text-green-700"}>
+              {balanceAfter < 0
+                ? `−₹${Math.abs(balanceAfter).toFixed(2)} (insufficient)`
+                : `₹${balanceAfter.toFixed(2)}`}
+            </span>
+          </div>
+        </div>
+
+        {/* Insufficient balance */}
+        {!canAfford && (
+          <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+            {isFreeLaneActive
+              ? "Not enough free credit for this analysis. Recharge to continue."
+              : "Insufficient wallet balance. Please add funds or choose a cheaper model."}
+          </p>
+        )}
+
+        {/* Transparency note — only for paid users */}
+        {!isFreeLaneActive && (
+          <p className="mt-3 text-xs text-gray-400">
+            Includes 15% platform fee. Actual cost may vary ±20% based on token density.
+          </p>
+        )}
+
+        {/* Actions */}
+        <div className="mt-5 flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="rounded-md px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!canAfford}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Confirm & Analyse
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### Integration Update
+
+In the analysis form, `CostPreviewModal` is now **always mounted** (Track A). The
+model is resolved before opening the modal:
+
+```typescript
+// In analysis form — existing code, minimal change:
+import { FREE_MODEL_ID } from "@/constants/models";
+const { isFreeLaneActive } = useBillingContext();
+
+// Resolve the model to use:
+const resolvedModel = isFreeLaneActive ? FREE_MODEL_ID : selectedModel;
+
+// Open preview before analysis (for both free and paid users):
+const handleAnalyseClick = () => {
+  setPreviewOpen(true);   // Always open the preview
+};
+```
+
+### Update Part F Track Table
+
+In the F2 ticket-to-track mapping table, update E5's row:
+
+| Was | Now |
+|---|---|
+| E5 — Track B (after GSTIN) | E5 — **Track A** (ships now) |
+
+### Acceptance Criteria
+
+- [ ] Free-lane user on Day 1 sees cost preview with "free credit" green banner
+- [ ] Free-lane preview shows `balance_after = free_credit_remaining_inr - estCost`
+- [ ] Paid user sees cost preview with wallet balance and 15% markup note
+- [ ] Paid user preview shows `balance_after = balance_inr - estCost`
+- [ ] Confirm button disabled when estimated cost > available pool
+- [ ] Free-lane user has NO model change affordance in the modal
+- [ ] Component renders when `razorpay_enabled === false` (Track A)
+- [ ] `onCancel` closes without running analysis in both lanes
+
+---
+
+## G6 — Add `InsufficientFundsModal` (Frontend)
+
+**Owner:** Frontend
+**Effort:** 0.5 day
+**Track:** A
+**Priority:** P1 — without this, a user with an empty wallet sees a raw API error
+**Depends on:** G1 (correct wallet types), E7 (RechargeModal must exist to embed)
+**File:** `frontend/src/components/billing/InsufficientFundsModal.tsx` (new)
+
+### Root Cause
+
+Strategy §7 Day 3 describes the experience when a user tries to run an analysis
+with insufficient balance:
+
+> *"A friendly modal appears: Your wallet has ₹5 left — not enough for this
+> document (~₹2.40). Recharge to continue. [Recharge ₹100] [Recharge ₹500]
+> [Custom amount]"*
+
+The current plan has:
+- `LowBalanceAlert` (E3) — a **passive banner** that shows when balance is low
+- No component that intercepts a `402 Payment Required` from the analysis API
+
+When `billing_enforcement_service.check_can_afford_analysis()` returns false,
+the backend raises an HTTP 402. Without a frontend handler, React Query surfaces
+a generic error. The user has no CTA, no context, and no way to fix it inline.
+
+This modal is the **retention moment** — it's the difference between "the product
+stopped working" and "I need to add ₹100, which I'll do right now."
+
+### Implementation
+
+```typescript
+// frontend/src/components/billing/InsufficientFundsModal.tsx
+import { useState } from "react";
+import { useBillingContext } from "@/contexts/BillingContext";
+import { RechargeModal } from "./RechargeModal";
+
+interface InsufficientFundsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onFundsAdded: () => void;       // Callback to retry the failed analysis
+  estimatedCostInr?: number;      // From cost preview or error response body
+  documentName?: string;          // For personalised copy: "Analyzing 'ACME PRD'"
+}
+
+const QUICK_RECHARGE_AMOUNTS = [100, 500, 1_000];
+
+export function InsufficientFundsModal({
+  isOpen, onClose, onFundsAdded, estimatedCostInr, documentName,
+}: InsufficientFundsModalProps) {
+  const { wallet, refetch } = useBillingContext();
+  const [showRechargeModal, setShowRechargeModal] = useState(false);
+  const [suggestedAmount, setSuggestedAmount] = useState<number>(500);
+
+  if (!isOpen) return null;
+
+  const shortfall = estimatedCostInr && wallet
+    ? Math.max(0, estimatedCostInr - (wallet.balance_inr + wallet.free_credit_remaining_inr))
+    : null;
+
+  // Suggest the smallest preset that covers the shortfall + ₹50 buffer
+  const recommendedAmount = shortfall
+    ? QUICK_RECHARGE_AMOUNTS.find((a) => a >= shortfall + 50) ?? 1_000
+    : 500;
+
+  const handleQuickRecharge = (amount: number) => {
+    setSuggestedAmount(amount);
+    setShowRechargeModal(true);
+  };
+
+  const handleRechargeSuccess = (amountAdded: number) => {
+    setShowRechargeModal(false);
+    refetch();          // Update wallet balance in context
+    onFundsAdded();     // Retry the analysis
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl">
+
+          {/* Icon */}
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="#d97706" strokeWidth="2">
+              <path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            </svg>
+          </div>
+
+          {/* Heading */}
+          <h2 className="text-center text-lg font-semibold text-gray-900">
+            Insufficient Wallet Balance
+          </h2>
+
+          {/* Body */}
+          <div className="mt-3 text-center text-sm text-gray-500">
+            {documentName && (
+              <p className="mb-1 font-medium text-gray-700">
+                "{documentName}"
+              </p>
+            )}
+            {wallet && (
+              <p>
+                Your wallet has{" "}
+                <strong className="text-gray-900">
+                  ₹{(wallet.balance_inr + wallet.free_credit_remaining_inr).toFixed(2)}
+                </strong>{" "}
+                available
+                {estimatedCostInr && (
+                  <> — this analysis needs ~<strong>₹{estimatedCostInr.toFixed(2)}</strong></>
+                )}
+                .
+              </p>
+            )}
+            <p className="mt-1">Add funds to continue.</p>
+          </div>
+
+          {/* Quick recharge buttons */}
+          <div className="mt-5 space-y-2">
+            {QUICK_RECHARGE_AMOUNTS.map((amount) => (
+              <button
+                key={amount}
+                onClick={() => handleQuickRecharge(amount)}
+                className={`w-full rounded-lg border py-2.5 text-sm font-semibold transition-colors ${
+                  amount === recommendedAmount
+                    ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700"
+                    : "border-gray-200 text-gray-700 hover:border-blue-400 hover:bg-blue-50"
+                }`}
+              >
+                Add ₹{amount.toLocaleString("en-IN")}
+                {amount === recommendedAmount && (
+                  <span className="ml-2 text-xs opacity-80">Recommended</span>
+                )}
+              </button>
+            ))}
+            <button
+              onClick={() => handleQuickRecharge(0)}
+              className="w-full rounded-lg border border-gray-200 py-2 text-sm text-gray-500 hover:border-gray-300"
+            >
+              Custom amount
+            </button>
+          </div>
+
+          {/* Dismiss */}
+          <button
+            onClick={onClose}
+            className="mt-4 w-full text-center text-xs text-gray-400 hover:text-gray-600"
+          >
+            Cancel analysis
+          </button>
+        </div>
+      </div>
+
+      {/* Inline RechargeModal — opens on top of InsufficientFundsModal */}
+      <RechargeModal
+        isOpen={showRechargeModal}
+        onClose={() => setShowRechargeModal(false)}
+        onSuccess={handleRechargeSuccess}
+      />
+    </>
+  );
+}
+```
+
+### Global 402 Handler in `billingApi`
+
+To avoid duplicating the 402 handler in every page/feature that calls an analysis
+endpoint, add an Axios interceptor in the API client:
+
+```typescript
+// frontend/src/api/client.ts — additive: add 402 interceptor
+// (This is the existing Axios instance — add the interceptor, do not re-create)
+
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 402) {
+      // Emit a custom event that the InsufficientFundsModal listens to
+      // This avoids prop-drilling onError through every analysis component
+      window.dispatchEvent(
+        new CustomEvent("dokydoc:insufficient_funds", {
+          detail: {
+            estimatedCostInr: error.response.data?.required_inr ?? null,
+            documentName: error.response.data?.document_name ?? null,
+          },
+        })
+      );
+      // Still reject — callers can handle it too if they want
+      return Promise.reject(error);
+    }
+    return Promise.reject(error);
+  }
+);
+```
+
+### `InsufficientFundsProvider` — global listener
+
+Wrap the authenticated layout with a provider that listens for the custom event:
+
+```typescript
+// frontend/src/components/billing/InsufficientFundsProvider.tsx  (new)
+import { useState, useEffect } from "react";
+import { InsufficientFundsModal } from "./InsufficientFundsModal";
+
+export function InsufficientFundsProvider({ children }: { children: React.ReactNode }) {
+  const [modalState, setModalState] = useState<{
+    open: boolean;
+    estimatedCostInr?: number;
+    documentName?: string;
+    retryFn?: () => void;
+  }>({ open: false });
+
+  useEffect(() => {
+    const handler = (e: CustomEvent) => {
+      setModalState({
+        open: true,
+        estimatedCostInr: e.detail.estimatedCostInr,
+        documentName: e.detail.documentName,
+        retryFn: undefined,   // No automatic retry — user re-initiates
+      });
+    };
+    window.addEventListener("dokydoc:insufficient_funds", handler as EventListener);
+    return () => window.removeEventListener("dokydoc:insufficient_funds", handler as EventListener);
+  }, []);
+
+  return (
+    <>
+      {children}
+      <InsufficientFundsModal
+        isOpen={modalState.open}
+        estimatedCostInr={modalState.estimatedCostInr}
+        documentName={modalState.documentName}
+        onClose={() => setModalState({ open: false })}
+        onFundsAdded={() => setModalState({ open: false })}
+      />
+    </>
+  );
+}
+```
+
+Mount in `App.tsx`:
+```typescript
+// App.tsx — add inside authenticated routes wrapper (alongside BillingProvider):
+<BillingProvider>
+  <InsufficientFundsProvider>
+    {/* existing authenticated children */}
+  </InsufficientFundsProvider>
+</BillingProvider>
+```
+
+### Backend: Ensure 402 response body has context
+
+In `billing_enforcement_service.py`, when raising the insufficient funds error,
+include structured data the modal can use:
+
+```python
+# In check_can_afford_analysis() — update the HTTPException:
+raise HTTPException(
+    status_code=402,
+    detail={
+        "error": "insufficient_balance",
+        "message": "Insufficient wallet balance for this analysis.",
+        "available_inr": float(combined_balance),
+        "required_inr": float(estimated_cost),
+        "shortfall_inr": float(max(0, estimated_cost - combined_balance)),
+    }
+)
+```
+
+### Acceptance Criteria
+
+- [ ] When analysis API returns 402, `InsufficientFundsModal` opens automatically
+  (no page navigation, no toast — the modal)
+- [ ] Modal shows current wallet balance and estimated cost
+- [ ] Modal shows recommended recharge amount (smallest preset covering shortfall + buffer)
+- [ ] Recommended amount button is highlighted in blue
+- [ ] "Add ₹X" button opens `RechargeModal` on top without closing `InsufficientFundsModal`
+- [ ] After successful recharge: wallet updates, `InsufficientFundsModal` closes
+- [ ] "Cancel analysis" closes both modals
+- [ ] When `razorpay_enabled === false`: `InsufficientFundsModal` still opens but
+  the recharge buttons are disabled with message "Recharge temporarily unavailable"
+- [ ] 402 from ANY analysis endpoint triggers the modal (interceptor covers all calls)
+- [ ] 402 response body `required_inr` is used for shortfall calculation when present
+
+---
+
+## G7 — Implement Email Notifications (Low Balance + GST Invoice)
+
+**Owner:** Backend
+**Effort:** 1 day
+**Track:** A (low balance email) + B (GST invoice — needs Razorpay payment data)
+**Priority:** P1 — retention (low balance) + compliance (GST invoice)
+**Depends on:** B4 (low balance hook exists as TODO), C3/C4 (payment hooks exist as TODO)
+
+### Root Cause
+
+Two email sends are documented in the strategy but left as TODO comments in the plan:
+
+**1. Low balance reminder email** — Strategy §3:
+> *"When your wallet drops below ₹100, we send you a friendly reminder email."*
+
+B4 `_maybe_send_low_balance_alert()` calls `logger.info()` and sets
+`billing.last_low_balance_alert_at` but the strategy promise of an actual email
+to the customer is never fulfilled.
+
+**2. GST-compliant invoice email** — Strategy §6 step 6:
+> *"Customer gets a GST-compliant invoice via email."*
+
+C3 verify-payment and C4 webhook both credit the wallet and return a response,
+but no email is sent. The customer paid real money and received no receipt in
+their inbox.
+
+### Design Decision: Sync vs Async
+
+Both emails are sent **synchronously** in the request path for v1:
+
+| Email | Where sent | Why sync |
+|---|---|---|
+| Low balance | `_maybe_send_low_balance_alert()` | Already in a deduct transaction; fast SMTP call adds <200ms acceptable |
+| Payment receipt | C3 `verify_payment()` + C4 webhook | User is waiting for confirmation; the email IS the confirmation |
+
+If email latency becomes an issue in production, move both to Celery tasks.
+For v1, keep it simple.
+
+### Step 1 — Create `email_service.py`
+
+**File:** `backend/app/services/email_service.py` (new)
+
+```python
+"""
+Email Service — Phase 9 (G7)
+
+Thin wrapper over Python's smtplib (or a third-party SMTP service).
+Uses settings from config.py. Designed to be swapped for Sendgrid / SES later.
+
+Two email types at v1:
+  - send_low_balance_email()   → triggered by B4 billing enforcement
+  - send_payment_receipt()     → triggered by C3 verify-payment + C4 webhook
+"""
+import smtplib
+import textwrap
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from decimal import Decimal
+from datetime import datetime
+
+from app.core.config import settings
+from app.core.logging import get_logger
+
+logger = get_logger("services.email_service")
+
+
+def _build_smtp_connection():
+    """Returns a configured smtplib connection. Raises on failure."""
+    if settings.SMTP_USE_TLS:
+        conn = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10)
+    else:
+        conn = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10)
+        conn.starttls()
+    conn.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+    return conn
+
+
+def _send(to_email: str, subject: str, html_body: str) -> bool:
+    """
+    Send a single email. Returns True on success, False on failure.
+    Never raises — billing must not fail because email is down.
+    """
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"DokyDoc Billing <{settings.EMAIL_FROM}>"
+        msg["To"] = to_email
+
+        # Plain-text fallback (strip tags crudely — sufficient for transactional email)
+        plain = html_body.replace("<br>", "\n").replace("</p>", "\n\n")
+        import re
+        plain = re.sub(r"<[^>]+>", "", plain)
+
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+
+        conn = _build_smtp_connection()
+        conn.sendmail(settings.EMAIL_FROM, [to_email], msg.as_string())
+        conn.quit()
+
+        logger.info(f"Email sent to {to_email}: {subject}")
+        return True
+
+    except Exception as exc:
+        logger.error(f"Email send failed to {to_email}: {exc}")
+        return False
+
+
+def send_low_balance_email(
+    to_email: str,
+    tenant_name: str,
+    current_balance_inr: float,
+    threshold_inr: float,
+) -> bool:
+    """
+    Sent when combined wallet balance drops below low_balance_threshold.
+    Strategy §3: "we send you a friendly reminder email."
+    """
+    subject = f"Your DokyDoc wallet balance is running low — ₹{current_balance_inr:.2f} remaining"
+
+    html = f"""
+    <p>Hi {tenant_name} team,</p>
+
+    <p>Your DokyDoc wallet balance has dropped below ₹{threshold_inr:.0f}.</p>
+
+    <p>
+      <strong>Current balance: ₹{current_balance_inr:.2f}</strong><br>
+      Alert threshold: ₹{threshold_inr:.0f}
+    </p>
+
+    <p>
+      To keep your analyses running without interruption, please add funds to your wallet.
+      You can recharge from the
+      <a href="{settings.APP_BASE_URL}/settings/billing">Billing page</a>.
+    </p>
+
+    <p>
+      Recharge options: ₹100 / ₹200 / ₹500 / ₹1,000 / ₹2,500 / ₹5,000 (or any custom amount).<br>
+      Payments via UPI, Google Pay, cards, and net banking.
+    </p>
+
+    <p style="color:#6b7280;font-size:12px;">
+      DokyDoc charges a flat 15% platform fee on top of raw AI costs.
+      Your balance reflects exactly what is available for analysis.
+    </p>
+
+    <p>— DokyDoc Billing</p>
+    """
+
+    return _send(to_email, subject, textwrap.dedent(html))
+
+
+def send_payment_receipt(
+    to_email: str,
+    tenant_name: str,
+    amount_inr: float,
+    payment_id: str,
+    order_id: str,
+    new_balance_inr: float,
+    paid_at: datetime,
+) -> bool:
+    """
+    Sent after a successful Razorpay payment.
+    Strategy §6: "Customer gets a GST-compliant invoice via email."
+
+    Note on GST compliance: Full GST invoice (with GSTIN, HSN code, tax breakdowns)
+    requires our own GSTIN to be registered. Until GSTIN is available, this email
+    is a payment confirmation only. Once GSTIN is registered, add tax fields below.
+    Mark as TODO in the code until then.
+    """
+    subject = f"Payment confirmed — ₹{amount_inr:.2f} added to your DokyDoc wallet"
+
+    paid_at_str = paid_at.strftime("%d %B %Y, %I:%M %p IST")
+
+    # TODO (after GSTIN): Add GST fields — GSTIN, HSN code, IGST/CGST/SGST split
+    # For now: this is a payment confirmation (not a tax invoice)
+    html = f"""
+    <p>Hi {tenant_name} team,</p>
+
+    <p>Your payment has been received and your wallet has been credited.</p>
+
+    <table style="border-collapse:collapse;width:100%;max-width:480px">
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Amount paid</td>
+        <td style="padding:8px 0;font-weight:600">₹{amount_inr:.2f}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Payment date</td>
+        <td style="padding:8px 0">{paid_at_str}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Payment ID</td>
+        <td style="padding:8px 0;font-family:monospace;font-size:12px">{payment_id}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Order ID</td>
+        <td style="padding:8px 0;font-family:monospace;font-size:12px">{order_id}</td>
+      </tr>
+      <tr style="border-top:1px solid #e5e7eb">
+        <td style="padding:12px 0 8px;font-weight:600">New wallet balance</td>
+        <td style="padding:12px 0 8px;font-weight:700;color:#059669">₹{new_balance_inr:.2f}</td>
+      </tr>
+    </table>
+
+    <p>
+      You can view your full payment history and download cost reports from the
+      <a href="{settings.APP_BASE_URL}/settings/billing">Billing page</a>.
+    </p>
+
+    <p style="color:#6b7280;font-size:12px;">
+      Payment processed via Razorpay. This is a payment confirmation.
+      A GST-compliant tax invoice will be issued separately once our GSTIN is registered.
+      Keep this email as your payment record.
+    </p>
+
+    <p>— DokyDoc Billing</p>
+    """
+
+    return _send(to_email, subject, textwrap.dedent(html))
+```
+
+### Step 2 — Add SMTP settings to `config.py`
+
+In `backend/app/core/config.py`, add after the existing settings:
+
+```python
+# Email / SMTP settings (G7)
+SMTP_HOST: str = Field(default="smtp.gmail.com", env="SMTP_HOST")
+SMTP_PORT: int = Field(default=465, env="SMTP_PORT")
+SMTP_USE_TLS: bool = Field(default=True, env="SMTP_USE_TLS")
+SMTP_USER: str = Field(default="", env="SMTP_USER")
+SMTP_PASSWORD: str = Field(default="", env="SMTP_PASSWORD")
+EMAIL_FROM: str = Field(default="billing@dokydoc.com", env="EMAIL_FROM")
+APP_BASE_URL: str = Field(default="https://app.dokydoc.com", env="APP_BASE_URL")
+```
+
+Add to `.env.example`:
+```bash
+# Email (G7)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USE_TLS=true
+SMTP_USER=billing@dokydoc.com
+SMTP_PASSWORD=your_app_password_here
+EMAIL_FROM=billing@dokydoc.com
+APP_BASE_URL=https://app.dokydoc.com
+```
+
+### Step 3 — Wire `send_low_balance_email()` into B4
+
+In `backend/app/services/billing_enforcement_service.py`, update
+`_maybe_send_low_balance_alert()` (currently logs only):
+
+```python
+def _maybe_send_low_balance_alert(self, db: Session, billing, combined_balance: float) -> None:
+    """Send one low-balance email per 24h per tenant. G7 implements the actual send."""
+    from datetime import datetime, timedelta
+
+    last_alert = getattr(billing, "last_low_balance_alert_at", None)
+    if last_alert and (datetime.now() - last_alert) < timedelta(hours=24):
+        return   # Throttled — already sent within 24h
+
+    threshold = float(getattr(billing, "low_balance_threshold", 100.0))
+    logger.info(
+        f"[billing_alert] tenant_id={billing.tenant_id} "
+        f"combined=₹{combined_balance}, threshold=₹{threshold}"
+    )
+
+    # G7 addition: actually send the email
+    from app.services.email_service import send_low_balance_email
+    from app.models.tenant import Tenant
+
+    tenant = db.query(Tenant).filter(Tenant.id == billing.tenant_id).first()
+    if tenant:
+        # Use the tenant's billing contact email (admin user's email as proxy)
+        # TODO: add a `billing_contact_email` field to tenant_billing in a future migration
+        billing_email = getattr(billing, "billing_contact_email", None)
+        if not billing_email:
+            # Fallback: query for the admin user of this tenant
+            from app.models.user import User
+            admin = (
+                db.query(User)
+                .filter(User.tenant_id == billing.tenant_id, User.role == "admin")
+                .first()
+            )
+            billing_email = admin.email if admin else None
+
+        if billing_email:
+            send_low_balance_email(
+                to_email=billing_email,
+                tenant_name=tenant.name,
+                current_balance_inr=combined_balance,
+                threshold_inr=threshold,
+            )
+
+    billing.last_low_balance_alert_at = datetime.now()
+    db.add(billing)
+    # Note: caller commits the transaction; do not commit here
+```
+
+### Step 4 — Wire `send_payment_receipt()` into C3 and C4
+
+**In C3 (`verify_payment` endpoint)** — add after the wallet credit succeeds:
+
+```python
+# After wallet_service.credit_wallet() call in C3:
+if credit_result["credited"]:
+    from app.services.email_service import send_payment_receipt
+    from app.models.tenant import Tenant
+    from datetime import datetime
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    new_balance = wallet_service.get_balance(db, tenant_id=tenant_id)
+
+    # Get billing contact email (same logic as G7 Step 3)
+    billing_email = _get_billing_contact_email(db, tenant_id)
+    if billing_email and tenant:
+        send_payment_receipt(
+            to_email=billing_email,
+            tenant_name=tenant.name,
+            amount_inr=float(order.amount_inr),
+            payment_id=body.razorpay_payment_id,
+            order_id=body.razorpay_order_id,
+            new_balance_inr=new_balance["wallet_balance_inr"],
+            paid_at=datetime.now(),
+        )
+```
+
+**In C4 (webhook handler)** — same addition after the wallet credit. Use the same
+idempotency check: if `credit_result["already_processed"]` is true, the email was
+already sent by C3. Only send if `credit_result["credited"]` is true.
+
+**Helper function** (add to `billing.py` as a module-level private function):
+
+```python
+def _get_billing_contact_email(db: Session, tenant_id: int) -> str | None:
+    """
+    Find the billing contact email for a tenant.
+    Priority: billing_contact_email on tenant_billing → admin user email → None.
+    """
+    from app.models.user import User
+    billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant_id)
+    if getattr(billing, "billing_contact_email", None):
+        return billing.billing_contact_email
+    admin = (
+        db.query(User)
+        .filter(User.tenant_id == tenant_id, User.role == "admin")
+        .first()
+    )
+    return admin.email if admin else None
+```
+
+### Step 5 — Future: `billing_contact_email` column
+
+Add to the technical backlog (not Phase 9 scope):
+
+```
+FUTURE MIGRATION: Add `billing_contact_email` nullable column to `tenant_billing`.
+Allows ops to set a dedicated billing email (e.g., finance@acme.com) separate from
+the admin user email. Until this exists, `_get_billing_contact_email()` falls back
+to the admin user email.
+```
+
+### Acceptance Criteria
+
+**Low balance email (Track A):**
+- [ ] `send_low_balance_email()` is called when `combined_balance < low_balance_threshold`
+- [ ] Email is sent max once per 24 hours per tenant (`last_low_balance_alert_at` throttle)
+- [ ] Email contains current balance, threshold, and link to Billing page
+- [ ] If SMTP is misconfigured, `_send()` returns `False` and logs the error — billing flow NOT blocked
+- [ ] `_maybe_send_low_balance_alert()` does not commit the DB session itself
+
+**Payment receipt email (Track B — fires only after Razorpay payment):**
+- [ ] Email sent from C3 after successful payment verification (not from C4 if C3 already sent)
+- [ ] Email sent from C4 only if C3 did not process first (`credit_result["credited"]`)
+- [ ] Email contains amount, payment ID, order ID, new balance, and payment date
+- [ ] If email fails, payment is still credited — `_send()` is never in the critical path
+- [ ] HTML is valid and renders correctly in Gmail, Outlook, and Apple Mail
+- [ ] `to_email` resolves via admin user fallback when `billing_contact_email` is not set
+
+**Config:**
+- [ ] App starts when `SMTP_USER` and `SMTP_PASSWORD` are empty (test/dev environment)
+- [ ] `APP_BASE_URL` appears correctly in email links
+
+---
+
+
+---
+
+## Part G Summary
+
+| Ticket | Gap Fixed | Files Changed | Priority | Track | Est. LOC |
+|--------|-----------|---------------|----------|-------|---------|
+| G1 | WalletState ↔ C5 API contract | `schemas/billing.py`, `billing.py` (endpoint), `types/billing.ts`, `contexts/BillingContext.tsx` | P0 | A | ~45 |
+| G2 | LOW_BALANCE_THRESHOLD hardcode | (Covered by G1) | P1 | A | 0 |
+| G3 | Claude pricing in PRICING_REGISTRY | `services/cost_service.py` | P0 | A | ~30 |
+| G4 | MODEL_REGISTRY wrong model IDs | `constants/models.ts` | P0 | A | ~25 |
+| G5 | Cost preview modal → Track A | `components/billing/CostPreviewModal.tsx` | P1 | A | ~40 |
+| G6 | InsufficientFundsModal + 402 interceptor | `components/billing/InsufficientFundsModal.tsx` (new), `components/billing/InsufficientFundsProvider.tsx` (new), `api/client.ts` (interceptor), `billing_enforcement_service.py` (error body) | P1 | A | ~130 |
+| G7 | Low balance + GST invoice emails | `services/email_service.py` (new), `core/config.py`, `billing_enforcement_service.py`, `billing.py` (C3/C4) | P1 | A+B | ~160 |
+
+### Part G Execution Order
+
+Execute G-tickets in this order. All P0s before any P1s.
+
+```
+G3 (Claude pricing in backend)       ← independent, do first
+G4 (Fix frontend model IDs)          ← independent, do first (parallel with G3)
+  ↓
+G1 (Fix API contract: backend + FE)  ← after G3/G4 to avoid re-touching files
+  ↓
+G2 (covered by G1 — no extra work)
+  ↓
+G5 (Cost preview → Track A)          ← after G1 (needs correct WalletState type)
+G6 (InsufficientFundsModal)          ← after G1 (needs correct WalletState type)
+  ↓
+G7 (Email service + wiring)          ← after G1 (uses billing schema from G1 endpoint)
+```
+
+### What `PHASE_9_STRATEGY.md` Promises vs What Now Ships
+
+After Part G is complete, every promise in the strategy is implemented:
+
+| Strategy Promise | Implemented In |
+|---|---|
+| "₹100 free credit on signup" | B5 (wallet seeding) |
+| "Cost preview before every analysis" | G5 (E5 moved to Track A) |
+| "Exact cost shown after analysis" | E6 (CostReceiptDrawer) |
+| "15% markup transparent on every receipt" | B1 (CostBreakdown) + E6 |
+| "Free lane = Gemini 3 Flash-Lite" | B2 (ModelSelector), G4 (correct ID) |
+| "Paid lane = Gemini 3 Flash, Claude Sonnet 4.6, Claude Haiku 4.5" | B2 + G3 (pricing) + G4 (IDs) |
+| "When wallet < ₹100, send reminder email" | G7 (send_low_balance_email) |
+| "Recharge via UPI, cards, net banking" | C1–C4 (Razorpay, Track B) |
+| "GST-compliant invoice after payment" | G7 (send_payment_receipt, Track B) |
+| "When wallet empty, friendly modal not raw error" | G6 (InsufficientFundsModal) |
+| "Download costs: CSV, PDF, JSON, DOCX" | D1 + D2 |
+| "Demo org for sales calls" | D3 |
+| "Export broken down by user, model, day" | D1 (ExportDataset) |
+
+### Remaining Technical Debt (not in Phase 9)
+
+Logged for future phases:
+
+1. **`billing_contact_email` column** — Add to `tenant_billing` so ops can set a dedicated finance email (G7 Step 5)
+2. **`free_credit_total_inr` column** — Add to `tenants` (referenced in G1 as `getattr` fallback; currently hardcoded to 100.0)
+3. **Celery async email** — If SMTP latency is noticed in production, move G7 sends to Celery tasks
+4. **True GST invoice PDF** — After GSTIN registered, replace payment confirmation email with a GSTIN-compliant tax invoice (HSN code, IGST/CGST/SGST split). Mark `send_payment_receipt()` with a `# TODO: GST invoice` comment as a migration target.
+5. **Retry logic in `_send()`** — Currently tries once and logs on failure. Add 1 retry with 2s delay for transient SMTP errors.
+
+---
+
+*End of PHASE_9_IMPLEMENTATION_PLAN.md*
+
