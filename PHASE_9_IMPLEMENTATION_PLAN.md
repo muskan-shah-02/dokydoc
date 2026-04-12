@@ -6340,10 +6340,6 @@ ordered by dependency — top to bottom is a safe execution sequence.
 - [ ] **E7** Implement `RechargeModal`
 - [ ] **F4** Execute Track B flip checklist on GSTIN day
 
----
-
-*End of PHASE_9_IMPLEMENTATION_PLAN.md*
-
 
 ---
 
@@ -7782,6 +7778,1510 @@ Logged for future phases:
 3. **Celery async email** — If SMTP latency is noticed in production, move G7 sends to Celery tasks
 4. **True GST invoice PDF** — After GSTIN registered, replace payment confirmation email with a GSTIN-compliant tax invoice (HSN code, IGST/CGST/SGST split). Mark `send_payment_receipt()` with a `# TODO: GST invoice` comment as a migration target.
 5. **Retry logic in `_send()`** — Currently tries once and logs on failure. Add 1 retry with 2s delay for transient SMTP errors.
+---
+
+# Part H — User Journey & Data Flow Integrity Fixes
+
+## Why This Part Exists
+
+A walkthrough of the complete Phase 9 user journey (new user Day 0→7, power
+user, CXO, sales demo) cross-checked against the data flow diagrams revealed
+**8 breaks** — places where a user action would either produce no visible
+response, trigger a silent failure, or leave the UI in an incoherent state.
+
+Additionally, a product decision was confirmed: **the 15% markup is an internal
+cost-accounting tool, not a customer-facing metric.** Customers see one clean
+number — the total they are charged. The markup columns stay in the DB for
+our reconciliation but are stripped from every customer-facing surface.
+
+| Ticket | Issue | Severity | Layer |
+|--------|-------|----------|-------|
+| H1 | Strip markup from all customer-facing surfaces | P0 | Backend + Frontend |
+| H2 | `WalletBalanceBadge` — persistent nav header balance | P0 | Frontend |
+| H3 | `WalletTransactionTable` — transaction history UI | P1 | Frontend |
+| H4 | Analysis endpoints: add `model_id` input + `cost_breakdown` output | P0 | Backend |
+| H5 | Demo org seeder: seed completed analysis state | P1 | Backend/Script |
+| H6 | Enterprise contact lead email | P1 | Backend |
+| H7 | Reconciliation stale-order time threshold | P1 | Backend |
+| H8 | Hybrid wallet state display (free + paid coexist) | P1 | Frontend |
+
+**All Part H tickets are Track A unless noted. Execute after Part G.**
+
+---
+
+## H1 — Strip Markup from All Customer-Facing Surfaces
+
+**Owner:** Backend + Frontend
+**Effort:** 1 day
+**Track:** A
+**Priority:** P0 — every customer-facing surface currently exposes our cost structure
+**Depends on:** B1 (CostBreakdown dataclass), E6 (CostReceiptDrawer), G5 (CostPreviewModal)
+
+### Product Decision
+
+The 15% markup is DokyDoc's internal margin. It is tracked in the DB for
+reconciliation (C7), used by finance for cost-drift analysis, and stored in
+`usage_logs.markup_inr` for internal reporting. It is **never shown to
+customers** — not on the receipt, not in the preview, not in exports.
+
+Customers see: **"This analysis cost ₹0.99"** — one number, final, done.
+
+Rationale: Showing `raw_cost_inr + markup_inr` tells customers exactly what
+the underlying AI cost is and invites them to bypass DokyDoc and call Google
+directly. Showing only the total maintains a clean pricing surface while
+preserving full internal auditability.
+
+---
+
+### Step 1 — Backend: Slim Down Analysis API `cost_breakdown` Response
+
+The analysis endpoint response (added in H4) returns a `cost_breakdown` object.
+Remove markup fields from it. The internal `CostBreakdown` dataclass keeps all
+fields — we just don't expose them over the wire.
+
+Create a new lean response schema in `backend/app/schemas/billing.py`:
+
+```python
+class CostBreakdownResponse(BaseModel):
+    """
+    Customer-facing cost summary returned in analysis API responses.
+
+    Deliberately omits raw_cost_inr, markup_inr, markup_percent — these are
+    internal accounting fields tracked in usage_logs but not surfaced to users.
+    Customers see the total they were charged and the model/tokens that drove it.
+    """
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+    total_inr: float          # What the customer was charged (raw + 15% markup combined)
+    pool_used: str            # "free" | "paid"
+    currency: str = "INR"
+
+    @classmethod
+    def from_breakdown(cls, breakdown: "CostBreakdown", pool_used: str) -> "CostBreakdownResponse":
+        return cls(
+            model_id=breakdown.model,
+            input_tokens=breakdown.input_tokens,
+            output_tokens=breakdown.output_tokens,
+            total_inr=round(breakdown.total_cost_inr, 4),
+            pool_used=pool_used,
+        )
+```
+
+> **Key rule:** Anywhere the backend constructs a response that goes to the client,
+> use `CostBreakdownResponse` (lean). The full `CostBreakdown` dataclass is only
+> used internally — passed between services, stored in `usage_logs`, used in
+> reconciliation. It never reaches the HTTP response layer directly.
+
+---
+
+### Step 2 — Frontend: Update `CostBreakdownDisplay` TypeScript Type
+
+In `frontend/src/types/billing.ts`, replace the existing `CostBreakdownDisplay`:
+
+```typescript
+// BEFORE (exposes markup internals):
+export interface CostBreakdownDisplay {
+  model_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  raw_cost_inr: number;     // REMOVE
+  markup_inr: number;       // REMOVE
+  total_inr: number;
+  markup_percent: number;   // REMOVE
+  pool_used: "free" | "paid";
+}
+
+// AFTER (customer-facing only):
+export interface CostBreakdownDisplay {
+  model_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_inr: number;
+  pool_used: "free" | "paid";
+  currency: string;
+}
+```
+
+---
+
+### Step 3 — Frontend: Rewrite `CostReceiptDrawer` (E6)
+
+Replace the cost breakdown table section. The drawer should communicate
+clearly and cleanly — what model, how many tokens, what it cost:
+
+```typescript
+// Inside CostReceiptDrawer — replace the cost breakdown section:
+
+{/* Token counts */}
+<div className="rounded-lg bg-gray-50 p-3 text-sm space-y-1.5">
+  <div className="flex justify-between">
+    <span className="text-gray-500">Input tokens</span>
+    <span>{breakdown.input_tokens.toLocaleString("en-IN")}</span>
+  </div>
+  <div className="flex justify-between">
+    <span className="text-gray-500">Output tokens</span>
+    <span>{breakdown.output_tokens.toLocaleString("en-IN")}</span>
+  </div>
+  <div className="flex justify-between">
+    <span className="text-gray-500">Total tokens</span>
+    <span className="font-medium">
+      {(breakdown.input_tokens + breakdown.output_tokens).toLocaleString("en-IN")}
+    </span>
+  </div>
+</div>
+
+{/* Single charge line — no breakdown */}
+<div className="flex items-center justify-between pt-2 text-sm font-semibold">
+  <span className="text-gray-900">Charged to your wallet</span>
+  <span className="text-lg text-gray-900">
+    {breakdown.pool_used === "free"
+      ? <span className="text-green-600">Free credit</span>
+      : `₹${breakdown.total_inr.toFixed(4)}`}
+  </span>
+</div>
+
+{/* REMOVE the markup breakdown rows entirely */}
+{/* REMOVE the "DokyDoc adds a 15% markup" transparency note */}
+```
+
+The receipt now reads:
+
+```
+Analysis Receipt
+[Free credit] · gemini-3-flash-lite
+
+Input tokens:    28,450
+Output tokens:    3,120
+Total tokens:    31,570
+
+Charged to your wallet:   Free credit
+```
+
+Or for a paid analysis:
+
+```
+Analysis Receipt
+[Paid wallet] · claude-sonnet-4-6
+
+Input tokens:    61,240
+Output tokens:    8,890
+Total tokens:    70,130
+
+Charged to your wallet:   ₹19.9200
+```
+
+---
+
+### Step 4 — Frontend: Update `CostPreviewModal` (G5)
+
+Remove all breakdown rows. Show only the total the user will be charged:
+
+```typescript
+// In CostPreviewModal — replace cost section:
+
+{/* Estimated cost — single line */}
+<div className="flex items-center justify-between text-sm">
+  <span className="text-gray-500">Estimated cost</span>
+  <span className="font-semibold text-gray-900">
+    {isFreeLaneActive
+      ? <span className="text-green-600">Free (from your credit)</span>
+      : `~₹${estCost.toFixed(2)}`}
+  </span>
+</div>
+
+{/* REMOVE: raw cost row */}
+{/* REMOVE: markup row */}
+{/* REMOVE: "Includes 15% platform fee. Actual cost may vary ±20%" note */}
+
+{/* Keep: balance after */}
+<div className="flex items-center justify-between text-sm font-semibold">
+  <span className="text-gray-700">Balance after analysis</span>
+  <span className={balanceAfter < 0 ? "text-red-600" : "text-green-700"}>
+    {balanceAfter < 0
+      ? `Not enough — ₹${Math.abs(balanceAfter).toFixed(2)} short`
+      : `₹${balanceAfter.toFixed(2)}`}
+  </span>
+</div>
+```
+
+---
+
+### Step 5 — Backend + D1: Strip Markup from Export Renderers
+
+In `backend/app/services/cost_export_service.py`, the `ExportLineItem` dataclass
+and all four renderers must not expose `raw_cost_inr` or `markup_inr` to the
+customer. The export is a customer document — they do not need to see our margin.
+
+```python
+@dataclass
+class ExportLineItem:
+    date: str
+    document_name: str
+    user_email: str
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+    cost_inr: float           # Total charged (raw + markup combined) — only this
+    pool_used: str            # "free" | "paid"
+    feature_type: str
+    # REMOVE: raw_cost_inr   ← internal field, not in customer export
+    # REMOVE: markup_inr     ← internal field, not in customer export
+```
+
+Update CSV renderer — remove markup columns:
+```python
+# CSV headers (was 9 columns, now 7):
+writer.writerow([
+    "Date", "Document", "User", "Model",
+    "Input Tokens", "Output Tokens", "Cost (₹)", "Pool"
+])
+# Each row:
+writer.writerow([
+    item.date, item.document_name, item.user_email, item.model_id,
+    item.input_tokens, item.output_tokens,
+    f"{item.cost_inr:.4f}", item.pool_used
+])
+```
+
+Update PDF renderer — remove "Raw Cost" and "Markup" columns from the table.
+The summary section shows only "Total Spent: ₹X.XX" — not the raw/markup split.
+
+Update DOCX renderer — same: remove markup columns from the Word table.
+
+Update JSON renderer — `cost_inr` only, no `raw_cost_inr` or `markup_inr` keys.
+
+> **Internal reporting note:** If DokyDoc's own finance team ever needs a
+> cost-breakdown export (raw vs markup), build a separate admin-only endpoint
+> protected by an internal API key — never from the customer billing page.
+
+---
+
+### Acceptance Criteria
+
+**Backend:**
+- [ ] `CostBreakdownResponse` schema has exactly 6 fields: `model_id`, `input_tokens`, `output_tokens`, `total_inr`, `pool_used`, `currency`
+- [ ] `raw_cost_inr`, `markup_inr`, `markup_percent` do NOT appear in any HTTP response body
+- [ ] `usage_logs` DB table still stores all three markup columns (internal only)
+- [ ] `CostBreakdown` dataclass (B1) is unchanged — only the HTTP schema is lean
+
+**Frontend:**
+- [ ] `CostBreakdownDisplay` TypeScript type has no markup fields
+- [ ] `CostReceiptDrawer` shows: model badge, token counts, single "Charged" line
+- [ ] `CostPreviewModal` shows: model, estimated total, balance-after only
+- [ ] No string "15%" or "markup" or "platform fee" visible to the end user anywhere
+- [ ] Export CSV has no `raw_cost_inr` or `markup_inr` columns
+- [ ] Export PDF summary shows "Total Spent" only — no raw/markup split
+- [ ] Export JSON keys contain `cost_inr` only — no `raw_cost_inr`
+
+---
+
+## H2 — `WalletBalanceBadge` — Persistent Nav Header Balance
+
+**Owner:** Frontend
+**Effort:** 0.5 day
+**Track:** A
+**Priority:** P0 — every persona in the user journey references it; without it the wallet is invisible
+**Depends on:** G1 (correct `WalletState` type), E1 (`BillingContext`)
+**File:** `frontend/src/components/billing/WalletBalanceBadge.tsx` (new)
+
+### Why This is P0
+
+Every user journey touchpoint assumes the wallet balance is always visible:
+- "Wallet header now shows ₹504.50"
+- "Wallet goes from ₹505 → ₹482.60"
+- "Wallet shows ₹97.49 of ₹100 remaining"
+
+Without a persistent display, the user has no idea how much they have left
+until they navigate to the Billing page. The cost preview and receipt drawer
+both show post-analysis balances — but the user needs to see the balance
+*before* initiating work to decide which model to pick or whether to recharge
+first. This is the single most-viewed billing UI element in the product.
+
+### Component
+
+```typescript
+// frontend/src/components/billing/WalletBalanceBadge.tsx
+
+import { useState } from "react";
+import { useBillingContext } from "@/contexts/BillingContext";
+import { useNavigate } from "react-router-dom";    // or next/navigation if Next.js
+
+export function WalletBalanceBadge() {
+  const { wallet, isLoading, isLowBalance, isFreeLaneActive } = useBillingContext();
+  const navigate = useNavigate();
+  const [showTooltip, setShowTooltip] = useState(false);
+
+  if (isLoading) {
+    // Skeleton placeholder — same width as loaded state to prevent layout shift
+    return (
+      <div className="h-8 w-24 animate-pulse rounded-full bg-gray-100" />
+    );
+  }
+
+  if (!wallet) return null;
+
+  // ── Display logic ──────────────────────────────────────────────────────────
+  //
+  // Case 1: Free lane only (never recharged, free credit remaining)
+  //   Shows: "₹97.49 free"  in green
+  //
+  // Case 2: Paid wallet only (recharged, free credit exhausted)
+  //   Shows: "₹484.58"  in default grey
+  //   Low balance: amber
+  //   Critical (<₹10): red
+  //
+  // Case 3: Hybrid (recharged but free credit still remaining)
+  //   Shows: "₹504.50 + ₹4.50★"  with star/badge indicating free credit
+  //   Tooltip: "₹4.50 free credit will be used first"
+
+  const hasFreeCreditLeft = wallet.free_credit_remaining_inr > 0;
+  const isHybrid = wallet.has_recharged_ever && hasFreeCreditLeft;
+  const isCritical = isLowBalance && wallet.balance_inr < 10;
+
+  const badgeColor = isFreeLaneActive && !wallet.has_recharged_ever
+    ? "bg-green-50 text-green-700 border-green-200"
+    : isCritical
+      ? "bg-red-50 text-red-700 border-red-300"
+      : isLowBalance
+        ? "bg-amber-50 text-amber-700 border-amber-300"
+        : "bg-gray-50 text-gray-700 border-gray-200";
+
+  const dotColor = isCritical
+    ? "bg-red-500"
+    : isLowBalance
+      ? "bg-amber-500"
+      : null;
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => navigate("/settings/billing")}
+        onMouseEnter={() => isHybrid && setShowTooltip(true)}
+        onMouseLeave={() => setShowTooltip(false)}
+        className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors hover:opacity-80 ${badgeColor}`}
+        aria-label={`Wallet balance: ₹${wallet.balance_inr.toFixed(2)}`}
+      >
+        {/* Pulsing dot for alerts */}
+        {dotColor && (
+          <span className="relative flex h-2 w-2">
+            <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${dotColor}`} />
+            <span className={`relative inline-flex h-2 w-2 rounded-full ${dotColor}`} />
+          </span>
+        )}
+
+        {/* Wallet icon */}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2">
+          <rect x="2" y="5" width="20" height="14" rx="2" />
+          <path d="M16 12h2" />
+        </svg>
+
+        {/* Balance display */}
+        {isFreeLaneActive && !wallet.has_recharged_ever ? (
+          // Free lane only
+          <span>₹{wallet.free_credit_remaining_inr.toFixed(2)} free</span>
+        ) : isHybrid ? (
+          // Hybrid: paid + free credit remaining
+          <span>
+            ₹{wallet.balance_inr.toFixed(2)}
+            <span className="ml-1 rounded bg-green-100 px-1 text-xs text-green-600">
+              +₹{wallet.free_credit_remaining_inr.toFixed(2)} free
+            </span>
+          </span>
+        ) : (
+          // Paid wallet only
+          <span>₹{wallet.balance_inr.toFixed(2)}</span>
+        )}
+      </button>
+
+      {/* Hybrid tooltip */}
+      {showTooltip && isHybrid && (
+        <div className="absolute right-0 top-10 z-50 w-56 rounded-lg border border-gray-200 bg-white p-3 shadow-lg text-xs text-gray-600">
+          <p className="font-semibold text-gray-900 mb-1">Two active pools</p>
+          <div className="flex justify-between">
+            <span>Free credit</span>
+            <span className="text-green-600 font-medium">
+              ₹{wallet.free_credit_remaining_inr.toFixed(2)}
+            </span>
+          </div>
+          <div className="flex justify-between mt-0.5">
+            <span>Paid wallet</span>
+            <span className="font-medium">₹{wallet.balance_inr.toFixed(2)}</span>
+          </div>
+          <p className="mt-2 text-gray-400">
+            Free credit is always used first.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Integration — Mount in Navigation
+
+In the app's top navigation component (the existing file that renders the
+header with user avatar, notifications, etc.):
+
+```typescript
+// In existing nav component — additive import + mount:
+import { WalletBalanceBadge } from "@/components/billing";
+
+// Inside nav JSX, between notification bell and user avatar:
+<WalletBalanceBadge />
+```
+
+### Behaviour Matrix
+
+| State | Badge shows | Color | Dot |
+|---|---|---|---|
+| Free lane, ₹97.49 remaining | `₹97.49 free` | Green | None |
+| Free lane, ₹4.50 remaining, `low_balance_alert=true` | `₹4.50 free` | Amber | Pulsing amber |
+| Paid only, ₹484.58 | `₹484.58` | Grey | None |
+| Paid, ₹40.00, `low_balance_alert=true` | `₹40.00` | Amber | Pulsing amber |
+| Paid, ₹8.00, critical | `₹8.00` | Red | Pulsing red |
+| Hybrid: ₹504.50 paid + ₹4.50 free | `₹504.50 +₹4.50 free` | Grey + green pill | None |
+| Loading | Skeleton | — | — |
+
+### Acceptance Criteria
+
+- [ ] Badge visible in navigation on every authenticated page
+- [ ] Clicking badge navigates to `/settings/billing`
+- [ ] Free-lane user: shows `₹97.49 free` in green
+- [ ] Paid user with low balance: amber badge + pulsing dot
+- [ ] Critical balance (<₹10): red badge + pulsing red dot
+- [ ] Hybrid state: shows paid balance + green pill with free credit amount
+- [ ] Hybrid tooltip explains "Free credit is always used first"
+- [ ] Skeleton renders during initial load (no layout shift)
+- [ ] After any analysis completes, badge updates within 1 poll cycle (max 60s)
+  or immediately when `BillingContext.refetch()` is called
+- [ ] After Razorpay payment success, badge updates immediately (refetch in RechargeModal)
+
+---
+
+## H3 — `WalletTransactionTable` — Transaction History UI
+
+**Owner:** Frontend
+**Effort:** 0.5 day
+**Track:** A
+**Priority:** P1 — Karan's user journey explicitly shows him reviewing transaction history
+**Depends on:** G1 (wallet types), E1 (`billingApi.getTransactions()`), C5 backend endpoint
+**File:** `frontend/src/components/billing/WalletTransactionTable.tsx` (new)
+
+### Why
+
+The user journey (Karan, Day 7): *"checks the Wallet Transactions tab on the
+Billing page — every credit and debit is listed, newest first, paginated."*
+
+The full backend stack for this exists: C5 endpoint, `TransactionRow` type,
+`billingApi.getTransactions()`. There is no UI component to display it.
+A developer following the plan would build the backend, define the type,
+and stop — nothing tells them to build the table.
+
+### Component
+
+```typescript
+// frontend/src/components/billing/WalletTransactionTable.tsx
+
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { billingApi } from "@/api/billingApi";
+import type { TransactionRow } from "@/types/billing";
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-IN", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function TxnTypeBadge({ type, direction }: { type: string; direction: string }) {
+  const isCredit = direction === "credit";
+  const label =
+    type === "signup_bonus"      ? "Welcome credit" :
+    type === "razorpay_payment"  ? "Recharge" :
+    type === "analysis"          ? "Analysis" :
+    type === "refund"            ? "Refund" :
+    type === "postpaid_invoice"  ? "Invoice" :
+    type;
+
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+      isCredit
+        ? "bg-green-50 text-green-700"
+        : "bg-gray-100 text-gray-600"
+    }`}>
+      {isCredit ? "+" : "−"} {label}
+    </span>
+  );
+}
+
+export function WalletTransactionTable() {
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 15;
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["billing", "transactions", page],
+    queryFn: () => billingApi.getTransactions({ page, page_size: PAGE_SIZE }),
+    keepPreviousData: true,
+  });
+
+  const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 1;
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="h-12 animate-pulse rounded-lg bg-gray-100" />
+        ))}
+      </div>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <p className="py-6 text-center text-sm text-gray-400">
+        Could not load transaction history.
+      </p>
+    );
+  }
+
+  if (data.items.length === 0) {
+    return (
+      <p className="py-6 text-center text-sm text-gray-400">
+        No transactions yet. Your first analysis will appear here.
+      </p>
+    );
+  }
+
+  return (
+    <div>
+      {/* Table */}
+      <div className="overflow-x-auto rounded-xl border border-gray-200">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+            <tr>
+              <th className="px-4 py-3 text-left">Date</th>
+              <th className="px-4 py-3 text-left">Type</th>
+              <th className="px-4 py-3 text-left">Description</th>
+              <th className="px-4 py-3 text-right">Amount</th>
+              <th className="px-4 py-3 text-right">Balance After</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {data.items.map((txn: TransactionRow) => (
+              <tr key={txn.id} className="hover:bg-gray-50">
+                <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
+                  {formatDate(txn.created_at)}
+                </td>
+                <td className="px-4 py-3">
+                  <TxnTypeBadge type={txn.type} direction={txn.type === "credit" ? "credit" : "debit"} />
+                </td>
+                <td className="px-4 py-3 text-gray-700 max-w-[240px] truncate">
+                  {txn.description || "—"}
+                </td>
+                <td className={`px-4 py-3 text-right font-medium tabular-nums ${
+                  txn.type === "credit" ? "text-green-600" : "text-gray-900"
+                }`}>
+                  {txn.type === "credit" ? "+" : "−"}₹{txn.amount_inr.toFixed(4)}
+                </td>
+                <td className="px-4 py-3 text-right text-gray-500 tabular-nums">
+                  ₹{txn.balance_after_inr.toFixed(2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="mt-4 flex items-center justify-between text-sm text-gray-500">
+          <span>
+            Showing {(page - 1) * PAGE_SIZE + 1}–
+            {Math.min(page * PAGE_SIZE, data.total)} of {data.total} transactions
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="rounded-md border border-gray-200 px-3 py-1 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages}
+              className="rounded-md border border-gray-200 px-3 py-1 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Fix `TransactionRow` Type (E1 alignment)
+
+The C5 backend `WalletTransactionResponse` uses `direction` and `txn_type`.
+The E1 type uses `type`. Align the frontend type to match the API exactly:
+
+```typescript
+// frontend/src/types/billing.ts — update TransactionRow:
+export interface TransactionRow {
+  id: number;                    // backend returns int
+  created_at: string;            // ISO-8601
+  direction: "credit" | "debit"; // matches C5 WalletTransactionResponse.direction
+  type: string;                  // mapped from C5 txn_type field
+  amount_inr: number;
+  balance_after_inr: number;
+  description: string | null;    // mapped from C5 notes field
+}
+```
+
+Update `billingApi.getTransactions()` to map the API field names:
+
+```typescript
+// In billingApi.ts — update getTransactions:
+getTransactions: async (params?) => {
+  const { data } = await apiClient.get("/billing/wallet/transactions", { params });
+  return {
+    items: data.transactions.map((t: any) => ({
+      id: t.id,
+      created_at: t.created_at,
+      direction: t.direction,
+      type: t.txn_type,              // API field → frontend field rename
+      amount_inr: t.amount_inr,
+      balance_after_inr: t.balance_after_inr,
+      description: t.notes ?? null,  // API field → frontend field rename
+    })),
+    total: data.total_count,
+  };
+},
+```
+
+### Integration in `BillingSettings` page
+
+```typescript
+// frontend/src/pages/BillingSettings.tsx — additive section:
+import { WalletTransactionTable } from "@/components/billing";
+
+// After ExportPanel section:
+<section className="mt-8">
+  <div className="mb-4 flex items-center justify-between">
+    <h2 className="text-xl font-semibold text-gray-900">Transaction History</h2>
+    <span className="text-sm text-gray-400">All credits and debits</span>
+  </div>
+  <WalletTransactionTable />
+</section>
+```
+
+### Acceptance Criteria
+
+- [ ] Table renders on BillingSettings page below ExportPanel
+- [ ] Credits (recharge, signup bonus) shown with green `+` and green badge
+- [ ] Debits (analysis charges) shown with grey `−` and grey badge
+- [ ] `balance_after_inr` column shows running balance correctly (newest-first)
+- [ ] Signup bonus row shows "Welcome credit" badge
+- [ ] Razorpay recharge row shows "Recharge" badge
+- [ ] "No transactions yet" state renders for new users
+- [ ] Pagination: 15 rows per page, Previous/Next buttons work
+- [ ] "Showing X–Y of Z transactions" counter correct
+- [ ] Loading state shows skeleton rows (no layout shift)
+- [ ] API error shows fallback message (no crash)
+
+---
+
+## H4 — Analysis Endpoints: `model_id` Input + `cost_breakdown` Output
+
+**Owner:** Backend
+**Effort:** 1.5 days
+**Track:** A
+**Priority:** P0 — without this, model selection is decorative and CostReceiptDrawer never opens
+**Depends on:** B1 (CostBreakdown dataclass), B2 (ModelSelector service), B3 (WalletService), B4 (BillingEnforcementService), H1 (CostBreakdownResponse schema)
+
+### Why This is the Central Wiring Ticket
+
+Every other billing ticket produces a component or a service. This ticket is
+the **junction** — it connects them all into the actual HTTP request-response
+cycle that powers the user journey. The data flow breaks here if this is missing:
+
+```
+User picks "Claude Sonnet 4.6"         ← ModelSelector (E4/G4)
+  → POST /documents/{id}/analyze         ← THIS TICKET wires model_id in
+      → ModelSelector.resolve()          ← B2
+      → BillingEnforcement.check()       ← B4
+      → ProviderRouter.get_client()      ← B2 extension
+      → Gemini/Claude API call
+      → CostService.calculate()          ← B1
+      → WalletService.deduct()           ← B3
+      → Response: { cost_breakdown }     ← THIS TICKET wires cost_breakdown out
+  → CostReceiptDrawer opens              ← E6
+  → WalletBalanceBadge updates           ← H2
+```
+
+### Files Changed
+
+| File | Change type |
+|---|---|
+| `backend/app/api/endpoints/documents.py` | Modify — add `model_id` to request, add `cost_breakdown` to response |
+| `backend/app/api/endpoints/code_analysis.py` | Modify — same pattern |
+| `backend/app/schemas/document.py` | Modify — extend request + response schemas |
+| `backend/app/schemas/billing.py` | Already has `CostBreakdownResponse` (H1) |
+
+### Step 1 — Update Analysis Request Schema
+
+In `backend/app/schemas/document.py` (and equivalent for code analysis):
+
+```python
+class DocumentAnalysisRequest(BaseModel):
+    # Existing fields — do not change:
+    document_id: int
+    analysis_type: Optional[str] = None
+    # ... other existing fields ...
+
+    # Phase 9 addition — H4:
+    model_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "AI model to use. If omitted, tenant default is used. "
+            "Free-lane users are always routed to gemini-3-flash-lite "
+            "regardless of this field."
+        ),
+        example="claude-sonnet-4-6"
+    )
+```
+
+> **Backward compatibility:** `model_id` is Optional with default None.
+> All existing API callers that don't send `model_id` continue to work —
+> they get the tenant's default model (free lane = gemini-3-flash-lite,
+> paid lane = tenant.default_model).
+
+### Step 2 — Update Analysis Response Schema
+
+```python
+class DocumentAnalysisResponse(BaseModel):
+    # Existing fields — do not change:
+    analysis_id: str
+    document_id: int
+    result: dict
+    status: str
+    # ... other existing fields ...
+
+    # Phase 9 addition — H4:
+    cost_breakdown: Optional[schemas.billing.CostBreakdownResponse] = Field(
+        default=None,
+        description="Cost charged for this analysis. None if billing was skipped."
+    )
+```
+
+### Step 3 — Update Analysis Endpoint Handler
+
+This is the core wiring. In `backend/app/api/endpoints/documents.py`,
+update the analysis endpoint handler:
+
+```python
+@router.post("/documents/{document_id}/analyze",
+             response_model=schemas.document.DocumentAnalysisResponse)
+def analyze_document(
+    document_id: int,
+    body: schemas.document.DocumentAnalysisRequest,
+    *,
+    db: Session = Depends(deps.get_db),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    current_user: User = Depends(deps.get_current_user),
+):
+    # ── Phase 9: Model resolution ──────────────────────────────────────────
+    from app.services.ai.model_selector import ModelSelector
+    from app.services.billing_enforcement_service import BillingEnforcementService
+    from app.services.wallet_service import wallet_service
+    from app.schemas.billing import CostBreakdownResponse
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+
+    model_selector = ModelSelector()
+    resolved_model = model_selector.resolve(
+        tenant=tenant,
+        requested_model=body.model_id,    # None is fine — selector handles it
+    )
+
+    # ── Phase 9: Pre-analysis affordability check ──────────────────────────
+    enforcement = BillingEnforcementService()
+    afford_result = enforcement.check_can_afford_analysis(
+        db=db,
+        tenant_id=tenant_id,
+        model=resolved_model,
+        estimated_pages=getattr(document, "page_count", 10),  # best estimate
+    )
+
+    if not afford_result["can_afford"]:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "insufficient_balance",
+                "message": "Insufficient wallet balance for this analysis.",
+                "available_inr": afford_result.get("available_inr", 0),
+                "required_inr": afford_result.get("estimated_cost", 0),
+                "shortfall_inr": afford_result.get("shortfall_inr", 0),
+            }
+        )
+
+    # ── Existing analysis logic — unchanged ────────────────────────────────
+    # ... (existing code that calls AI provider and gets results) ...
+    # Pass resolved_model into the AI call:
+    #   provider_router.get_client_for_model(resolved_model)
+    #   gemini_client.analyze_document(model=resolved_model, ...)
+
+    # ── Phase 9: Post-analysis cost deduction ──────────────────────────────
+    # actual_tokens comes from AI API response (input/output token counts)
+    cost_breakdown_obj = None
+    pool_used = "free"
+
+    try:
+        from app.services.cost_service import CostService
+        cost_svc = CostService(db)
+        cost_result_dict = cost_svc.calculate_cost_from_actual_tokens(
+            input_tokens=actual_tokens.get("input_tokens", 0),
+            output_tokens=actual_tokens.get("output_tokens", 0),
+            thinking_tokens=actual_tokens.get("thinking_tokens", 0),
+            model=resolved_model,
+        )
+
+        deduct_result = wallet_service.deduct(
+            db=db,
+            tenant_id=tenant_id,
+            amount_inr=Decimal(str(cost_result_dict["cost_inr"])),
+            description=f"Analysis: {document.name[:80]}",
+            idempotency_key=f"analysis:{analysis_id}",
+        )
+
+        pool_used = deduct_result.get("pool_used", "paid")
+
+        # Build the lean customer-facing response (H1 schema — no markup fields)
+        from app.models.cost_service import CostBreakdown  # internal dataclass
+        cost_breakdown_obj = CostBreakdownResponse(
+            model_id=resolved_model,
+            input_tokens=actual_tokens.get("input_tokens", 0),
+            output_tokens=actual_tokens.get("output_tokens", 0),
+            total_inr=round(cost_result_dict["cost_inr"], 4),
+            pool_used=pool_used,
+        )
+
+    except Exception as e:
+        # Billing failure must NOT block the analysis result delivery.
+        # Log and continue — the user gets their analysis result.
+        # Finance can reconcile manually if needed.
+        logger.error(
+            f"[billing_failure] analysis_id={analysis_id} "
+            f"tenant_id={tenant_id} error={e}"
+        )
+
+    # ── Return response with cost_breakdown ────────────────────────────────
+    return schemas.document.DocumentAnalysisResponse(
+        analysis_id=str(analysis_id),
+        document_id=document_id,
+        result=analysis_result,
+        status="completed",
+        cost_breakdown=cost_breakdown_obj,   # None if billing failed (non-blocking)
+    )
+```
+
+> **Critical design principle — billing never blocks results:** If the
+> `wallet_service.deduct()` call raises an exception (DB timeout, lock
+> contention), the user still gets their analysis result. The billing
+> failure is logged for manual reconciliation. This is intentional —
+> a DokyDoc that loses analysis results because the billing service had
+> a hiccup is worse than one that occasionally under-charges. Reconciliation
+> (C7) catches any missed deductions.
+
+### Step 4 — Ensure `wallet_service.deduct()` Returns `pool_used`
+
+In B3's `wallet_service.deduct()`, the return dict must include which pool
+was debited. Add this to the return statement in `wallet_service.py`:
+
+```python
+# In wallet_service.deduct() return dict — additive:
+return {
+    "debited": True,
+    "amount_inr": float(amount_inr),
+    "pool_used": "free" if debited_from_free else "paid",   # ADD THIS
+    "free_remaining": float(tenant.free_credit_remaining_inr),
+    "paid_remaining": float(billing.balance_inr),
+}
+```
+
+### Step 5 — Apply Same Pattern to Code Analysis Endpoint
+
+`backend/app/api/endpoints/code_analysis.py` gets the identical treatment:
+- `model_id: Optional[str]` in request body
+- `cost_breakdown: Optional[CostBreakdownResponse]` in response
+- Same model resolution → enforcement → call → deduct → response flow
+
+The pattern is identical. Copy the wiring from Step 3, adjust for the
+code analysis context (token counts from Anthropic/Gemini response).
+
+### Acceptance Criteria
+
+- [ ] `POST /documents/{id}/analyze` accepts `model_id` (optional)
+- [ ] Omitting `model_id` → free-lane user gets `gemini-3-flash-lite`;
+  paid user gets their `tenant.default_model`
+- [ ] Sending `model_id: "claude-sonnet-4-6"` from a paid user → Claude is used
+- [ ] Sending `model_id: "claude-sonnet-4-6"` from a free user → silently
+  overridden to `gemini-3-flash-lite` (free lane lock)
+- [ ] Response includes `cost_breakdown.total_inr` matching actual wallet deduction
+- [ ] Response includes `cost_breakdown.pool_used` as `"free"` or `"paid"`
+- [ ] Response does NOT include `raw_cost_inr`, `markup_inr`, `markup_percent`
+- [ ] 402 response body includes `available_inr`, `required_inr`, `shortfall_inr`
+- [ ] If billing fails (exception in deduct), analysis result still returned
+  (billing failure is non-blocking; `cost_breakdown` is `null` in response)
+- [ ] `pool_used` in response matches which DB column was actually decremented
+- [ ] All existing tests for analysis endpoints still pass (no new required field)
+
+---
+
+## H5 — Demo Org Seeder: Seed Completed Analysis State
+
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** A (dev/staging only)
+**Priority:** P1 — demo org documents show as "not analyzed" in UI; kills sales demos
+**Depends on:** D3 (seed_demo_org.py must exist)
+**File:** `backend/app/scripts/seed_demo_org.py` (modify D3)
+
+### Root Cause
+
+D3 seeds: document DB records, usage_log rows, wallet transactions, mismatches.
+What it does NOT do: set each document's `analysis_status` to `"completed"` or
+seed the actual analysis output fields (summary, requirement count, coverage score)
+that the document detail page renders.
+
+The result: a sales demo where the CXO dashboard shows a ₹5,000 wallet and
+30 days of cost trends, but every document in the Documents list shows a
+grey "Pending" status badge. The demo looks like a broken product.
+
+### Fix — Add to `_create_documents()` in `seed_demo_org.py`
+
+After creating each document record, set analysis fields to a completed state.
+The exact field names depend on the existing `Document` model — use `getattr`
+with defaults for safety:
+
+```python
+def _create_documents(db: Session, tenant_id: int) -> list:
+    created = []
+    for doc_def in DEMO_DOCUMENTS:
+        doc = Document(
+            tenant_id=tenant_id,
+            name=doc_def["name"],
+            file_type=doc_def["file_type"],
+            page_count=doc_def["pages"],
+            status="completed",              # ← key fix: not "pending"
+            uploaded_by=None,                # set after users created, or None
+        )
+        # Set analysis output fields — use setattr for safety
+        # (field names may vary by branch; all are additive)
+        setattr(doc, "analysis_status", "completed")
+        setattr(doc, "summary", doc_def.get("summary", f"Analysis complete for {doc_def['name']}."))
+        setattr(doc, "requirement_count", doc_def.get("req_count", 0))
+        setattr(doc, "coverage_score", doc_def.get("coverage_score", 0.75))
+        setattr(doc, "analyzed_at", datetime.utcnow() - timedelta(days=doc_def.get("days_ago", 5)))
+        setattr(doc, "model_used", doc_def.get("model", "gemini-3-flash"))
+
+        db.add(doc)
+        db.flush()
+        created.append(doc)
+        print(f"  ✓ Document: {doc_def['name']} (status=completed)")
+    return created
+```
+
+### Update `DEMO_DOCUMENTS` constant in `seed_demo_org.py`
+
+Add the missing fields to each document definition:
+
+```python
+DEMO_DOCUMENTS = [
+    {
+        "name": "ACME EMI Product PRD v2.1",
+        "file_type": "pdf",
+        "pages": 22,
+        "model": "gemini-3-flash",
+        "days_ago": 28,
+        "summary": "EMI product requirements covering eligibility rules, repayment schedules, "
+                   "and RBI compliance checkpoints. 47 functional requirements extracted.",
+        "req_count": 47,
+        "coverage_score": 0.84,
+    },
+    {
+        "name": "Loan Origination SRS v1.4",
+        "file_type": "docx",
+        "pages": 38,
+        "model": "claude-sonnet-4-6",
+        "days_ago": 21,
+        "summary": "System requirements for the loan origination module. Deep compliance "
+                   "analysis flagged 3 critical gaps against RBI Master Direction.",
+        "req_count": 93,
+        "coverage_score": 0.71,
+    },
+    {
+        "name": "Core Banking API Spec v3.0",
+        "file_type": "pdf",
+        "pages": 65,
+        "model": "gemini-3-flash",
+        "days_ago": 14,
+        "summary": "OpenAPI specification for core banking endpoints. 12 endpoints analyzed, "
+                   "all request/response schemas validated against business rules.",
+        "req_count": 0,
+        "coverage_score": 0.91,
+    },
+    {
+        "name": "RBI Master Direction — Digital Lending",
+        "file_type": "pdf",
+        "pages": 44,
+        "model": "claude-sonnet-4-6",
+        "days_ago": 7,
+        "summary": "Regulatory document analysis. 28 compliance obligations identified. "
+                   "11 currently mapped to code, 17 require remediation.",
+        "req_count": 28,
+        "coverage_score": 0.39,
+    },
+    {
+        "name": "Customer Onboarding CR-2026-04",
+        "file_type": "docx",
+        "pages": 12,
+        "model": "gemini-3-flash-lite",
+        "days_ago": 2,
+        "summary": "Change request for updated KYC flow. 8 requirement changes, "
+                   "all mapped to existing codebase with no gaps.",
+        "req_count": 8,
+        "coverage_score": 1.0,
+    },
+]
+```
+
+### Acceptance Criteria
+
+- [ ] After seeding, all 5 documents show status `"completed"` in the Documents list
+- [ ] Each document's detail page shows the seeded `summary` text
+- [ ] Coverage scores visible: 84%, 71%, 91%, 39%, 100%
+- [ ] The RBI Master Direction document (39% coverage) appears in the "needs attention" list
+- [ ] `analyzed_at` timestamps spread across the last 28 days (not all today)
+- [ ] `model_used` field reflects the model specified per document
+- [ ] If `analysis_status` or `coverage_score` columns don't exist in the model,
+  `setattr` silently skips them — seed does not crash
+
+---
+
+## H6 — Enterprise Contact Lead Email
+
+**Owner:** Backend
+**Effort:** 0.25 day
+**Track:** A
+**Priority:** P1 — sales team never learns about enterprise leads without this
+**Depends on:** G7 (`email_service.py` must exist), C6 (enterprise contact endpoint)
+**File:** `backend/app/services/email_service.py` (extend G7), `backend/app/api/endpoints/billing.py` (update C6)
+
+### Root Cause
+
+C6 enterprise contact endpoint stores the lead record and logs:
+```python
+# TODO (Part D / future): send email to finance@dokydoc.ai + Slack #billing-alerts
+```
+
+The user journey says: *"The DokyDoc sales team gets an email immediately."*
+G7 created `email_service.py` with two email functions. This ticket adds
+a third: `send_enterprise_lead_email()`.
+
+### Add to `email_service.py`
+
+```python
+def send_enterprise_lead_email(
+    to_email: str,
+    lead_name: str,
+    lead_company: str,
+    lead_email: str,
+    lead_phone: str,
+    message: str,
+    submitted_at: datetime,
+) -> bool:
+    """
+    Sent to the DokyDoc sales team when an enterprise contact form is submitted.
+    C6 calls this after storing the enterprise_contact_requests row.
+    """
+    subject = f"[ENTERPRISE LEAD] {lead_company} — {lead_name}"
+
+    html = f"""
+    <p><strong>New enterprise enquiry received.</strong></p>
+
+    <table style="border-collapse:collapse;width:100%;max-width:520px">
+      <tr>
+        <td style="padding:8px 0;color:#6b7280;width:130px">Name</td>
+        <td style="padding:8px 0;font-weight:600">{lead_name}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Company</td>
+        <td style="padding:8px 0;font-weight:600">{lead_company}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Email</td>
+        <td style="padding:8px 0">
+          <a href="mailto:{lead_email}">{lead_email}</a>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Phone</td>
+        <td style="padding:8px 0">{lead_phone or "Not provided"}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280;vertical-align:top">Message</td>
+        <td style="padding:8px 0">{message}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;color:#6b7280">Submitted</td>
+        <td style="padding:8px 0">{submitted_at.strftime("%d %b %Y, %I:%M %p IST")}</td>
+      </tr>
+    </table>
+
+    <p>
+      <a href="mailto:{lead_email}?subject=Re: DokyDoc Enterprise Enquiry"
+         style="display:inline-block;background:#2563eb;color:#fff;
+                padding:8px 16px;border-radius:6px;text-decoration:none;
+                font-weight:600;margin-top:12px">
+        Reply to {lead_name}
+      </a>
+    </p>
+
+    <p style="color:#6b7280;font-size:12px;margin-top:16px">
+      Lead stored in enterprise_contact_requests table. Respond within 24 hours.
+    </p>
+    """
+
+    return _send(to_email, subject, textwrap.dedent(html))
+```
+
+### Add `SALES_EMAIL` setting to `config.py`
+
+```python
+SALES_EMAIL: str = Field(default="sales@dokydoc.com", env="SALES_EMAIL")
+```
+
+### Wire into C6 endpoint handler
+
+In `backend/app/api/endpoints/billing.py`, update the C6 enterprise contact
+handler — replace the TODO comment:
+
+```python
+# REPLACE the TODO comment in C6 handler with:
+from app.services.email_service import send_enterprise_lead_email
+
+send_enterprise_lead_email(
+    to_email=settings.SALES_EMAIL,
+    lead_name=body.contact_name,
+    lead_company=body.company_name,
+    lead_email=body.contact_email,
+    lead_phone=getattr(body, "phone", ""),
+    message=body.message,
+    submitted_at=datetime.now(),
+)
+```
+
+### Acceptance Criteria
+
+- [ ] Submitting the enterprise contact form triggers an email to `settings.SALES_EMAIL`
+- [ ] Email subject: `[ENTERPRISE LEAD] {company} — {name}`
+- [ ] Email body contains name, company, email, phone, message, timestamp
+- [ ] "Reply to" CTA links directly to a mailto with correct subject line
+- [ ] If email send fails → lead is still stored in DB, failure logged, no 500 returned
+- [ ] `SALES_EMAIL` env var configurable; defaults to `sales@dokydoc.com`
+
+---
+
+## H7 — Reconciliation Stale-Order Time Threshold
+
+**Owner:** Backend
+**Effort:** 0.25 day
+**Track:** B (reconciliation only runs after Razorpay is live)
+**Priority:** P1 — without this, nightly task produces false-positive alerts every morning
+**Depends on:** C7 (reconciliation task must exist)
+**File:** `backend/app/tasks/billing_tasks.py`
+
+### Root Cause
+
+Data flow shows the reconciliation task querying:
+```python
+# C7 as written:
+unpaid_orders = db.query(RazorpayOrder).filter(
+    RazorpayOrder.status != "paid"
+).all()
+```
+
+An order in `"created"` status is normal for up to ~30 minutes — the user
+opened the checkout but payment is in-flight. A `"created"` order from
+yesterday at 11:58 PM is abandoned. Without a time threshold, the task fires
+every morning at 01:00 UTC and flags every order created after ~11:30 PM
+the previous night as unpaid — all of them potentially legitimate.
+
+This produces noisy false-positive alerts to the finance team every day,
+creating alert fatigue that causes real failures to be ignored.
+
+### Fix — Add stale threshold to the reconciliation query
+
+In `backend/app/tasks/billing_tasks.py`, update the unpaid orders query:
+
+```python
+# Phase 9 — H7: stale order = created > 2 hours ago and still not paid.
+# Orders created within the last 2 hours may still have active payment sessions.
+# Razorpay's payment link expires after 15 minutes but we give 2h for safety.
+
+STALE_ORDER_HOURS = 2   # configurable — move to settings if ops needs to tune it
+
+stale_cutoff = datetime.utcnow() - timedelta(hours=STALE_ORDER_HOURS)
+
+unpaid_orders = db.query(RazorpayOrder).filter(
+    RazorpayOrder.check_date == check_date,   # only look at yesterday's orders
+    RazorpayOrder.status.notin_(["paid", "refunded", "cancelled"]),
+    RazorpayOrder.created_at < stale_cutoff,  # ← THE FIX: only orders older than 2h
+).all()
+```
+
+Also update the reconciliation report to record the threshold used:
+
+```python
+# In the reconciliation_report INSERT:
+DB WRITE: INSERT INTO reconciliation_reports (
+    ...existing fields...,
+    stale_order_threshold_hours=STALE_ORDER_HOURS,   # audit trail
+    unpaid_orders=len(unpaid_orders),
+)
+```
+
+### Update `ReconciliationReport` model (A7 table)
+
+Add one column to the `reconciliation_reports` table:
+
+```python
+# In backend/app/models/reconciliation_report.py — additive column:
+stale_order_threshold_hours: Mapped[int] = mapped_column(
+    Integer, default=2, nullable=False
+)
+```
+
+Add the corresponding Alembic migration `s9p8_reconciliation_threshold.py`.
+
+### Acceptance Criteria
+
+- [ ] Orders created < 2 hours ago do NOT appear in `unpaid_orders` count
+- [ ] Orders created > 2 hours ago with `status != "paid"` ARE flagged
+- [ ] A payment completed at 11:58 PM (order created 11:57 PM, task runs 01:00 AM)
+  does NOT generate a false alert (2h window covers this)
+- [ ] `STALE_ORDER_HOURS = 2` is defined as a named constant (not a magic number)
+- [ ] Reconciliation report records `stale_order_threshold_hours` for audit trail
+- [ ] All existing reconciliation tests pass
+
+---
+
+## H8 — Hybrid Wallet State Display
+
+**Owner:** Frontend
+**Effort:** 0.25 day
+**Track:** A
+**Priority:** P1 — after first recharge, free credit silently disappears from all UI
+**Depends on:** H2 (`WalletBalanceBadge` — already handles hybrid display)
+**Note:** H2 already solves the navigation badge. This ticket covers the
+remaining surfaces where the hybrid state is not communicated.
+
+### Root Cause
+
+After first recharge:
+- `FreeCreditBanner` (E2) hides because `has_recharged_ever=true`
+- `WalletBalanceBadge` (H2) shows the hybrid pill — ✅ covered
+- But: `CostPreviewModal` (G5) shows `currentPool = wallet.balance_inr` for
+  paid users — it won't show the user that their ₹4.50 free credit will be
+  deducted first
+
+The user sees a preview saying "Balance after: ₹484.58" but after the analysis
+their paid balance is still ₹484.58 (the free credit paid for it). They're
+confused — why didn't the balance change?
+
+### Fix 1 — Update `CostPreviewModal` Pool Display (G5)
+
+In `CostPreviewModal`, when the user is on the hybrid state (has recharged,
+but free credit still exists), the pool display must reflect which pool will
+actually be debited:
+
+```typescript
+// In CostPreviewModal — update pool selection logic:
+
+// Determine which pool will actually be charged:
+const willUseFreeLane = wallet.free_credit_remaining_inr > 0;
+// (wallet_service.deduct() always exhausts free credit first)
+
+const currentPool = willUseFreeLane
+  ? wallet.free_credit_remaining_inr
+  : wallet.balance_inr;
+
+const poolLabel = willUseFreeLane
+  ? "Free credit (used first)"     // ← was just "Wallet balance"
+  : "Wallet balance";
+
+const balanceAfter = currentPool - estCost;
+
+// Pool source indicator in the modal:
+{willUseFreeLane && wallet.has_recharged_ever && (
+  <div className="flex items-center gap-1.5 rounded-md bg-green-50 px-3 py-2 text-xs text-green-700">
+    <span>✓</span>
+    <span>
+      Your ₹{wallet.free_credit_remaining_inr.toFixed(2)} free credit will be
+      used first — your paid wallet is untouched.
+    </span>
+  </div>
+)}
+```
+
+### Fix 2 — Hybrid State in `CostReceiptDrawer` (E6)
+
+After analysis, the receipt drawer shows the pool badge. For the hybrid state,
+the label is already "Free credit" (green) — which is correct. No change needed.
+
+### Fix 3 — `InsufficientFundsModal` (G6) Uses Combined Balance
+
+The `InsufficientFundsModal` already uses
+`wallet.balance_inr + wallet.free_credit_remaining_inr` as `currentPool`
+in G6 — this is correct. No change needed.
+
+### Acceptance Criteria
+
+- [ ] User who has recharged but still has free credit → `CostPreviewModal` shows
+  "Free credit (used first)" as the pool label
+- [ ] Green info banner in modal: "Your ₹X.XX free credit will be used first"
+- [ ] `balanceAfter` in preview reflects free credit decreasing (not paid wallet)
+- [ ] Receipt drawer after analysis shows "Free credit" badge (green) for hybrid users
+- [ ] After free credit exhausted: modal reverts to showing paid wallet pool
+- [ ] `WalletBalanceBadge` (H2) already handles hybrid — no change needed there
+
+---
+
+
+---
+
+## Part H Summary
+
+| Ticket | Gap Fixed | Files | Priority | Track | Est. LOC |
+|--------|-----------|-------|----------|-------|---------|
+| H1 | Strip markup from all customer-facing surfaces | `schemas/billing.py`, `cost_export_service.py`, `CostReceiptDrawer.tsx`, `CostPreviewModal.tsx`, `types/billing.ts` | P0 | A | ~60 |
+| H2 | Persistent wallet balance in nav header | `WalletBalanceBadge.tsx` (new) | P0 | A | ~90 |
+| H3 | Transaction history UI | `WalletTransactionTable.tsx` (new), `types/billing.ts`, `billingApi.ts` | P1 | A | ~110 |
+| H4 | Analysis endpoints: model_id + cost_breakdown | `documents.py`, `code_analysis.py`, `schemas/document.py`, `wallet_service.py` | P0 | A | ~80 |
+| H5 | Demo org: seed completed analysis state | `seed_demo_org.py` | P1 | A (dev only) | ~40 |
+| H6 | Enterprise lead email | `email_service.py`, `billing.py` (C6 wiring), `config.py` | P1 | A | ~50 |
+| H7 | Stale order threshold in reconciliation | `billing_tasks.py`, `reconciliation_report.py`, new migration | P1 | B | ~20 |
+| H8 | Hybrid wallet state in cost preview | `CostPreviewModal.tsx` | P1 | A | ~20 |
+
+### Part H Execution Order
+
+```
+H1 (strip markup — establishes CostBreakdownResponse schema used by H4)
+  ↓
+H4 (analysis endpoint wiring — depends on H1 schema + B1/B2/B3/B4)
+  ↓
+H2 (WalletBalanceBadge — depends on G1 wallet types)
+H3 (WalletTransactionTable — depends on G1 types + C5 endpoint)
+H8 (Hybrid state in preview — depends on H1 preview changes)
+  ↓
+H5 (Demo seeder fix — independent, do anytime after D3)
+H6 (Enterprise email — depends on G7 email_service existing)
+H7 (Reconciliation fix — Track B, do when C7 is live)
+```
+
+### Amended Master Execution Checklist
+
+The full Phase 9 checklist, updated with H-tickets and the markup decision:
+
+#### Track A — All must pass before production launch
+
+**DB (run once):**
+- [ ] A1 migration: tenant wallet fields
+- [ ] A2 migration: wallet_transactions table
+- [ ] A3 migration: razorpay_orders table
+- [ ] A4 migration: usage_logs markup columns
+- [ ] A5 migration: enterprise_contact_requests table
+- [ ] New: H7 migration s9p8_reconciliation_threshold
+
+**Backend core:**
+- [ ] B0: `GEMINI_MODEL=gemini-3-flash` in all envs (**URGENT — June 17 deadline**)
+- [ ] B1: CostBreakdown dataclass + markup calculation
+- [ ] B2: ModelSelector service + provider_router extension
+- [ ] B3: WalletService + two-pool deduct (returns `pool_used`)
+- [ ] B4: BillingEnforcementService two-pool + low-balance hook
+- [ ] B5: Free credit seed on signup
+- [ ] G3: Claude pricing in PRICING_REGISTRY
+- [ ] H4: Analysis endpoints wired (model_id in, cost_breakdown out)
+
+**Backend payments/wallet (Track A portion):**
+- [ ] C5: Wallet balance + transactions endpoints (updated schema from G1)
+- [ ] C6: Enterprise contact endpoint
+- [ ] G7: email_service.py (low balance + payment receipt + enterprise lead)
+- [ ] H6: Enterprise lead email wired into C6
+
+**Backend exports:**
+- [ ] D1: CostExportService (markup columns removed per H1)
+- [ ] D2: Export endpoint
+
+**Scripts:**
+- [ ] D3: Demo org seeder (with H5 analysis state fix)
+
+**Frontend:**
+- [ ] G4: Fix MODEL_REGISTRY model IDs
+- [ ] G1: WalletState type + BillingContext aligned to C5 schema
+- [ ] E1: BillingContext + billingApi (with H3 type fixes)
+- [ ] H1: Strip markup from CostReceiptDrawer + CostPreviewModal + types
+- [ ] H2: WalletBalanceBadge mounted in navigation
+- [ ] H3: WalletTransactionTable on BillingSettings page
+- [ ] E2: FreeCreditBanner (Track A)
+- [ ] E3: LowBalanceAlert (Track A, using backend `low_balance_alert`)
+- [ ] G5: CostPreviewModal (moved Track A) with H8 hybrid state fix
+- [ ] E6: CostReceiptDrawer (markup stripped per H1)
+- [ ] E8: ExportPanel on BillingSettings page
+- [ ] G6: InsufficientFundsModal + 402 interceptor
+
+#### Track B — Flip `RAZORPAY_ENABLED=true` on GSTIN day
+
+- [ ] C1: RazorpayService + `/billing/config` endpoint
+- [ ] C2: Create order endpoint
+- [ ] C3: Verify payment endpoint
+- [ ] C4: Webhook handler
+- [ ] C7: Nightly reconciliation task (with H7 stale-order fix)
+- [ ] E4: ModelSelector (paid dropdown)
+- [ ] E7: RechargeModal
+
+---
+
+## Complete Phase 9 Journey Integrity Guarantee
+
+After all Parts A–H are implemented, the following user journeys execute
+without a single broken step:
+
+| Journey step | Implemented by |
+|---|---|
+| Sign up → ₹100 free credit appears in green banner | B5 + E2 |
+| Nav header always shows wallet balance | H2 |
+| Cost preview before every analysis (free and paid) | G5 + H8 |
+| Free lane analysis deducted from free credit pool | B3 + B4 + H4 |
+| Model selector locked for free users | B2 + E4 + G4 |
+| Receipt drawer shows total, tokens, pool used | E6 + H1 + H4 |
+| Low balance email sent at ₹100 threshold | B4 + G7 |
+| Amber badge in nav when low balance | H2 + G1 |
+| Running out of funds → InsufficientFundsModal (not raw error) | G6 + H4 |
+| First recharge → model selector unlocks immediately | C3 + E7 + BillingContext.refetch() |
+| After recharge, hybrid state shown in preview and badge | H8 + H2 |
+| Transaction history visible on billing page | H3 |
+| Payment receipt email sent after recharge | G7 + C3 |
+| CXO exports cost report in 4 formats | D1 + D2 + E8 (markup stripped, H1) |
+| Enterprise contact → sales team email immediately | C6 + H6 |
+| Sales demo org spins up with analyzed documents | D3 + H5 |
+| Nightly reconciliation runs clean, no false alerts | C7 + H7 |
 
 ---
 
