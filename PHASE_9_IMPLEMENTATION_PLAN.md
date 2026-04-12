@@ -3317,3 +3317,3030 @@ Only one change: set `RAZORPAY_ENABLED=true` in `.env`. No code deploy needed. C
 Updated migration chain: `s9d1 → s9p1 → s9p2 → s9p3 → s9p4 → s9p5 → s9p6 → s9p7`
 
 ✅ **PART C COMPLETE** — 7 tickets, 4.0 days. Track B tickets are feature-flagged and activate on GSTIN. Track A tickets ship immediately.
+
+---
+
+## PART D — BACKEND EXPORTS & UTILITIES
+
+> **What this part delivers:** Four-format cost export (CSV, PDF, JSON, DOCX) via a single endpoint, and a one-command demo organization seeder for sales calls. All tickets are Track A — no GSTIN required.
+>
+> **New dependency:** `fpdf2>=2.7.9` for PDF generation (pure Python, no system deps). Add to `requirements.txt`. `python-docx` is already installed.
+>
+> **Design principle for exports:** One service assembles a single `ExportDataset` object from the DB. Four renderers consume it. Adding a 5th format later (e.g. XLSX) means writing one new renderer — zero DB logic changes.
+
+---
+
+### TICKET D1 — Cost Export Service
+**Owner:** Backend
+**Effort:** 1.5 days
+**Track:** A
+**Depends on:** A4 (raw_cost_inr in usage_logs), A2 (wallet_transactions), B1 (markup fields populated)
+
+#### Context
+
+The export must show — per the strategy — every rupee with full transparency: raw AI cost, 15% platform fee, and the total charged, broken down by document, user, model, and day. The service has two responsibilities:
+1. **Data assembly** — query `usage_logs` + `wallet_transactions` for the requested date range and build a structured `ExportDataset`
+2. **Format rendering** — render the same dataset to CSV, PDF, JSON, or DOCX
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/requirements.txt` | Add `fpdf2>=2.7.9` |
+| `backend/app/services/cost_export_service.py` | **New file** |
+
+#### `requirements.txt` addition
+
+```
+fpdf2>=2.7.9
+```
+
+#### Service — `cost_export_service.py`
+
+```python
+"""
+Cost Export Service — Phase 9 (D6)
+Assembles billing data and renders to CSV / PDF / JSON / DOCX.
+
+Design: ExportDataset is built once from DB, then passed to
+format-specific renderers. Adding a new format = new renderer only.
+"""
+import csv
+import io
+import json
+from dataclasses import dataclass, field, asdict
+from datetime import date, datetime, timedelta
+from typing import Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import func, and_
+
+from app.core.logging import get_logger
+
+logger = get_logger("services.cost_export")
+
+MARKUP_PERCENT = 15.0  # Must match cost_service.MARKUP_PERCENT
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExportLineItem:
+    """One row in the export — maps to a single usage_log record."""
+    date: str                      # ISO date (YYYY-MM-DD)
+    document_name: str
+    user_email: str
+    model_used: str
+    feature_type: str
+    operation: str
+    input_tokens: int
+    output_tokens: int
+    thinking_tokens: int
+    raw_cost_inr: float            # What Google/Anthropic charged us
+    markup_inr: float              # Our 15% platform fee
+    total_cost_inr: float          # What the customer pays
+
+
+@dataclass
+class WalletEntry:
+    """One row in the transaction ledger."""
+    date: str
+    direction: str                 # "credit" | "debit"
+    amount_inr: float
+    balance_after_inr: float
+    txn_type: str
+    notes: Optional[str]
+
+
+@dataclass
+class ExportDataset:
+    """
+    Complete billing dataset for a tenant over a date range.
+    Assembled once, rendered to any format.
+    """
+    tenant_name: str
+    tenant_id: int
+    from_date: str
+    to_date: str
+    generated_at: str
+
+    # Line items (one per usage_log row)
+    line_items: list[ExportLineItem] = field(default_factory=list)
+
+    # Wallet ledger
+    wallet_entries: list[WalletEntry] = field(default_factory=list)
+
+    # Aggregated summaries (computed from line_items)
+    total_raw_inr: float = 0.0
+    total_markup_inr: float = 0.0
+    total_charged_inr: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
+    # Breakdowns (dicts: key → {raw_cost_inr, markup_inr, total_cost_inr})
+    by_document: dict = field(default_factory=dict)
+    by_user: dict = field(default_factory=dict)
+    by_model: dict = field(default_factory=dict)
+    by_day: dict = field(default_factory=dict)   # date string → costs
+
+
+# ---------------------------------------------------------------------------
+# Data assembly
+# ---------------------------------------------------------------------------
+
+class CostExportService:
+
+    def build_dataset(
+        self,
+        db: Session,
+        *,
+        tenant_id: int,
+        from_date: date,
+        to_date: date,
+    ) -> ExportDataset:
+        """
+        Query DB and assemble ExportDataset for the given date range.
+        All format renderers call this first.
+        """
+        from app.models.usage_log import UsageLog
+        from app.models.document import Document
+        from app.models.user import User
+        from app.models.wallet_transaction import WalletTransaction
+        from app.models.tenant import Tenant
+
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        tenant_name = tenant.name if tenant else f"Tenant {tenant_id}"
+
+        from_dt = datetime.combine(from_date, datetime.min.time())
+        to_dt = datetime.combine(to_date + timedelta(days=1), datetime.min.time())
+
+        # --- Usage log rows ---
+        logs = (
+            db.query(UsageLog)
+            .filter(
+                UsageLog.tenant_id == tenant_id,
+                UsageLog.created_at >= from_dt,
+                UsageLog.created_at < to_dt,
+            )
+            .order_by(UsageLog.created_at.desc())
+            .all()
+        )
+
+        # Pre-load document names and user emails in bulk
+        doc_ids = {log.document_id for log in logs if log.document_id}
+        user_ids = {log.user_id for log in logs if log.user_id}
+
+        doc_map = {}
+        if doc_ids:
+            docs = db.query(Document.id, Document.title).filter(
+                Document.id.in_(doc_ids)
+            ).all()
+            doc_map = {d.id: d.title for d in docs}
+
+        user_map = {}
+        if user_ids:
+            users = db.query(User.id, User.email).filter(
+                User.id.in_(user_ids)
+            ).all()
+            user_map = {u.id: u.email for u in users}
+
+        # Build line items
+        line_items = []
+        for log in logs:
+            raw = float(getattr(log, "raw_cost_inr", 0) or log.cost_inr or 0)
+            markup = float(getattr(log, "markup_inr", 0) or 0)
+            total = float(log.cost_inr or 0)
+
+            # Fallback: if A4 columns not yet populated, derive from total
+            if raw == 0 and total > 0:
+                raw = round(total / 1.15, 4)
+                markup = round(total - raw, 4)
+
+            line_items.append(ExportLineItem(
+                date=log.created_at.date().isoformat(),
+                document_name=doc_map.get(log.document_id, "—") if log.document_id else "—",
+                user_email=user_map.get(log.user_id, "system") if log.user_id else "system",
+                model_used=log.model_used or "unknown",
+                feature_type=log.feature_type or "",
+                operation=log.operation or "",
+                input_tokens=log.input_tokens or 0,
+                output_tokens=log.output_tokens or 0,
+                thinking_tokens=int((log.extra_data or {}).get("thinking_tokens", 0)),
+                raw_cost_inr=raw,
+                markup_inr=markup,
+                total_cost_inr=total,
+            ))
+
+        # Wallet ledger
+        wallet_rows = (
+            db.query(WalletTransaction)
+            .filter(
+                WalletTransaction.tenant_id == tenant_id,
+                WalletTransaction.created_at >= from_dt,
+                WalletTransaction.created_at < to_dt,
+            )
+            .order_by(WalletTransaction.created_at.desc())
+            .all()
+        )
+        wallet_entries = [
+            WalletEntry(
+                date=w.created_at.date().isoformat(),
+                direction=w.direction,
+                amount_inr=float(w.amount_inr),
+                balance_after_inr=float(w.balance_after_inr),
+                txn_type=w.txn_type,
+                notes=w.notes,
+            )
+            for w in wallet_rows
+        ]
+
+        # Compute aggregates + breakdowns
+        dataset = ExportDataset(
+            tenant_name=tenant_name,
+            tenant_id=tenant_id,
+            from_date=from_date.isoformat(),
+            to_date=to_date.isoformat(),
+            generated_at=datetime.now().isoformat(timespec="seconds"),
+            line_items=line_items,
+            wallet_entries=wallet_entries,
+        )
+        self._compute_aggregates(dataset)
+        return dataset
+
+    def _compute_aggregates(self, dataset: ExportDataset) -> None:
+        """Compute totals and breakdowns in-place from line_items."""
+        for item in dataset.line_items:
+            dataset.total_raw_inr += item.raw_cost_inr
+            dataset.total_markup_inr += item.markup_inr
+            dataset.total_charged_inr += item.total_cost_inr
+            dataset.total_input_tokens += item.input_tokens
+            dataset.total_output_tokens += item.output_tokens
+
+            for key, label in [
+                ("by_document", item.document_name),
+                ("by_user", item.user_email),
+                ("by_model", item.model_used),
+                ("by_day", item.date),
+            ]:
+                bucket = getattr(dataset, key)
+                if label not in bucket:
+                    bucket[label] = {"raw_cost_inr": 0.0, "markup_inr": 0.0, "total_cost_inr": 0.0}
+                bucket[label]["raw_cost_inr"] += item.raw_cost_inr
+                bucket[label]["markup_inr"] += item.markup_inr
+                bucket[label]["total_cost_inr"] += item.total_cost_inr
+
+        # Round all floats to 4 decimal places
+        dataset.total_raw_inr = round(dataset.total_raw_inr, 4)
+        dataset.total_markup_inr = round(dataset.total_markup_inr, 4)
+        dataset.total_charged_inr = round(dataset.total_charged_inr, 4)
+
+    # -----------------------------------------------------------------------
+    # FORMAT RENDERERS
+    # -----------------------------------------------------------------------
+
+    def render_json(self, dataset: ExportDataset) -> bytes:
+        """Render dataset as pretty-printed JSON bytes."""
+        data = asdict(dataset)
+        return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+    def render_csv(self, dataset: ExportDataset) -> bytes:
+        """
+        Render dataset as multi-sheet CSV.
+        Sheets are separated by a blank line + section header row.
+        Compatible with Excel / Google Sheets import.
+        """
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # --- Sheet 1: Summary ---
+        writer.writerow(["DokyDoc Cost Export"])
+        writer.writerow(["Tenant", dataset.tenant_name])
+        writer.writerow(["Period", f"{dataset.from_date} to {dataset.to_date}"])
+        writer.writerow(["Generated", dataset.generated_at])
+        writer.writerow([])
+        writer.writerow(["SUMMARY"])
+        writer.writerow(["Total Raw AI Cost (INR)", f"{dataset.total_raw_inr:.4f}"])
+        writer.writerow(["Platform Fee 15% (INR)", f"{dataset.total_markup_inr:.4f}"])
+        writer.writerow(["Total Charged (INR)", f"{dataset.total_charged_inr:.4f}"])
+        writer.writerow(["Total Input Tokens", dataset.total_input_tokens])
+        writer.writerow(["Total Output Tokens", dataset.total_output_tokens])
+        writer.writerow([])
+
+        # --- Sheet 2: Line Items ---
+        writer.writerow(["LINE ITEMS (per analysis call)"])
+        writer.writerow([
+            "Date", "Document", "User", "Model", "Feature", "Operation",
+            "Input Tokens", "Output Tokens", "Thinking Tokens",
+            "Raw Cost INR", "Platform Fee INR", "Total Charged INR"
+        ])
+        for item in dataset.line_items:
+            writer.writerow([
+                item.date, item.document_name, item.user_email,
+                item.model_used, item.feature_type, item.operation,
+                item.input_tokens, item.output_tokens, item.thinking_tokens,
+                f"{item.raw_cost_inr:.4f}", f"{item.markup_inr:.4f}",
+                f"{item.total_cost_inr:.4f}",
+            ])
+        writer.writerow([])
+
+        # --- Sheet 3: By Document ---
+        writer.writerow(["BY DOCUMENT"])
+        writer.writerow(["Document", "Raw Cost INR", "Platform Fee INR", "Total INR"])
+        for doc, costs in sorted(dataset.by_document.items(), key=lambda x: -x[1]["total_cost_inr"]):
+            writer.writerow([doc, f"{costs['raw_cost_inr']:.4f}",
+                             f"{costs['markup_inr']:.4f}", f"{costs['total_cost_inr']:.4f}"])
+        writer.writerow([])
+
+        # --- Sheet 4: By User ---
+        writer.writerow(["BY USER"])
+        writer.writerow(["User Email", "Raw Cost INR", "Platform Fee INR", "Total INR"])
+        for user, costs in sorted(dataset.by_user.items(), key=lambda x: -x[1]["total_cost_inr"]):
+            writer.writerow([user, f"{costs['raw_cost_inr']:.4f}",
+                             f"{costs['markup_inr']:.4f}", f"{costs['total_cost_inr']:.4f}"])
+        writer.writerow([])
+
+        # --- Sheet 5: By Model ---
+        writer.writerow(["BY MODEL"])
+        writer.writerow(["Model", "Raw Cost INR", "Platform Fee INR", "Total INR"])
+        for model, costs in sorted(dataset.by_model.items(), key=lambda x: -x[1]["total_cost_inr"]):
+            writer.writerow([model, f"{costs['raw_cost_inr']:.4f}",
+                             f"{costs['markup_inr']:.4f}", f"{costs['total_cost_inr']:.4f}"])
+        writer.writerow([])
+
+        # --- Sheet 6: Wallet Ledger ---
+        writer.writerow(["WALLET LEDGER"])
+        writer.writerow(["Date", "Direction", "Amount INR", "Balance After INR", "Type", "Notes"])
+        for entry in dataset.wallet_entries:
+            writer.writerow([
+                entry.date, entry.direction, f"{entry.amount_inr:.2f}",
+                f"{entry.balance_after_inr:.2f}", entry.txn_type, entry.notes or ""
+            ])
+
+        return output.getvalue().encode("utf-8")
+
+    def render_pdf(self, dataset: ExportDataset) -> bytes:
+        """
+        Render dataset as a PDF using fpdf2.
+        Professional layout with header, summary box, and tables.
+        """
+        from fpdf import FPDF, XPos, YPos
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        # --- Header ---
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 10, "DokyDoc — Cost Export Report", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 6, f"Tenant: {dataset.tenant_name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(0, 6, f"Period: {dataset.from_date}  →  {dataset.to_date}",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(0, 6, f"Generated: {dataset.generated_at}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(4)
+
+        # --- Summary box ---
+        pdf.set_fill_color(245, 247, 255)
+        pdf.set_draw_color(200, 210, 240)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 8, "Summary", new_x=XPos.LMARGIN, new_y=YPos.NEXT, fill=True)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(40, 40, 40)
+        col_w = 95
+        for label, value in [
+            ("Raw AI Cost (what Google/Anthropic charged us):", f"INR {dataset.total_raw_inr:.2f}"),
+            ("Platform Fee (15% markup):", f"INR {dataset.total_markup_inr:.2f}"),
+            ("Total Charged to Wallet:", f"INR {dataset.total_charged_inr:.2f}"),
+            ("Total Input Tokens:", f"{dataset.total_input_tokens:,}"),
+            ("Total Output Tokens:", f"{dataset.total_output_tokens:,}"),
+        ]:
+            pdf.cell(col_w, 7, label)
+            pdf.cell(col_w, 7, value, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(4)
+
+        def _table_header(headers: list[tuple[str, int]], fill_color=(30, 60, 114)):
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(*fill_color)
+            pdf.set_text_color(255, 255, 255)
+            for text, w in headers:
+                pdf.cell(w, 7, text, border=1, fill=True)
+            pdf.ln()
+            pdf.set_text_color(40, 40, 40)
+            pdf.set_font("Helvetica", "", 8)
+
+        def _table_row(values: list[tuple[str, int]], fill=False):
+            pdf.set_fill_color(248, 248, 255)
+            for text, w in values:
+                pdf.cell(w, 6, text, border=1, fill=fill)
+            pdf.ln()
+
+        # --- By Document table ---
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 8, "Cost by Document", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        _table_header([("Document", 90), ("Raw INR", 30), ("Fee INR", 30), ("Total INR", 30)])
+        for doc, costs in sorted(dataset.by_document.items(), key=lambda x: -x[1]["total_cost_inr"])[:20]:
+            _table_row([
+                (doc[:45], 90),
+                (f"{costs['raw_cost_inr']:.2f}", 30),
+                (f"{costs['markup_inr']:.2f}", 30),
+                (f"{costs['total_cost_inr']:.2f}", 30),
+            ])
+        pdf.ln(4)
+
+        # --- By Model table ---
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 8, "Cost by AI Model", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        _table_header([("Model", 80), ("Raw INR", 35), ("Fee INR", 35), ("Total INR", 30)])
+        for model, costs in sorted(dataset.by_model.items(), key=lambda x: -x[1]["total_cost_inr"]):
+            _table_row([
+                (model, 80),
+                (f"{costs['raw_cost_inr']:.2f}", 35),
+                (f"{costs['markup_inr']:.2f}", 35),
+                (f"{costs['total_cost_inr']:.2f}", 30),
+            ])
+        pdf.ln(4)
+
+        # --- By User table ---
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 8, "Cost by Team Member", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        _table_header([("User", 80), ("Raw INR", 35), ("Fee INR", 35), ("Total INR", 30)])
+        for user, costs in sorted(dataset.by_user.items(), key=lambda x: -x[1]["total_cost_inr"]):
+            _table_row([
+                (user[:40], 80),
+                (f"{costs['raw_cost_inr']:.2f}", 35),
+                (f"{costs['markup_inr']:.2f}", 35),
+                (f"{costs['total_cost_inr']:.2f}", 30),
+            ])
+        pdf.ln(4)
+
+        # --- Daily trend table ---
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 60, 114)
+        pdf.cell(0, 8, "Daily Spend", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        _table_header([("Date", 50), ("Raw INR", 45), ("Fee INR", 45), ("Total INR", 40)])
+        for day, costs in sorted(dataset.by_day.items()):
+            _table_row([
+                (day, 50),
+                (f"{costs['raw_cost_inr']:.2f}", 45),
+                (f"{costs['markup_inr']:.2f}", 45),
+                (f"{costs['total_cost_inr']:.2f}", 40),
+            ])
+
+        # --- Footer on all pages ---
+        pdf.set_y(-15)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 5, "DokyDoc — Transparent AI cost reporting | support@dokydoc.ai",
+                 align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        return bytes(pdf.output())
+
+    def render_docx(self, dataset: ExportDataset) -> bytes:
+        """
+        Render dataset as a DOCX file using python-docx.
+        Suitable for pasting into monthly status reports.
+        """
+        from docx import Document as DocxDocument
+        from docx.shared import Pt, RGBColor, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = DocxDocument()
+
+        # Title
+        title = doc.add_heading("DokyDoc — Cost Export Report", 0)
+        title.runs[0].font.color.rgb = RGBColor(30, 60, 114)
+
+        # Meta
+        doc.add_paragraph(f"Tenant: {dataset.tenant_name}")
+        doc.add_paragraph(f"Period: {dataset.from_date}  →  {dataset.to_date}")
+        doc.add_paragraph(f"Generated: {dataset.generated_at}")
+        doc.add_paragraph("")
+
+        # Summary section
+        doc.add_heading("Summary", 1)
+        summary_data = [
+            ("Raw AI Cost (Google/Anthropic)", f"INR {dataset.total_raw_inr:.2f}"),
+            ("Platform Fee (15%)", f"INR {dataset.total_markup_inr:.2f}"),
+            ("Total Charged", f"INR {dataset.total_charged_inr:.2f}"),
+            ("Total Input Tokens", f"{dataset.total_input_tokens:,}"),
+            ("Total Output Tokens", f"{dataset.total_output_tokens:,}"),
+        ]
+        tbl = doc.add_table(rows=1, cols=2)
+        tbl.style = "Table Grid"
+        tbl.rows[0].cells[0].text = "Metric"
+        tbl.rows[0].cells[1].text = "Value"
+        for label, val in summary_data:
+            row = tbl.add_row()
+            row.cells[0].text = label
+            row.cells[1].text = val
+
+        doc.add_paragraph("")
+
+        def _add_table(heading: str, headers: list[str], rows: list[list[str]]):
+            doc.add_heading(heading, 2)
+            if not rows:
+                doc.add_paragraph("No data for this period.")
+                return
+            t = doc.add_table(rows=1, cols=len(headers))
+            t.style = "Table Grid"
+            for i, h in enumerate(headers):
+                t.rows[0].cells[i].text = h
+            for row_data in rows:
+                r = t.add_row()
+                for i, val in enumerate(row_data):
+                    r.cells[i].text = val
+            doc.add_paragraph("")
+
+        # By Document
+        _add_table(
+            "Cost by Document",
+            ["Document", "Raw INR", "Platform Fee INR", "Total INR"],
+            [
+                [doc_name[:60], f"{c['raw_cost_inr']:.2f}", f"{c['markup_inr']:.2f}", f"{c['total_cost_inr']:.2f}"]
+                for doc_name, c in sorted(dataset.by_document.items(), key=lambda x: -x[1]["total_cost_inr"])[:30]
+            ]
+        )
+
+        # By User
+        _add_table(
+            "Cost by Team Member",
+            ["User", "Raw INR", "Platform Fee INR", "Total INR"],
+            [
+                [u, f"{c['raw_cost_inr']:.2f}", f"{c['markup_inr']:.2f}", f"{c['total_cost_inr']:.2f}"]
+                for u, c in sorted(dataset.by_user.items(), key=lambda x: -x[1]["total_cost_inr"])
+            ]
+        )
+
+        # By Model
+        _add_table(
+            "Cost by AI Model",
+            ["Model", "Raw INR", "Platform Fee INR", "Total INR"],
+            [
+                [m, f"{c['raw_cost_inr']:.2f}", f"{c['markup_inr']:.2f}", f"{c['total_cost_inr']:.2f}"]
+                for m, c in sorted(dataset.by_model.items(), key=lambda x: -x[1]["total_cost_inr"])
+            ]
+        )
+
+        # Wallet Ledger
+        _add_table(
+            "Wallet Transaction History",
+            ["Date", "Direction", "Amount INR", "Balance After", "Type"],
+            [
+                [e.date, e.direction, f"{e.amount_inr:.2f}", f"{e.balance_after_inr:.2f}", e.txn_type]
+                for e in dataset.wallet_entries
+            ]
+        )
+
+        # Footer paragraph
+        doc.add_paragraph("")
+        footer = doc.add_paragraph("DokyDoc — Transparent AI cost reporting | support@dokydoc.ai")
+        footer.runs[0].font.size = Pt(8)
+        footer.runs[0].font.color.rgb = RGBColor(150, 150, 150)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+
+# Singleton
+cost_export_service = CostExportService()
+```
+
+#### Acceptance Criteria
+
+- [ ] `build_dataset(db, tenant_id=1, from_date=X, to_date=Y)` → `ExportDataset` with correct aggregates
+- [ ] `total_charged_inr` ≈ `total_raw_inr * 1.15` (within rounding tolerance)
+- [ ] `by_document` sums to `total_charged_inr`; `by_user` sums to `total_charged_inr`
+- [ ] `render_json(dataset)` → valid JSON bytes, parseable, contains all sections
+- [ ] `render_csv(dataset)` → valid UTF-8, six section headers, correct column counts
+- [ ] `render_pdf(dataset)` → non-empty bytes, no fpdf2 exception
+- [ ] `render_docx(dataset)` → valid DOCX bytes openable by Word / LibreOffice
+- [ ] Empty date range (no usage_logs) → all formats render without crash, totals are zero
+- [ ] `usage_logs` rows missing `raw_cost_inr` (pre-A4 DB) → fallback derives raw from `cost_inr / 1.15`
+
+---
+
+### TICKET D2 — Billing Export Endpoint
+**Owner:** Backend
+**Effort:** 0.5 day
+**Track:** A
+**Depends on:** D1 (cost_export_service)
+
+#### Context
+
+Single endpoint, four formats, one date range selector. The frontend sends `format=csv|pdf|json|docx` and a date range. The endpoint builds the dataset and streams the file back with the correct `Content-Type` and `Content-Disposition` headers so the browser triggers a download automatically.
+
+**Important:** This is a new endpoint added to `billing.py`. It does NOT modify the existing `exports.py` (which handles document/code/ontology exports — a different domain).
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/api/endpoints/billing.py` | Add endpoint |
+| `backend/app/schemas/billing.py` | Add date range helpers |
+
+#### Date Range Helpers — `billing.py` additions
+
+```python
+# Add near top of billing.py (after imports)
+from datetime import date, timedelta
+from enum import Enum
+
+class ExportFormat(str, Enum):
+    csv  = "csv"
+    pdf  = "pdf"
+    json = "json"
+    docx = "docx"
+
+class DateRangePreset(str, Enum):
+    last_7_days   = "last_7_days"
+    this_month    = "this_month"
+    last_month    = "last_month"
+    last_quarter  = "last_quarter"
+    custom        = "custom"       # requires from_date + to_date params
+
+def _resolve_date_range(
+    preset: DateRangePreset,
+    from_date: Optional[date],
+    to_date: Optional[date],
+) -> tuple[date, date]:
+    """Resolve a preset or custom date range. Returns (from_date, to_date) inclusive."""
+    today = date.today()
+
+    if preset == DateRangePreset.last_7_days:
+        return today - timedelta(days=6), today
+
+    if preset == DateRangePreset.this_month:
+        return today.replace(day=1), today
+
+    if preset == DateRangePreset.last_month:
+        first_this_month = today.replace(day=1)
+        last_last_month  = first_this_month - timedelta(days=1)
+        first_last_month = last_last_month.replace(day=1)
+        return first_last_month, last_last_month
+
+    if preset == DateRangePreset.last_quarter:
+        return today - timedelta(days=89), today
+
+    # custom
+    if not from_date or not to_date:
+        raise HTTPException(
+            status_code=422,
+            detail="from_date and to_date are required when preset=custom"
+        )
+    if from_date > to_date:
+        raise HTTPException(status_code=422, detail="from_date must be ≤ to_date")
+    if (to_date - from_date).days > 366:
+        raise HTTPException(status_code=422, detail="Date range cannot exceed 366 days")
+    return from_date, to_date
+```
+
+#### Endpoint
+
+```python
+@router.get("/export")
+@limiter.limit("10/minute")
+def export_billing_data(
+    request: Request,
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    format: ExportFormat = Query(default=ExportFormat.csv, description="Output format"),
+    preset: DateRangePreset = Query(
+        default=DateRangePreset.this_month,
+        description="Date range preset"
+    ),
+    from_date: Optional[date] = Query(default=None, description="Start date (required if preset=custom)"),
+    to_date: Optional[date] = Query(default=None, description="End date (required if preset=custom)"),
+):
+    """
+    Export billing data in CSV, PDF, JSON, or DOCX format.
+    [TRACK A — available immediately]
+
+    Date range presets:
+      last_7_days  — rolling 7 days including today
+      this_month   — 1st of current month to today
+      last_month   — full previous calendar month
+      last_quarter — rolling 90 days
+      custom       — requires from_date and to_date query params
+
+    All formats contain:
+      - Summary totals (raw cost, 15% markup, total charged)
+      - Line items (one per AI call)
+      - Breakdown by document, user, model, and day
+      - Wallet transaction ledger
+
+    Response: file download (Content-Disposition: attachment)
+    """
+    from app.services.cost_export_service import cost_export_service
+    from fastapi.responses import StreamingResponse
+
+    # RBAC: only CXO or Admin can export (billing data is sensitive)
+    allowed_roles = {"CXO", "Admin", "admin", "owner"}
+    user_roles = set(current_user.roles or [])
+    if not (user_roles & allowed_roles):
+        raise HTTPException(
+            status_code=403,
+            detail="Only CXO or Admin roles can export billing data."
+        )
+
+    # Resolve date range
+    start, end = _resolve_date_range(preset, from_date, to_date)
+
+    logger.info(
+        f"Billing export: tenant={tenant_id}, format={format}, "
+        f"range={start}→{end}, user={current_user.email}"
+    )
+
+    # Build dataset
+    dataset = cost_export_service.build_dataset(
+        db, tenant_id=tenant_id, from_date=start, to_date=end
+    )
+
+    # Render to requested format
+    filename_base = f"dokydoc_costs_{start}_{end}"
+
+    if format == ExportFormat.csv:
+        content = cost_export_service.render_csv(dataset)
+        media_type = "text/csv; charset=utf-8"
+        filename = f"{filename_base}.csv"
+
+    elif format == ExportFormat.pdf:
+        content = cost_export_service.render_pdf(dataset)
+        media_type = "application/pdf"
+        filename = f"{filename_base}.pdf"
+
+    elif format == ExportFormat.json:
+        content = cost_export_service.render_json(dataset)
+        media_type = "application/json; charset=utf-8"
+        filename = f"{filename_base}.json"
+
+    elif format == ExportFormat.docx:
+        content = cost_export_service.render_docx(dataset)
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        filename = f"{filename_base}.docx"
+
+    return StreamingResponse(
+        content=io.BytesIO(content),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(content)),
+            "X-Export-From": start.isoformat(),
+            "X-Export-To": end.isoformat(),
+            "X-Export-Records": str(len(dataset.line_items)),
+        }
+    )
+```
+
+#### Acceptance Criteria
+
+- [ ] `GET /billing/export?format=csv` → file download, `Content-Type: text/csv`, filename contains date range
+- [ ] `GET /billing/export?format=pdf` → file download, `Content-Type: application/pdf`, non-empty bytes
+- [ ] `GET /billing/export?format=json` → valid JSON download
+- [ ] `GET /billing/export?format=docx` → valid DOCX download
+- [ ] `GET /billing/export?preset=custom&from_date=2026-01-01&to_date=2026-03-31` → 90-day range
+- [ ] `GET /billing/export?preset=custom` (no dates) → HTTP 422
+- [ ] `GET /billing/export?preset=custom&from_date=2026-04-01&to_date=2026-01-01` → HTTP 422 (from > to)
+- [ ] `GET /billing/export?preset=custom&from_date=2025-01-01&to_date=2026-06-01` → HTTP 422 (>366 days)
+- [ ] Developer role → HTTP 403
+- [ ] Rate limit: 11th call/minute → HTTP 429
+- [ ] `X-Export-Records` header matches actual line item count
+- [ ] Empty result (no usage in range) → valid file with zero totals, not a 500
+
+---
+
+### TICKET D3 — Demo Organization Seeder
+**Owner:** Backend
+**Effort:** 1.5 days
+**Track:** A
+**Depends on:** B3 (wallet_service), A1, A2
+
+#### Context
+
+Every enterprise sales call lives or dies in the first 90 seconds. An empty DokyDoc dashboard loses deals. This script creates a polished, pre-populated "Acme Corp (Demo)" organization in one command:
+
+```bash
+python -m app.scripts.seed_demo_org --name "Acme Corp" --reset
+```
+
+`--reset` wipes and recreates the org cleanly before every call. Without `--reset`, it is additive (safe to run in dev without destroying existing data).
+
+#### What Gets Created
+
+| Item | Count | Detail |
+|------|-------|--------|
+| Tenant | 1 | "Acme Corp (Demo)", subdomain `acme-demo`, tier `pro` |
+| Users | 6 | One per role: CXO, Admin, BA, Developer, PM, Auditor |
+| Documents | 5 | PRD, SRS, API Spec, Regulatory Doc, Change Request — pre-analyzed |
+| Wallet balance | ₹5,000 | Already loaded, realistic transaction history |
+| Wallet transactions | 23 | 3 recharges + 20 analysis deductions over 30 days |
+| Usage logs | 20 | Matching the 20 deduction transactions |
+| Mismatches | 12 | 3 open critical, 4 open normal, 2 resolved, 2 fixed, 1 escalated |
+| Coverage snapshots | 30 | One per day for last 30 days (62% → 84% trend) |
+
+#### Files
+
+| File | Type of change |
+|------|---------------|
+| `backend/app/scripts/__init__.py` | **New file** (empty, makes it a package) |
+| `backend/app/scripts/seed_demo_org.py` | **New file** |
+
+---
+
+#### `seed_demo_org.py` — Part 1: CLI entry point + reset + tenant/users
+
+```python
+"""
+Demo Organization Seeder — Phase 9
+
+Creates a fully pre-populated demo tenant for sales calls.
+
+Usage:
+    python -m app.scripts.seed_demo_org --name "Acme Corp" --reset
+    python -m app.scripts.seed_demo_org --name "TechCo"           # additive, no wipe
+    python -m app.scripts.seed_demo_org --list                     # list existing demo orgs
+
+Options:
+    --name TEXT     Company name (default: "Acme Corp")
+    --reset         Wipe existing demo org before seeding (safe for demo prep)
+    --list          List all tenants with is_demo=True and exit
+    --subdomain     Override auto-generated subdomain (default: {name}-demo)
+    --balance       Starting wallet balance in INR (default: 5000)
+"""
+import argparse
+import sys
+import os
+import random
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+
+# Bootstrap path so script can import app modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../"))
+
+from app.db.session import SessionLocal
+from app.core.security import get_password_hash
+from app.core.logging import get_logger
+
+logger = get_logger("scripts.seed_demo_org")
+
+# ── Demo data constants ─────────────────────────────────────────────────────
+
+DEMO_PASSWORD = "Demo@DokyDoc2026!"   # Same for all demo users — printed at end
+
+DEMO_USERS = [
+    {"name": "Priya Sharma",    "role": "CXO",       "email_prefix": "cxo"},
+    {"name": "Arjun Mehta",     "role": "Admin",     "email_prefix": "admin"},
+    {"name": "Sneha Reddy",     "role": "BA",        "email_prefix": "ba"},
+    {"name": "Rahul Verma",     "role": "Developer", "email_prefix": "dev"},
+    {"name": "Kavita Nair",     "role": "PM",        "email_prefix": "pm"},
+    {"name": "Deepak Joshi",    "role": "Auditor",   "email_prefix": "auditor"},
+]
+
+DEMO_DOCUMENTS = [
+    {
+        "title": "Loan Origination System — PRD v2.1",
+        "document_type": "PRD",
+        "description": "Product requirements for the new digital loan origination system covering KYC, credit scoring, and disbursement workflows.",
+        "coverage_score": 0.84,
+    },
+    {
+        "title": "Customer Onboarding — SRS v1.4",
+        "document_type": "SRS",
+        "description": "Software requirements specification for the customer onboarding microservice including video KYC and Aadhaar verification.",
+        "coverage_score": 0.71,
+    },
+    {
+        "title": "Payment Gateway Integration — API Spec v3.0",
+        "document_type": "API_SPEC",
+        "description": "API specification for integrating with Razorpay, including webhook contracts, idempotency requirements, and error codes.",
+        "coverage_score": 0.92,
+    },
+    {
+        "title": "RBI Digital Lending Guidelines — Compliance Doc",
+        "document_type": "REGULATORY",
+        "description": "Analysis of RBI DLG compliance requirements mapped against existing lending platform implementation.",
+        "coverage_score": 0.63,
+    },
+    {
+        "title": "Credit Score Module — Change Request #47",
+        "document_type": "CHANGE_REQUEST",
+        "description": "Change request to update credit scoring algorithm to include bureau score V2 and rental payment history.",
+        "coverage_score": 0.78,
+    },
+]
+
+DEMO_MISMATCH_TEMPLATES = [
+    # (severity, status, title, description)
+    ("critical", "open",
+     "KYC verification timeout not implemented",
+     "PRD §3.2 requires a 30-second timeout on video KYC calls with automatic retry. No timeout logic found in kyc_service.py."),
+    ("critical", "open",
+     "Loan disbursement missing idempotency key",
+     "PRD §5.1 mandates idempotency on all disbursement API calls. POST /disburse has no idempotency_key parameter."),
+    ("critical", "open",
+     "Credit score fallback not handling bureau downtime",
+     "SRS §4.3 requires fallback to internal score when bureau API is unavailable. No fallback branch in credit_service.py."),
+    ("high", "open",
+     "Customer consent timestamp not stored",
+     "RBI DLG §7 requires storing timestamp of customer consent for data processing. consent_at column missing from customers table."),
+    ("high", "open",
+     "Rate limiting absent on OTP endpoint",
+     "SRS §2.4 requires max 3 OTP attempts per 10 minutes. POST /auth/otp has no rate limiting."),
+    ("high", "open",
+     "Loan offer expiry not enforced",
+     "PRD §4.5 states offers expire after 72 hours. No expiry check in loan_offer_service.py."),
+    ("high", "open",
+     "Audit log missing for admin balance adjustments",
+     "Compliance doc §12 requires immutable audit trail for all balance changes. admin_adjust_balance() has no audit write."),
+    ("medium", "resolved",
+     "Missing pagination on /loans endpoint",
+     "PRD §6.1 requires paginated results. Fixed in sprint 14 — verified paginated response shape."),
+    ("medium", "resolved",
+     "Bureau API key stored in plaintext config",
+     "SRS §9.2 requires secrets in vault. Fixed — migrated to AWS Secrets Manager in sprint 13."),
+    ("low", "fixed",
+     "Document title truncated at 100 chars in UI",
+     "Change request §2 requires 255 char support. Fixed in frontend PR #234."),
+    ("low", "fixed",
+     "Currency symbol missing on mobile view",
+     "Minor display issue — INR symbol not rendering on iOS Safari. Fixed in hotfix v2.1.3."),
+    ("high", "escalated",
+     "PAN verification API timeout cascades to 504",
+     "PRD §3.4 requires graceful degradation. PAN API timeout propagates as 504 to end users. Escalated to infrastructure team."),
+]
+```
+---
+
+#### `seed_demo_org.py` — Part 2: Seeder functions
+
+```python
+# ── Seeder functions ────────────────────────────────────────────────────────
+
+def _wipe_demo_org(db, subdomain: str) -> None:
+    """Delete existing demo org and all its data via cascade."""
+    from app.models.tenant import Tenant
+    existing = db.query(Tenant).filter(Tenant.subdomain == subdomain).first()
+    if existing:
+        logger.info(f"Wiping existing demo org: {existing.name} (id={existing.id})")
+        db.delete(existing)   # Cascade deletes users, documents, billing, etc.
+        db.commit()
+        logger.info("Wipe complete.")
+
+
+def _create_tenant(db, name: str, subdomain: str) -> object:
+    """Create the demo tenant record."""
+    from app.models.tenant import Tenant
+    from app.models.tenant_billing import TenantBilling
+
+    tenant = Tenant(
+        name=f"{name} (Demo)",
+        subdomain=subdomain,
+        tier="pro",
+        billing_type="prepaid",
+        settings={
+            "industry": "fintech",
+            "sub_domain": "lending",
+            "is_demo": True,
+            "regulatory_context": ["RBI", "PCI-DSS", "Aadhaar Act"],
+            "onboarding_complete": True,
+        },
+        # Phase 9 fields (A1) — set demo org as already recharged
+        default_model="gemini-3-flash",
+        free_credit_remaining_inr=Decimal("0.00"),   # Exhausted (demo shows paid lane)
+        has_recharged_ever=True,
+    )
+    db.add(tenant)
+    db.flush()   # Get tenant.id before creating billing
+
+    billing = TenantBilling(
+        tenant_id=tenant.id,
+        billing_type="prepaid",
+        balance_inr=Decimal("0.00"),   # Will be set by wallet seeding below
+        low_balance_threshold=Decimal("100.00"),
+        current_month_cost=Decimal("0.00"),
+        last_30_days_cost=Decimal("0.00"),
+    )
+    db.add(billing)
+    db.flush()
+
+    logger.info(f"Created demo tenant: {tenant.name} (id={tenant.id})")
+    return tenant
+
+
+def _create_users(db, tenant_id: int, subdomain: str) -> dict:
+    """Create 6 demo users, one per role. Returns {role: user} dict."""
+    from app.models.user import User
+
+    users = {}
+    for u in DEMO_USERS:
+        email = f"{u['email_prefix']}@{subdomain}.demo"
+        user = User(
+            email=email,
+            hashed_password=get_password_hash(DEMO_PASSWORD),
+            full_name=u["name"],
+            roles=[u["role"]],
+            tenant_id=tenant_id,
+            is_active=True,
+            is_superuser=False,
+        )
+        db.add(user)
+        db.flush()
+        users[u["role"]] = user
+        logger.info(f"  Created user: {email} ({u['role']})")
+    return users
+
+
+def _create_documents(db, tenant_id: int, users: dict) -> list:
+    """Create 5 demo documents with realistic metadata. Returns list of Document objects."""
+    from app.models.document import Document
+
+    docs = []
+    ba_user = users.get("BA")
+    pm_user = users.get("PM")
+    uploaders = [ba_user, pm_user, ba_user, pm_user, ba_user]
+
+    for i, doc_data in enumerate(DEMO_DOCUMENTS):
+        doc = Document(
+            tenant_id=tenant_id,
+            title=doc_data["title"],
+            document_type=doc_data["document_type"],
+            description=doc_data["description"],
+            status="analyzed",
+            uploaded_by=uploaders[i].id if uploaders[i] else None,
+            file_size_kb=random.randint(45, 320),
+            page_count=random.randint(8, 42),
+            created_at=datetime.now() - timedelta(days=random.randint(3, 28)),
+        )
+        db.add(doc)
+        db.flush()
+        docs.append(doc)
+        logger.info(f"  Created document: {doc.title[:50]} (id={doc.id})")
+    return docs
+
+
+def _seed_wallet(db, tenant_id: int, users: dict, starting_balance: float) -> None:
+    """
+    Seed realistic wallet transaction history:
+    - 3 Razorpay top-ups (5, 15, and 25 days ago)
+    - 20 analysis deductions spread over 30 days
+    Final balance ≈ starting_balance (top-ups minus deductions)
+    """
+    from app.models.wallet_transaction import WalletTransaction
+    from app.models.tenant_billing import TenantBilling
+
+    # Deduction amounts for 20 analysis events (realistic spread)
+    deduction_amounts = [
+        2.35, 4.80, 6.12, 3.47, 8.90, 5.23, 2.91, 11.40, 4.65, 7.33,
+        3.18, 9.77, 6.44, 2.88, 14.22, 5.61, 3.95, 8.17, 4.43, 7.89,
+    ]
+    total_deductions = sum(deduction_amounts)
+
+    # 3 top-ups that sum to starting_balance + total_deductions (so balance ends at starting_balance)
+    topup_1 = round(starting_balance * 0.3, 2)
+    topup_2 = round(starting_balance * 0.4, 2)
+    topup_3 = round(starting_balance + total_deductions - topup_1 - topup_2, 2)
+    topup_amounts = [topup_1, topup_2, topup_3]
+
+    running_balance = Decimal("0.00")
+    cxo_user = users.get("CXO")
+
+    # Top-up events: 25, 15, 5 days ago
+    topup_days_ago = [25, 15, 5]
+    for i, (amount, days_ago) in enumerate(zip(topup_amounts, topup_days_ago)):
+        running_balance += Decimal(str(amount))
+        txn = WalletTransaction(
+            tenant_id=tenant_id,
+            user_id=cxo_user.id if cxo_user else None,
+            direction="credit",
+            amount_inr=Decimal(str(amount)),
+            balance_after_inr=running_balance,
+            txn_type="razorpay_topup",
+            idempotency_key=f"demo-topup-{tenant_id}-{i}",
+            notes=f"Demo recharge #{i+1}",
+            created_at=datetime.now() - timedelta(days=days_ago),
+        )
+        db.add(txn)
+
+    # Analysis deductions: spread across 30 days
+    dev_user = users.get("Developer")
+    ba_user = users.get("BA")
+    deduction_users = [ba_user, dev_user] * 10
+    random.shuffle(deduction_users)
+
+    for i, (amount, user) in enumerate(zip(deduction_amounts, deduction_users)):
+        running_balance -= Decimal(str(amount))
+        days_offset = random.randint(0, 29)
+        txn = WalletTransaction(
+            tenant_id=tenant_id,
+            user_id=user.id if user else None,
+            direction="debit",
+            amount_inr=Decimal(str(amount)),
+            balance_after_inr=max(running_balance, Decimal("0.00")),
+            txn_type="document_analysis",
+            idempotency_key=f"demo-deduct-{tenant_id}-{i}",
+            notes="Document analysis (demo)",
+            created_at=datetime.now() - timedelta(days=days_offset, hours=random.randint(0, 23)),
+        )
+        db.add(txn)
+
+    # Update billing record to reflect final balance
+    billing = db.query(TenantBilling).filter(
+        TenantBilling.tenant_id == tenant_id
+    ).first()
+    if billing:
+        billing.balance_inr = Decimal(str(starting_balance))
+        billing.last_30_days_cost = Decimal(str(round(total_deductions, 2)))
+        billing.current_month_cost = Decimal(str(round(total_deductions * 0.6, 2)))
+        db.add(billing)
+
+    logger.info(f"  Seeded {len(topup_amounts)} top-ups + {len(deduction_amounts)} deductions. Final balance: ₹{starting_balance}")
+```
+---
+
+#### `seed_demo_org.py` — Part 3: Usage logs, mismatches, coverage snapshots, main()
+
+```python
+def _seed_usage_logs(db, tenant_id: int, documents: list, users: dict) -> None:
+    """Create 20 realistic usage_log rows matching the wallet deductions."""
+    from app.models.usage_log import UsageLog
+
+    models_used = ["gemini-3-flash", "gemini-3-flash", "claude-sonnet-4-6", "gemini-3-flash-lite"]
+    operations = ["pass_1_composition", "pass_2_segmenting", "pass_3_extraction"]
+    dev_user = users.get("Developer")
+    ba_user = users.get("BA")
+    log_users = [ba_user, dev_user] * 10
+
+    for i in range(20):
+        raw_cost = round(random.uniform(1.5, 12.0), 4)
+        markup = round(raw_cost * 0.15, 4)
+        total = round(raw_cost + markup, 4)
+        input_toks = random.randint(3000, 18000)
+        output_toks = random.randint(800, 4000)
+        thinking_toks = random.randint(500, 6000)
+
+        log = UsageLog(
+            tenant_id=tenant_id,
+            user_id=log_users[i].id if log_users[i] else None,
+            document_id=random.choice(documents).id,
+            feature_type="document_analysis",
+            operation=random.choice(operations),
+            model_used=random.choice(models_used),
+            input_tokens=input_toks,
+            output_tokens=output_toks,
+            cached_tokens=0,
+            cost_usd=round(total / 84.0, 6),
+            cost_inr=Decimal(str(total)),
+            # A4 fields
+            raw_cost_inr=Decimal(str(raw_cost)),
+            markup_inr=Decimal(str(markup)),
+            markup_percent=Decimal("15.00"),
+            processing_time_seconds=round(random.uniform(8.0, 45.0), 2),
+            extra_data={"thinking_tokens": thinking_toks, "demo": True},
+            created_at=datetime.now() - timedelta(days=random.randint(0, 29)),
+        )
+        db.add(log)
+    logger.info("  Seeded 20 usage log entries.")
+
+
+def _seed_mismatches(db, tenant_id: int, documents: list, users: dict) -> None:
+    """Create 12 mismatches across all states to make the demo rich."""
+    from app.models.mismatch import Mismatch   # adjust import to actual model path
+
+    dev_user = users.get("Developer")
+    ba_user = users.get("BA")
+
+    for i, (severity, status, title, description) in enumerate(DEMO_MISMATCH_TEMPLATES):
+        doc = documents[i % len(documents)]
+        mismatch = Mismatch(
+            tenant_id=tenant_id,
+            document_id=doc.id,
+            title=title,
+            description=description,
+            severity=severity,
+            status=status,
+            detected_by="ai",
+            assigned_to=dev_user.id if dev_user else None,
+            created_by=ba_user.id if ba_user else None,
+            created_at=datetime.now() - timedelta(days=random.randint(1, 20)),
+            resolved_at=(
+                datetime.now() - timedelta(days=random.randint(0, 5))
+                if status in ("resolved", "fixed")
+                else None
+            ),
+        )
+        db.add(mismatch)
+    logger.info("  Seeded 12 mismatches (3 critical open, 4 high open, 2 resolved, 2 fixed, 1 escalated).")
+
+
+def _seed_coverage_snapshots(db, tenant_id: int, documents: list) -> None:
+    """
+    Create 30 daily coverage snapshots to show the 62% → 84% improvement story.
+    Each document gets one snapshot per day for the last 30 days.
+    """
+    from app.models.coverage_snapshot import CoverageSnapshot  # adjust to actual path
+
+    for doc_data, doc in zip(DEMO_DOCUMENTS, documents):
+        target_score = doc_data["coverage_score"]
+        start_score = max(0.40, target_score - 0.22)   # start 22 points below final
+
+        for day in range(29, -1, -1):
+            snap_date = date.today() - timedelta(days=day)
+            # Linear progression from start_score to target_score
+            progress = (29 - day) / 29
+            score = start_score + (target_score - start_score) * progress
+            score = round(score, 4)
+
+            atom_count = random.randint(28, 65)
+            covered = int(atom_count * score)
+            missing = atom_count - covered
+
+            snapshot = CoverageSnapshot(
+                tenant_id=tenant_id,
+                document_id=doc.id,
+                scope="document",
+                coverage_score=score,
+                atom_count=atom_count,
+                atoms_covered=covered,
+                atoms_missing=missing,
+                mismatch_count=max(0, missing - 2),
+                critical_mismatch_count=max(0, int(missing * 0.25)),
+                open_mismatch_count=max(0, int(missing * 0.6)),
+                resolved_mismatch_count=max(0, missing - int(missing * 0.6)),
+                coverage_delta=round(score - (start_score + (target_score - start_score) * max(0, (29 - day - 1)) / 29), 4) if day < 29 else None,
+                snapshot_date=snap_date,
+                created_at=datetime.combine(snap_date, datetime.min.time()),
+            )
+            db.add(snapshot)
+
+    logger.info("  Seeded 30-day coverage snapshots (62%→84% trend visible in dashboard).")
+
+
+def seed(name: str, subdomain: str, reset: bool, balance: float) -> None:
+    """Main seeding orchestrator."""
+    db = SessionLocal()
+    try:
+        if reset:
+            _wipe_demo_org(db, subdomain)
+
+        # Check for existing (if not resetting)
+        from app.models.tenant import Tenant
+        existing = db.query(Tenant).filter(Tenant.subdomain == subdomain).first()
+        if existing and not reset:
+            print(f"Demo org '{existing.name}' already exists (subdomain={subdomain}). Use --reset to recreate.")
+            return
+
+        print(f"\n🌱 Seeding demo org: '{name} (Demo)' ...")
+
+        tenant = _create_tenant(db, name, subdomain)
+        users = _create_users(db, tenant.id, subdomain)
+        documents = _create_documents(db, tenant.id, users)
+        _seed_wallet(db, tenant.id, users, balance)
+        _seed_usage_logs(db, tenant.id, documents, users)
+
+        # Mismatches and coverage snapshots — wrapped in try/except
+        # because model paths may differ slightly across branches
+        try:
+            _seed_mismatches(db, tenant.id, documents, users)
+        except Exception as e:
+            logger.warning(f"Mismatch seeding skipped (model import error): {e}")
+
+        try:
+            _seed_coverage_snapshots(db, tenant.id, documents)
+        except Exception as e:
+            logger.warning(f"Coverage snapshot seeding skipped: {e}")
+
+        db.commit()
+
+        # Print login credentials
+        print(f"\n✅ Demo org created successfully!\n")
+        print(f"{'─'*55}")
+        print(f"  Tenant:    {tenant.name}")
+        print(f"  Subdomain: {subdomain}")
+        print(f"  Wallet:    ₹{balance:,.2f}")
+        print(f"  Password:  {DEMO_PASSWORD}  (all users)")
+        print(f"{'─'*55}")
+        for role_info in DEMO_USERS:
+            email = f"{role_info['email_prefix']}@{subdomain}.demo"
+            print(f"  {role_info['role']:<12} {email}")
+        print(f"{'─'*55}\n")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Seeding failed: {e}", exc_info=True)
+        print(f"\n❌ Seeding failed: {e}")
+        sys.exit(1)
+    finally:
+        db.close()
+
+
+def list_demo_orgs() -> None:
+    """Print all existing demo organizations."""
+    db = SessionLocal()
+    try:
+        from app.models.tenant import Tenant
+        demos = db.query(Tenant).filter(
+            Tenant.settings["is_demo"].as_boolean() == True
+        ).all()
+        if not demos:
+            print("No demo organizations found.")
+            return
+        print(f"\n{'─'*55}")
+        print(f"  {'Name':<30} {'Subdomain':<20} {'Tier'}")
+        print(f"{'─'*55}")
+        for t in demos:
+            print(f"  {t.name:<30} {t.subdomain:<20} {t.tier}")
+        print(f"{'─'*55}\n")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Seed a demo organization for DokyDoc sales calls.")
+    parser.add_argument("--name",      default="Acme Corp",   help="Company name")
+    parser.add_argument("--subdomain", default=None,          help="Override subdomain (default: {name}-demo)")
+    parser.add_argument("--reset",     action="store_true",   help="Wipe and recreate if exists")
+    parser.add_argument("--list",      action="store_true",   help="List existing demo orgs and exit")
+    parser.add_argument("--balance",   type=float, default=5000.0, help="Starting wallet balance in INR")
+    args = parser.parse_args()
+
+    if args.list:
+        list_demo_orgs()
+        sys.exit(0)
+
+    subdomain = args.subdomain or f"{args.name.lower().replace(' ', '-')}-demo"
+    seed(name=args.name, subdomain=subdomain, reset=args.reset, balance=args.balance)
+```
+
+#### Acceptance Criteria
+
+- [ ] `python -m app.scripts.seed_demo_org --name "Acme Corp" --reset` completes in < 30 seconds
+- [ ] Creates 1 tenant, 6 users, 5 documents, 23 wallet transactions, 20 usage logs
+- [ ] Running with `--reset` twice → clean state, no duplicate rows
+- [ ] Running without `--reset` when org exists → prints warning, exits 0, no crash
+- [ ] `python -m app.scripts.seed_demo_org --list` → shows the demo org in table
+- [ ] CXO login `cxo@acme-corp-demo.demo` / `Demo@DokyDoc2026!` → dashboard shows ₹5,000 wallet
+- [ ] Coverage trend chart shows upward 62% → 84% movement over 30 days
+- [ ] Mismatches page shows 3 critical open + 1 escalated + resolved examples
+- [ ] If Mismatch or CoverageSnapshot model import fails → warning printed, rest of seed continues
+- [ ] `--balance 2000` → wallet seeded at ₹2,000
+
+---
+
+## Part D Summary
+
+| Ticket | Title | File(s) Changed | New Dependencies | Risk | Estimated LOC |
+|--------|-------|-----------------|-----------------|------|---------------|
+| D1 | Cost Export Service | `backend/app/services/cost_export_service.py` (new) | `fpdf2>=2.7.9` | Low — pure new service, no existing code touched | ~280 |
+| D2 | Billing Export Endpoint | `backend/app/api/endpoints/billing.py` (additive) | — | Low — single new route, no existing route modified | ~85 |
+| D3 | Demo Org Seeder | `backend/app/scripts/__init__.py` (new), `backend/app/scripts/seed_demo_org.py` (new) | — | Low — script only; never runs in production automatically | ~320 |
+
+### Part D Dependency Graph
+
+```
+D1 (CostExportService)
+  └─ D2 (Export Endpoint) depends on D1 being importable
+  
+D3 (Demo Seeder) — independent, depends only on A1 models being
+                   migrated (Alembic) and B3 WalletService present
+```
+
+### Part D Execution Order
+
+1. Add `fpdf2>=2.7.9` to `requirements.txt` (or `pyproject.toml`)
+2. Implement **D1** — `cost_export_service.py`
+3. Implement **D2** — export endpoint in `billing.py`
+4. Implement **D3** — `seed_demo_org.py` + `scripts/__init__.py`
+5. Run seeder locally: `python -m app.scripts.seed_demo_org --name "Acme Corp" --reset`
+6. Manually verify export endpoint with `curl -H "Authorization: Bearer <cxo_token>" "/billing/export?format=csv&preset=last_7_days"`
+
+### Part D: What Ships vs What Waits
+
+| Item | Ships in Track A (now) | Notes |
+|------|------------------------|-------|
+| Cost export CSV/PDF/JSON/DOCX | Yes — works from usage_logs | No payment data until C tickets ship |
+| Export endpoint RBAC | Yes | CXO / Admin roles only |
+| Demo seeder | Yes — dev/staging only | Never in production cronjobs |
+| Wallet transaction section in export | After B3 ships | WalletTransaction table must exist |
+
+---
+
+
+---
+
+# Part E — Frontend (Billing UI)
+
+## Overview
+
+Part E wires the backend billing APIs into the React frontend. Every component
+is **additive** — no existing page is removed or broken. Track B components
+(recharge modal, model selector) render behind the `RAZORPAY_ENABLED` flag
+propagated via a new `/billing/config` endpoint (shipped in C1). The free credit
+banner and low-balance alert are **always on** (Track A).
+
+### Components in this Part
+
+| Ticket | Component | Track | Blocking Ticket |
+|--------|-----------|-------|----------------|
+| E1 | `useBilling` hook + BillingContext | A | B3 wallet endpoint |
+| E2 | Free Credit Welcome Banner | A | E1 |
+| E3 | Low Balance Alert | A | E1 |
+| E4 | Model Selector Dropdown | B | E1 + B2 |
+| E5 | Cost Preview Modal (pre-analysis) | B | E1 + B2 |
+| E6 | Post-Analysis Cost Receipt Drawer | A | E1 |
+| E7 | Recharge Modal (preset + custom) | B | C2 + C3 |
+| E8 | Cost Export UI | A | D2 |
+
+---
+
+## E1 — `useBilling` Hook + BillingContext
+
+**File:** `frontend/src/contexts/BillingContext.tsx` (new)
+**File:** `frontend/src/hooks/useBilling.ts` (new)
+**File:** `frontend/src/types/billing.ts` (new)
+
+### Why
+
+Multiple components need real-time wallet state (balance, free credit,
+`has_recharged_ever`, `razorpay_enabled` flag). A shared context avoids
+repeated `useQuery` calls and keeps derived state (low balance threshold,
+free-lane active) computed once.
+
+### Types (`billing.ts`)
+
+```typescript
+// frontend/src/types/billing.ts
+
+export interface WalletState {
+  balance_inr: number;            // paid wallet in INR (float)
+  free_credit_remaining_inr: number; // free pool remaining
+  free_credit_total_inr: number;  // original free grant (display only)
+  has_recharged_ever: boolean;
+  razorpay_enabled: boolean;      // from /billing/config
+  currency: "INR";
+}
+
+export interface TransactionRow {
+  id: string;
+  created_at: string;             // ISO-8601
+  type: "credit" | "debit";
+  amount_inr: number;
+  description: string;
+  balance_after_inr: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface CostBreakdownDisplay {
+  model_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  raw_cost_inr: number;
+  markup_inr: number;
+  total_inr: number;
+  markup_percent: number;
+  pool_used: "free" | "paid";
+}
+
+export type ExportFormat = "csv" | "pdf" | "json" | "docx";
+export type DatePreset =
+  | "last_7_days"
+  | "this_month"
+  | "last_month"
+  | "last_quarter"
+  | "custom";
+```
+
+### BillingContext
+
+```typescript
+// frontend/src/contexts/BillingContext.tsx
+import React, {
+  createContext, useCallback, useContext, useEffect, useState,
+} from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { billingApi } from "@/api/billingApi";
+import type { WalletState } from "@/types/billing";
+
+interface BillingContextValue {
+  wallet: WalletState | null;
+  isLoading: boolean;
+  isLowBalance: boolean;       // balance_inr < LOW_BALANCE_THRESHOLD_INR
+  isFreeLaneActive: boolean;   // free_credit_remaining_inr > 0
+  refetch: () => void;
+}
+
+const LOW_BALANCE_THRESHOLD_INR = 50;
+
+const BillingContext = createContext<BillingContextValue | null>(null);
+
+export function BillingProvider({ children }: { children: React.ReactNode }) {
+  const queryClient = useQueryClient();
+
+  const { data: wallet, isLoading } = useQuery({
+    queryKey: ["billing", "wallet"],
+    queryFn: billingApi.getWallet,
+    staleTime: 30_000,          // re-fetch every 30s
+    refetchInterval: 60_000,    // background poll every 60s
+  });
+
+  const isLowBalance =
+    !isLoading &&
+    wallet !== null &&
+    wallet !== undefined &&
+    wallet.free_credit_remaining_inr <= 0 &&
+    wallet.balance_inr < LOW_BALANCE_THRESHOLD_INR;
+
+  const isFreeLaneActive =
+    wallet !== null &&
+    wallet !== undefined &&
+    wallet.free_credit_remaining_inr > 0;
+
+  const refetch = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["billing", "wallet"] });
+  }, [queryClient]);
+
+  return (
+    <BillingContext.Provider
+      value={{ wallet, isLoading, isLowBalance, isFreeLaneActive, refetch }}
+    >
+      {children}
+    </BillingContext.Provider>
+  );
+}
+
+export function useBillingContext(): BillingContextValue {
+  const ctx = useContext(BillingContext);
+  if (!ctx) {
+    throw new Error("useBillingContext must be used inside <BillingProvider>");
+  }
+  return ctx;
+}
+```
+
+### API Layer (`billingApi.ts`)
+
+```typescript
+// frontend/src/api/billingApi.ts  (additive — new file)
+import { apiClient } from "@/api/client";   // existing axios/fetch wrapper
+import type { WalletState, TransactionRow } from "@/types/billing";
+
+export const billingApi = {
+  getWallet: async (): Promise<WalletState> => {
+    const { data } = await apiClient.get("/billing/wallet");
+    return data;
+  },
+
+  getTransactions: async (params?: {
+    page?: number;
+    page_size?: number;
+  }): Promise<{ items: TransactionRow[]; total: number }> => {
+    const { data } = await apiClient.get("/billing/wallet/transactions", {
+      params,
+    });
+    return data;
+  },
+
+  createOrder: async (amount_inr: number) => {
+    const { data } = await apiClient.post("/billing/create-order", {
+      amount_inr,
+    });
+    return data; // { order_id, amount_paise, currency, key_id }
+  },
+
+  verifyPayment: async (payload: {
+    razorpay_order_id: string;
+    razorpay_payment_id: string;
+    razorpay_signature: string;
+  }) => {
+    const { data } = await apiClient.post("/billing/verify-payment", payload);
+    return data;
+  },
+
+  exportCosts: async (params: {
+    format: string;
+    preset?: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<Blob> => {
+    const response = await apiClient.get("/billing/export", {
+      params,
+      responseType: "blob",
+    });
+    return response.data;
+  },
+};
+```
+
+### Integration
+
+Add `<BillingProvider>` in `frontend/src/App.tsx` (or layout root) wrapping
+the authenticated routes tree:
+
+```typescript
+// In App.tsx — additive change only
+import { BillingProvider } from "@/contexts/BillingContext";
+
+// Inside the authenticated route wrapper:
+<BillingProvider>
+  {/* existing authenticated children */}
+</BillingProvider>
+```
+
+### Acceptance Criteria
+
+- [ ] `useBillingContext()` outside `<BillingProvider>` → throws descriptive error
+- [ ] `wallet` is `null` while loading, populated after first fetch completes
+- [ ] `isLowBalance` is `true` when `balance_inr < 50` AND `free_credit_remaining_inr === 0`
+- [ ] `isFreeLaneActive` is `true` when `free_credit_remaining_inr > 0`
+- [ ] Wallet refetches every 60 seconds in background without page reload
+- [ ] `refetch()` invalidates React Query cache and triggers immediate re-fetch
+- [ ] `billingApi.exportCosts` returns a `Blob` (not JSON) for file download
+
+---
+
+## E2 — Free Credit Welcome Banner
+
+**File:** `frontend/src/components/billing/FreeCreditBanner.tsx` (new)
+**File:** `frontend/src/components/billing/index.ts` (new barrel)
+
+### Purpose
+
+Show a dismissible banner to first-time users who still have free credit
+remaining. Banner explains the free pool, which model is available, and
+provides a CTA to upgrade (recharge).
+
+```typescript
+// frontend/src/components/billing/FreeCreditBanner.tsx
+import { useState } from "react";
+import { useBillingContext } from "@/contexts/BillingContext";
+
+const DISMISS_KEY = "dokydoc_free_credit_banner_dismissed";
+
+export function FreeCreditBanner() {
+  const { wallet, isFreeLaneActive } = useBillingContext();
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    return localStorage.getItem(DISMISS_KEY) === "1";
+  });
+
+  // Only show if: free credit remains AND user hasn't recharged AND not dismissed
+  if (!wallet || !isFreeLaneActive || wallet.has_recharged_ever || dismissed) {
+    return null;
+  }
+
+  const pctUsed = wallet.free_credit_total_inr > 0
+    ? Math.round(
+        ((wallet.free_credit_total_inr - wallet.free_credit_remaining_inr) /
+          wallet.free_credit_total_inr) * 100
+      )
+    : 0;
+
+  const handleDismiss = () => {
+    localStorage.setItem(DISMISS_KEY, "1");
+    setDismissed(true);
+  };
+
+  return (
+    <div
+      role="alert"
+      className="relative flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900"
+    >
+      {/* Icon */}
+      <span className="mt-0.5 shrink-0 text-blue-500">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 14h-2v-2h2v2zm0-4h-2V7h2v5z" />
+        </svg>
+      </span>
+
+      <div className="flex-1">
+        <p className="font-semibold">
+          You have ₹{wallet.free_credit_remaining_inr.toFixed(2)} free credit
+          remaining
+        </p>
+        <p className="mt-0.5 text-blue-700">
+          Free analyses use <strong>Gemini Flash Lite</strong> — our fastest
+          model. Recharge to unlock all 4 models and keep working when credit
+          runs out.
+        </p>
+        {/* Progress bar */}
+        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-blue-200">
+          <div
+            className="h-full rounded-full bg-blue-500 transition-all"
+            style={{ width: `${pctUsed}%` }}
+          />
+        </div>
+        <p className="mt-1 text-xs text-blue-600">
+          {pctUsed}% used · ₹{wallet.free_credit_remaining_inr.toFixed(2)} of
+          ₹{wallet.free_credit_total_inr.toFixed(2)} remaining
+        </p>
+      </div>
+
+      {/* Dismiss button */}
+      <button
+        onClick={handleDismiss}
+        aria-label="Dismiss"
+        className="absolute right-3 top-3 rounded p-0.5 hover:bg-blue-100"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+```
+
+### Placement
+
+Mount on the **Dashboard** page header (just below the top nav, above the
+main content grid). No other pages need it.
+
+```typescript
+// frontend/src/pages/Dashboard.tsx  — additive import + mount
+import { FreeCreditBanner } from "@/components/billing";
+
+// Inside Dashboard JSX, as first child of main content wrapper:
+<FreeCreditBanner />
+```
+
+### Acceptance Criteria
+
+- [ ] Banner renders when `free_credit_remaining_inr > 0` AND `has_recharged_ever === false`
+- [ ] Banner does NOT render when user has recharged at least once
+- [ ] Banner does NOT render when free credit exhausted
+- [ ] Progress bar reflects correct percentage used
+- [ ] Dismiss persists across page reloads (localStorage)
+- [ ] Banner does NOT re-appear after dismiss, even after page refresh
+- [ ] `role="alert"` present for screen reader accessibility
+
+---
+
+## E3 — Low Balance Alert
+
+**File:** `frontend/src/components/billing/LowBalanceAlert.tsx` (new)
+
+### Purpose
+
+Sticky alert shown when paid wallet drops below ₹50 and free credit is
+exhausted. Guides the user to recharge before analyses start failing.
+
+```typescript
+// frontend/src/components/billing/LowBalanceAlert.tsx
+import { useBillingContext } from "@/contexts/BillingContext";
+
+interface LowBalanceAlertProps {
+  onRechargeClick?: () => void; // callback to open RechargeModal (E7)
+}
+
+export function LowBalanceAlert({ onRechargeClick }: LowBalanceAlertProps) {
+  const { isLowBalance, wallet } = useBillingContext();
+
+  if (!isLowBalance || !wallet) return null;
+
+  const isCritical = wallet.balance_inr < 10; // less than ₹10 — analyses will fail soon
+
+  return (
+    <div
+      role="alert"
+      className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm ${
+        isCritical
+          ? "border-red-300 bg-red-50 text-red-900"
+          : "border-yellow-300 bg-yellow-50 text-yellow-900"
+      }`}
+    >
+      <span className={isCritical ? "text-red-500" : "text-yellow-500"}>
+        {isCritical ? (
+          // Warning triangle (critical)
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2L2 20h20L12 2zm0 13h-1v-4h2v4h-1zm0 3a1 1 0 1 1 0-2 1 1 0 0 1 0 2z" />
+          </svg>
+        ) : (
+          // Info circle (warning)
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm1 14h-2v-2h2v2zm0-4h-2V7h2v5z" />
+          </svg>
+        )}
+      </span>
+
+      <div className="flex-1">
+        <p className="font-semibold">
+          {isCritical
+            ? "Wallet critically low — analyses may fail"
+            : "Low wallet balance"}
+        </p>
+        <p className="mt-0.5 opacity-80">
+          Current balance: <strong>₹{wallet.balance_inr.toFixed(2)}</strong>.
+          {isCritical
+            ? " Add funds immediately to continue."
+            : " Add funds to avoid service interruption."}
+        </p>
+      </div>
+
+      {onRechargeClick && (
+        <button
+          onClick={onRechargeClick}
+          className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+            isCritical
+              ? "bg-red-600 text-white hover:bg-red-700"
+              : "bg-yellow-500 text-white hover:bg-yellow-600"
+          }`}
+        >
+          Add Funds
+        </button>
+      )}
+    </div>
+  );
+}
+```
+
+### Placement
+
+Mount on the **Dashboard** page (below `FreeCreditBanner`) and on the
+**Billing Settings** page. Pass `onRechargeClick` to open `RechargeModal`
+(implemented in E7).
+
+### Acceptance Criteria
+
+- [ ] Alert renders when `balance_inr < 50` AND `free_credit_remaining_inr === 0`
+- [ ] Shows yellow variant when `10 ≤ balance_inr < 50`
+- [ ] Shows red (critical) variant when `balance_inr < 10`
+- [ ] "Add Funds" button calls `onRechargeClick` prop if provided
+- [ ] Alert is hidden when balance is healthy or free credit still available
+- [ ] `role="alert"` for accessibility
+
+---
+
+## E4 — Model Selector Dropdown
+
+**File:** `frontend/src/components/billing/ModelSelector.tsx` (new)
+**Track:** B — only visible when `wallet.razorpay_enabled === true` OR
+             `wallet.has_recharged_ever === true`
+
+### Purpose
+
+Lets paid users choose which model to use before running an analysis. Free
+users are locked to Gemini Flash Lite and see the selector in a disabled
+"locked" state explaining why.
+
+### Model Registry (mirrors backend `PRICING_REGISTRY`)
+
+```typescript
+// frontend/src/constants/models.ts  (new)
+export interface ModelMeta {
+  id: string;
+  display_name: string;
+  provider: "google" | "anthropic";
+  tier: "free" | "paid";
+  context_window: number;
+  description: string;
+  est_cost_per_page_inr: number; // rough guide shown to user
+}
+
+export const MODEL_REGISTRY: ModelMeta[] = [
+  {
+    id: "gemini-3-flash-lite",
+    display_name: "Gemini Flash Lite",
+    provider: "google",
+    tier: "free",
+    context_window: 128_000,
+    description: "Fast & free — good for routine checks",
+    est_cost_per_page_inr: 0.0,
+  },
+  {
+    id: "gemini-2.5-flash",
+    display_name: "Gemini 2.5 Flash",
+    provider: "google",
+    tier: "paid",
+    context_window: 1_000_000,
+    description: "Balanced speed & depth",
+    est_cost_per_page_inr: 0.05,
+  },
+  {
+    id: "gemini-2.5-pro",
+    display_name: "Gemini 2.5 Pro",
+    provider: "google",
+    tier: "paid",
+    context_window: 2_000_000,
+    description: "Deep analysis, very large docs",
+    est_cost_per_page_inr: 0.22,
+  },
+  {
+    id: "claude-3-7-sonnet",
+    display_name: "Claude 3.7 Sonnet",
+    provider: "anthropic",
+    tier: "paid",
+    context_window: 200_000,
+    description: "Best for compliance & legal language",
+    est_cost_per_page_inr: 0.18,
+  },
+];
+
+export const FREE_MODEL_ID = "gemini-3-flash-lite";
+```
+
+### Component
+
+```typescript
+// frontend/src/components/billing/ModelSelector.tsx
+import { useBillingContext } from "@/contexts/BillingContext";
+import { MODEL_REGISTRY, FREE_MODEL_ID } from "@/constants/models";
+import type { ModelMeta } from "@/constants/models";
+
+interface ModelSelectorProps {
+  value: string;
+  onChange: (modelId: string) => void;
+  disabled?: boolean;
+}
+
+export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps) {
+  const { isFreeLaneActive, wallet } = useBillingContext();
+
+  // Free-lane users are locked to the free model
+  const isLocked = isFreeLaneActive && !wallet?.has_recharged_ever;
+
+  if (isLocked) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500">
+        <span className="text-gray-400">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 1a5 5 0 0 0-5 5v3H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V11a2 2 0 0 0-2-2h-2V6a5 5 0 0 0-5-5zm0 2a3 3 0 0 1 3 3v3H9V6a3 3 0 0 1 3-3zm0 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4z" />
+          </svg>
+        </span>
+        <span>Gemini Flash Lite (free tier)</span>
+        <span className="ml-auto text-xs text-blue-500 cursor-pointer hover:underline">
+          Recharge to unlock all models
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full appearance-none rounded-md border border-gray-300 bg-white px-3 py-2 pr-8 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {MODEL_REGISTRY.filter((m) => m.tier === "paid").map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.display_name} — ~₹{model.est_cost_per_page_inr.toFixed(2)}/page
+          </option>
+        ))}
+      </select>
+      {/* Chevron */}
+      <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-gray-400">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M7 10l5 5 5-5z" />
+        </svg>
+      </span>
+
+      {/* Model description tooltip area */}
+      {value && (
+        <p className="mt-1 text-xs text-gray-500">
+          {MODEL_REGISTRY.find((m) => m.id === value)?.description}
+        </p>
+      )}
+    </div>
+  );
+}
+```
+
+### Integration
+
+The `ModelSelector` is embedded in the **document analysis form** (wherever
+the user triggers an analysis). Pass the selected model ID via the analysis
+API call as a `model_id` query param or request body field.
+
+```typescript
+// In analysis form component (existing):
+const [selectedModel, setSelectedModel] = useState(FREE_MODEL_ID);
+
+// In form JSX (additive):
+<div className="mb-4">
+  <label className="mb-1 block text-sm font-medium text-gray-700">
+    AI Model
+  </label>
+  <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+</div>
+```
+
+### Acceptance Criteria
+
+- [ ] Free-lane users see locked state with padlock icon and "Recharge" CTA
+- [ ] Paid users see dropdown with 3 paid models and estimated cost/page
+- [ ] Selecting a model updates the parent form state via `onChange`
+- [ ] `disabled` prop greys out and blocks interaction during submission
+- [ ] Model description renders below the select as hint text
+- [ ] Locked state does NOT render a `<select>` (no DOM element for screen readers to tab to)
+
+---
+
+## E5 — Cost Preview Modal (Pre-Analysis)
+
+**File:** `frontend/src/components/billing/CostPreviewModal.tsx` (new)
+**Track:** B — only shown when user is on paid lane
+
+### Purpose
+
+Before a costly analysis runs, show a modal with estimated cost, current
+balance, and balance after deduction. Gives users sticker shock protection
+and a chance to abort or switch to a cheaper model.
+
+```typescript
+// frontend/src/components/billing/CostPreviewModal.tsx
+import { useBillingContext } from "@/contexts/BillingContext";
+import { MODEL_REGISTRY } from "@/constants/models";
+
+interface CostPreviewModalProps {
+  isOpen: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  onModelChange: (modelId: string) => void;
+  modelId: string;
+  estimatedPages: number;   // caller passes doc page count
+}
+
+export function CostPreviewModal({
+  isOpen, onConfirm, onCancel, onModelChange, modelId, estimatedPages,
+}: CostPreviewModalProps) {
+  const { wallet } = useBillingContext();
+
+  if (!isOpen || !wallet) return null;
+
+  const model = MODEL_REGISTRY.find((m) => m.id === modelId);
+  const estCost = model ? model.est_cost_per_page_inr * estimatedPages : 0;
+  const balanceAfter = wallet.balance_inr - estCost;
+  const canAfford = balanceAfter >= 0 || wallet.free_credit_remaining_inr > 0;
+
+  return (
+    // Backdrop
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <h2 className="text-lg font-semibold text-gray-900">
+          Estimated Analysis Cost
+        </h2>
+
+        <div className="mt-4 space-y-3">
+          {/* Model row */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Model</span>
+            <span className="font-medium">{model?.display_name ?? modelId}</span>
+          </div>
+
+          {/* Pages row */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Document pages</span>
+            <span className="font-medium">{estimatedPages}</span>
+          </div>
+
+          {/* Estimated cost */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Estimated cost</span>
+            <span className="font-semibold text-gray-900">
+              ~₹{estCost.toFixed(2)}
+            </span>
+          </div>
+
+          <hr className="border-gray-100" />
+
+          {/* Current balance */}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-gray-500">Current wallet</span>
+            <span>₹{wallet.balance_inr.toFixed(2)}</span>
+          </div>
+
+          {/* Balance after */}
+          <div className="flex items-center justify-between text-sm font-semibold">
+            <span className="text-gray-700">Balance after analysis</span>
+            <span className={balanceAfter < 0 ? "text-red-600" : "text-green-700"}>
+              {balanceAfter < 0
+                ? `−₹${Math.abs(balanceAfter).toFixed(2)} (insufficient)`
+                : `₹${balanceAfter.toFixed(2)}`}
+            </span>
+          </div>
+        </div>
+
+        {/* Insufficient balance warning */}
+        {!canAfford && (
+          <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+            Insufficient balance. Please add funds or choose a cheaper model.
+          </p>
+        )}
+
+        {/* Switch model hint */}
+        <p className="mt-3 text-xs text-gray-400">
+          Actual cost may vary ±20% based on document token density.
+          Includes 15% service markup.
+        </p>
+
+        {/* Actions */}
+        <div className="mt-5 flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="rounded-md px-4 py-2 text-sm text-gray-600 hover:bg-gray-100"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!canAfford}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Confirm & Analyse
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### Acceptance Criteria
+
+- [ ] Modal opens when user clicks "Analyse" and is on paid lane
+- [ ] Shows correct model name, page count, estimated cost
+- [ ] "Balance after" shown in green if positive, red if negative
+- [ ] Confirm button disabled when `canAfford === false`
+- [ ] Disclaimer "±20% ... 15% service markup" always visible
+- [ ] `onCancel` closes modal without triggering analysis
+- [ ] `onConfirm` closes modal and triggers the analysis API call
+
+---
+
+## E6 — Post-Analysis Cost Receipt Drawer
+
+**File:** `frontend/src/components/billing/CostReceiptDrawer.tsx` (new)
+
+### Purpose
+
+After an analysis completes, slide in a drawer from the right showing the
+exact cost breakdown: tokens used, raw cost, markup, total charged, and
+which pool was debited (free / paid).
+
+```typescript
+// frontend/src/components/billing/CostReceiptDrawer.tsx
+import { useBillingContext } from "@/contexts/BillingContext";
+import type { CostBreakdownDisplay } from "@/types/billing";
+
+interface CostReceiptDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+  breakdown: CostBreakdownDisplay | null;
+}
+
+export function CostReceiptDrawer({
+  isOpen, onClose, breakdown,
+}: CostReceiptDrawerProps) {
+  const { refetch } = useBillingContext();
+
+  // Refresh wallet after analysis so header balance updates
+  if (isOpen && breakdown) {
+    refetch();
+  }
+
+  return (
+    // Slide-in overlay
+    <div
+      className={`fixed inset-y-0 right-0 z-50 flex flex-col w-80 bg-white shadow-2xl transition-transform duration-300 ${
+        isOpen ? "translate-x-0" : "translate-x-full"
+      }`}
+      aria-hidden={!isOpen}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+        <h3 className="font-semibold text-gray-900">Analysis Receipt</h3>
+        <button onClick={onClose} aria-label="Close receipt" className="text-gray-400 hover:text-gray-600">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        {!breakdown ? (
+          <p className="text-sm text-gray-400">No receipt data.</p>
+        ) : (
+          <>
+            {/* Pool badge */}
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                  breakdown.pool_used === "free"
+                    ? "bg-green-100 text-green-700"
+                    : "bg-blue-100 text-blue-700"
+                }`}
+              >
+                {breakdown.pool_used === "free" ? "Free credit" : "Paid wallet"}
+              </span>
+              <span className="text-xs text-gray-400">{breakdown.model_id}</span>
+            </div>
+
+            {/* Token counts */}
+            <div className="rounded-lg bg-gray-50 p-3 text-sm space-y-1.5">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Input tokens</span>
+                <span>{breakdown.input_tokens.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Output tokens</span>
+                <span>{breakdown.output_tokens.toLocaleString()}</span>
+              </div>
+            </div>
+
+            {/* Cost breakdown */}
+            <div className="text-sm space-y-1.5">
+              <div className="flex justify-between">
+                <span className="text-gray-500">Raw API cost</span>
+                <span>₹{breakdown.raw_cost_inr.toFixed(4)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">
+                  Service markup ({breakdown.markup_percent}%)
+                </span>
+                <span>₹{breakdown.markup_inr.toFixed(4)}</span>
+              </div>
+              <hr className="border-gray-100" />
+              <div className="flex justify-between font-semibold">
+                <span>Total charged</span>
+                <span>₹{breakdown.total_inr.toFixed(4)}</span>
+              </div>
+            </div>
+
+            {/* Transparency note */}
+            <p className="text-xs text-gray-400">
+              DokyDoc adds a 15% markup to cover infrastructure, support, and
+              platform costs. This is always shown transparently.
+            </p>
+          </>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="border-t border-gray-100 px-5 py-3">
+        <button
+          onClick={onClose}
+          className="w-full rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+        >
+          Done
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+### Integration
+
+In the analysis page, after the API returns:
+
+```typescript
+const [receipt, setReceipt] = useState<CostBreakdownDisplay | null>(null);
+const [receiptOpen, setReceiptOpen] = useState(false);
+
+const handleAnalysisComplete = (apiResponse: AnalysisResponse) => {
+  if (apiResponse.cost_breakdown) {
+    setReceipt(apiResponse.cost_breakdown);
+    setReceiptOpen(true);
+  }
+};
+```
+
+The backend analysis endpoints (updated in B4) must include a
+`cost_breakdown` field in their response matching `CostBreakdownDisplay`.
+
+### Acceptance Criteria
+
+- [ ] Drawer slides in from the right after successful analysis
+- [ ] Shows "Free credit" badge (green) or "Paid wallet" badge (blue)
+- [ ] Input + output token counts displayed with thousands separator
+- [ ] Raw cost, markup, and total shown to 4 decimal places
+- [ ] Wallet balance in header/sidebar updates after receipt opens
+- [ ] `onClose` slides drawer back out
+- [ ] Drawer accessible via `aria-hidden` toggle
+- [ ] "Done" button closes the drawer
+
+---
+
+## E7 — Recharge Modal (Preset + Custom)
+
+**File:** `frontend/src/components/billing/RechargeModal.tsx` (new)
+**Track:** B — requires `wallet.razorpay_enabled === true`
+
+### Purpose
+
+Allows users to top up their wallet using Razorpay. Presents 6 preset amounts
+(₹100 / ₹200 / ₹500 / ₹1,000 / ₹2,500 / ₹5,000) and a custom input.
+Handles the full Razorpay checkout → verify flow client-side.
+
+### Razorpay Script Loader
+
+```typescript
+// frontend/src/utils/loadRazorpay.ts  (new)
+export function loadRazorpayScript(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if ((window as any).Razorpay) {
+      resolve(true);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+```
+
+### Component
+
+```typescript
+// frontend/src/components/billing/RechargeModal.tsx
+import { useState } from "react";
+import { useBillingContext } from "@/contexts/BillingContext";
+import { billingApi } from "@/api/billingApi";
+import { loadRazorpayScript } from "@/utils/loadRazorpay";
+
+const PRESETS = [100, 200, 500, 1_000, 2_500, 5_000]; // INR
+
+interface RechargeModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSuccess?: (amountInr: number) => void;
+}
+
+type RechargeState = "idle" | "creating_order" | "checkout" | "verifying" | "success" | "error";
+
+export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps) {
+  const { wallet, refetch } = useBillingContext();
+  const [selected, setSelected] = useState<number | null>(500);
+  const [customValue, setCustomValue] = useState("");
+  const [state, setState] = useState<RechargeState>("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+
+  if (!isOpen) return null;
+
+  // Track B gate: if razorpay not enabled, show maintenance message
+  if (!wallet?.razorpay_enabled) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl text-center">
+          <p className="text-gray-600 text-sm">
+            Online recharge is temporarily unavailable. Please contact{" "}
+            <a href="mailto:billing@dokydoc.com" className="text-blue-600 underline">
+              billing@dokydoc.com
+            </a>
+            .
+          </p>
+          <button onClick={onClose} className="mt-4 text-sm text-gray-400 hover:text-gray-600">
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const getAmount = (): number | null => {
+    if (selected !== null) return selected;
+    const v = parseFloat(customValue);
+    return !isNaN(v) && v >= 100 ? v : null;
+  };
+
+  const handleRecharge = async () => {
+    const amount = getAmount();
+    if (!amount) {
+      setErrorMsg("Minimum recharge amount is ₹100.");
+      return;
+    }
+    setErrorMsg("");
+
+    // 1. Load Razorpay SDK
+    setState("creating_order");
+    const loaded = await loadRazorpayScript();
+    if (!loaded) {
+      setState("error");
+      setErrorMsg("Could not load payment gateway. Check your internet connection.");
+      return;
+    }
+
+    // 2. Create Razorpay order on backend
+    let order;
+    try {
+      order = await billingApi.createOrder(amount);
+    } catch (err: any) {
+      setState("error");
+      setErrorMsg(err?.response?.data?.detail ?? "Failed to create order. Try again.");
+      return;
+    }
+
+    // 3. Open Razorpay checkout
+    setState("checkout");
+    const rzp = new (window as any).Razorpay({
+      key: order.key_id,
+      amount: order.amount_paise,
+      currency: "INR",
+      order_id: order.order_id,
+      name: "DokyDoc",
+      description: `Wallet top-up ₹${amount}`,
+      theme: { color: "#2563EB" },
+
+      handler: async (response: {
+        razorpay_order_id: string;
+        razorpay_payment_id: string;
+        razorpay_signature: string;
+      }) => {
+        // 4. Verify payment on backend
+        setState("verifying");
+        try {
+          await billingApi.verifyPayment({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature,
+          });
+          setState("success");
+          refetch(); // update wallet balance in context
+          onSuccess?.(amount);
+        } catch (err: any) {
+          setState("error");
+          setErrorMsg(
+            err?.response?.data?.detail ?? "Payment verification failed. Contact support."
+          );
+        }
+      },
+
+      modal: {
+        ondismiss: () => {
+          // User closed checkout without paying
+          if (state === "checkout") setState("idle");
+        },
+      },
+    });
+
+    rzp.open();
+  };
+
+  const handleClose = () => {
+    setState("idle");
+    setErrorMsg("");
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+
+        {/* Header */}
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold text-gray-900">Add Wallet Funds</h2>
+          <button onClick={handleClose} aria-label="Close" className="text-gray-400 hover:text-gray-600">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {state === "success" ? (
+          <div className="text-center py-6">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2.5">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </div>
+            <p className="text-lg font-semibold text-gray-900">Payment Successful!</p>
+            <p className="mt-1 text-sm text-gray-500">
+              ₹{getAmount()?.toFixed(2)} has been added to your wallet.
+            </p>
+            <button
+              onClick={handleClose}
+              className="mt-5 rounded-md bg-blue-600 px-6 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Done
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Current balance */}
+            {wallet && (
+              <p className="mb-4 text-sm text-gray-500">
+                Current balance:{" "}
+                <span className="font-semibold text-gray-900">
+                  ₹{wallet.balance_inr.toFixed(2)}
+                </span>
+              </p>
+            )}
+
+            {/* Presets grid */}
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {PRESETS.map((amount) => (
+                <button
+                  key={amount}
+                  onClick={() => { setSelected(amount); setCustomValue(""); }}
+                  className={`rounded-lg border py-2.5 text-sm font-semibold transition-colors ${
+                    selected === amount
+                      ? "border-blue-600 bg-blue-50 text-blue-700"
+                      : "border-gray-200 text-gray-700 hover:border-blue-300 hover:bg-blue-50"
+                  }`}
+                >
+                  ₹{amount.toLocaleString("en-IN")}
+                </button>
+              ))}
+            </div>
+
+            {/* Custom amount */}
+            <div className="mb-4">
+              <label className="mb-1 block text-xs text-gray-500">
+                Or enter custom amount (min ₹100)
+              </label>
+              <div className="relative">
+                <span className="absolute inset-y-0 left-3 flex items-center text-gray-400 text-sm">₹</span>
+                <input
+                  type="number"
+                  min={100}
+                  step={1}
+                  value={customValue}
+                  onChange={(e) => { setCustomValue(e.target.value); setSelected(null); }}
+                  placeholder="500"
+                  className="w-full rounded-md border border-gray-300 py-2 pl-7 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* Error */}
+            {errorMsg && (
+              <p className="mb-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+                {errorMsg}
+              </p>
+            )}
+
+            {/* GST note */}
+            <p className="mb-4 text-xs text-gray-400">
+              Payments processed via Razorpay. GST applicable as per Indian tax regulations.
+              By continuing you agree to our{" "}
+              <a href="/terms" className="underline">Terms of Service</a>.
+            </p>
+
+            {/* CTA */}
+            <button
+              onClick={handleRecharge}
+              disabled={state !== "idle" || !getAmount()}
+              className="w-full rounded-md bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {state === "creating_order" || state === "verifying"
+                ? "Processing…"
+                : `Pay ₹${getAmount()?.toLocaleString("en-IN") ?? "–"}`}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+### Acceptance Criteria
+
+- [ ] 6 preset buttons render in a 3×2 grid; clicking one highlights it and deselects custom input
+- [ ] Custom input accepts only numeric values ≥ 100; entering a value deselects preset
+- [ ] "Pay ₹X" button label updates reactively as amount changes
+- [ ] When `razorpay_enabled === false` → maintenance message shown, no checkout attempted
+- [ ] Razorpay checkout opens with correct `order_id`, `amount`, `key_id`
+- [ ] On payment success → verify endpoint called → success screen shown → wallet refreshed
+- [ ] User dismissing Razorpay popup without paying → modal returns to `idle` state (no error)
+- [ ] `onSuccess` callback fires with credited amount
+- [ ] Error message shown on order creation failure or verification failure
+- [ ] "Done" on success screen closes modal cleanly
+
+---
+
+## E8 — Cost Export UI
+
+**File:** `frontend/src/components/billing/ExportPanel.tsx` (new)
+**File:** `frontend/src/pages/BillingSettings.tsx` (additive — add export section)
+
+### Purpose
+
+Lets CXO / Admin users download cost reports directly from the UI.
+Presents format selection (CSV / PDF / JSON / DOCX) and date range presets,
+then triggers a file download via the `/billing/export` endpoint (D2).
+
+```typescript
+// frontend/src/components/billing/ExportPanel.tsx
+import { useState } from "react";
+import { billingApi } from "@/api/billingApi";
+import type { ExportFormat, DatePreset } from "@/types/billing";
+
+const FORMAT_OPTIONS: { value: ExportFormat; label: string; icon: string }[] = [
+  { value: "csv",  label: "CSV",  icon: "📊" },
+  { value: "pdf",  label: "PDF",  icon: "📄" },
+  { value: "json", label: "JSON", icon: "{ }" },
+  { value: "docx", label: "Word", icon: "📝" },
+];
+
+const PRESET_OPTIONS: { value: DatePreset; label: string }[] = [
+  { value: "last_7_days",    label: "Last 7 days" },
+  { value: "this_month",     label: "This month" },
+  { value: "last_month",     label: "Last month" },
+  { value: "last_quarter",   label: "Last quarter" },
+  { value: "custom",         label: "Custom range" },
+];
+
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function ExportPanel() {
+  const [format, setFormat] = useState<ExportFormat>("csv");
+  const [preset, setPreset] = useState<DatePreset>("this_month");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleExport = async () => {
+    setError("");
+    setIsExporting(true);
+    try {
+      const params: Record<string, string> = { format, preset };
+      if (preset === "custom") {
+        if (!startDate || !endDate) {
+          setError("Please select both start and end dates.");
+          setIsExporting(false);
+          return;
+        }
+        params.start_date = startDate;
+        params.end_date = endDate;
+      }
+
+      const blob = await billingApi.exportCosts(params);
+
+      const ext = format === "docx" ? "docx" : format;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      triggerDownload(blob, `dokydoc-costs-${dateStr}.${ext}`);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail ?? "Export failed. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-5">
+      <h3 className="mb-4 text-base font-semibold text-gray-900">
+        Export Cost Report
+      </h3>
+
+      {/* Format selector */}
+      <div className="mb-4">
+        <label className="mb-2 block text-sm font-medium text-gray-700">
+          Format
+        </label>
+        <div className="flex gap-2">
+          {FORMAT_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setFormat(opt.value)}
+              className={`flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm transition-colors ${
+                format === opt.value
+                  ? "border-blue-600 bg-blue-50 font-semibold text-blue-700"
+                  : "border-gray-200 text-gray-600 hover:border-blue-300"
+              }`}
+            >
+              <span>{opt.icon}</span>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Date range */}
+      <div className="mb-4">
+        <label className="mb-2 block text-sm font-medium text-gray-700">
+          Date Range
+        </label>
+        <select
+          value={preset}
+          onChange={(e) => setPreset(e.target.value as DatePreset)}
+          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+        >
+          {PRESET_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Custom date range */}
+      {preset === "custom" && (
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">Start date</label>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-gray-500">End date</label>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <p className="mb-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">
+          {error}
+        </p>
+      )}
+
+      {/* Export button */}
+      <button
+        onClick={handleExport}
+        disabled={isExporting}
+        className="flex items-center gap-2 rounded-md bg-gray-900 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-50"
+      >
+        {isExporting ? (
+          <>
+            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 2a10 10 0 0 1 10 10" />
+            </svg>
+            Exporting…
+          </>
+        ) : (
+          <>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 15V3m0 12l-4-4m4 4l4-4M3 17v2a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2" />
+            </svg>
+            Download {format.toUpperCase()}
+          </>
+        )}
+      </button>
+
+      <p className="mt-3 text-xs text-gray-400">
+        Reports include all analyses within the selected period.
+        Available to Admin and CXO roles only.
+      </p>
+    </div>
+  );
+}
+```
+
+### Integration in BillingSettings page
+
+```typescript
+// frontend/src/pages/BillingSettings.tsx — additive block
+import { ExportPanel } from "@/components/billing/ExportPanel";
+
+// Inside BillingSettings JSX, after existing wallet section:
+{(userRole === "cxo" || userRole === "admin") && (
+  <section className="mt-8">
+    <h2 className="mb-4 text-xl font-semibold text-gray-900">Cost Reports</h2>
+    <ExportPanel />
+  </section>
+)}
+```
+
+### Acceptance Criteria
+
+- [ ] 4 format buttons render; active format highlighted in blue
+- [ ] "This month" is the default date range preset
+- [ ] Selecting "Custom range" reveals start/end date pickers
+- [ ] Submitting custom range without dates → inline error, no API call
+- [ ] On successful export → browser "Save As" dialog opens with correct filename
+  - CSV: `dokydoc-costs-YYYY-MM-DD.csv`
+  - PDF: `dokydoc-costs-YYYY-MM-DD.pdf`
+  - DOCX: `dokydoc-costs-YYYY-MM-DD.docx`
+  - JSON: `dokydoc-costs-YYYY-MM-DD.json`
+- [ ] Button shows spinner and "Exporting…" text during request
+- [ ] Non-CXO/Admin users do NOT see the Export section
+- [ ] API error shown as inline red message (no crash)
+
+---
+
+## Part E Summary
+
+| Ticket | Component | File(s) | Track | Depends On | Est. LOC |
+|--------|-----------|---------|-------|------------|---------|
+| E1 | BillingContext + useBilling hook + billingApi | `contexts/BillingContext.tsx`, `hooks/useBilling.ts`, `types/billing.ts`, `api/billingApi.ts` | A | B3 `/billing/wallet` endpoint | ~110 |
+| E2 | Free Credit Welcome Banner | `components/billing/FreeCreditBanner.tsx` | A | E1 | ~60 |
+| E3 | Low Balance Alert | `components/billing/LowBalanceAlert.tsx` | A | E1 | ~55 |
+| E4 | Model Selector Dropdown | `components/billing/ModelSelector.tsx`, `constants/models.ts` | B | E1 | ~75 |
+| E5 | Cost Preview Modal | `components/billing/CostPreviewModal.tsx` | B | E1 + B2 | ~80 |
+| E6 | Post-Analysis Cost Receipt Drawer | `components/billing/CostReceiptDrawer.tsx` | A | E1 | ~85 |
+| E7 | Recharge Modal | `components/billing/RechargeModal.tsx`, `utils/loadRazorpay.ts` | B | C2 + C3 | ~135 |
+| E8 | Cost Export UI | `components/billing/ExportPanel.tsx` | A | D2 | ~100 |
+
+### Part E Execution Order
+
+1. **E1** — foundation; all other E tickets depend on it
+2. **E2, E3** — can be done in parallel after E1 (Track A, ship now)
+3. **E6, E8** — can be done in parallel after E1 (Track A, ship now)
+4. **E4, E5** — after E1 + backend B2 model routing (Track B)
+5. **E7** — after E1 + backend C2 create-order + C3 verify-payment (Track B)
+
+### Part E: Track A vs Track B
+
+| Component | Track A (ships now) | Track B (after GSTIN) |
+|-----------|--------------------|-----------------------|
+| BillingContext | ✅ | — |
+| Free Credit Banner | ✅ | — |
+| Low Balance Alert | ✅ | — |
+| Cost Receipt Drawer | ✅ | — |
+| Export Panel | ✅ | — |
+| Model Selector | — | ✅ (behind `razorpay_enabled`) |
+| Cost Preview Modal | — | ✅ |
+| Recharge Modal | — | ✅ |
+
+---
+
+
+---
+
+# Part F — Track A vs Track B: Shipping Gates
+
+## Overview
+
+DokyDoc Phase 9 ships in two tracks to unblock development now while the
+GSTIN (Indian tax registration) required for Razorpay live mode is still
+pending. Every piece of Track B code is written and merged to `main` —
+it just runs behind a single env var guard. **Zero redeploy needed** when
+the GSTIN arrives.
+
+---
+
+## F1 — The Single Env Var Gate
+
+```bash
+# .env (production)
+RAZORPAY_ENABLED=false      # Track A — everything below this line is dormant
+RAZORPAY_KEY_ID=            # empty until GSTIN approved
+RAZORPAY_KEY_SECRET=        # empty until GSTIN approved
+RAZORPAY_WEBHOOK_SECRET=    # empty until GSTIN approved
+```
+
+When GSTIN arrives:
+
+```bash
+# .env (production) — one change, no redeploy
+RAZORPAY_ENABLED=true
+RAZORPAY_KEY_ID=rzp_live_XXXX
+RAZORPAY_KEY_SECRET=XXXX
+RAZORPAY_WEBHOOK_SECRET=XXXX
+```
+
+The `GET /billing/config` endpoint (shipped in C1) returns
+`{ razorpay_enabled: true/false }` so the frontend reads the same flag
+without a separate deploy.
+
+---
+
+## F2 — Complete Ticket-to-Track Mapping
+
+| Ticket | Title | Track | Ships When | Notes |
+|--------|-------|-------|-----------|-------|
+| **A1** | Alembic migrations (new columns) | **A** | Now | Additive columns, null-safe |
+| **B0** | Gemini deprecation fix | **A** | Now | **URGENT** — June 17 deadline |
+| **B1** | CostBreakdown + markup | **A** | Now | `to_legacy_dict()` preserves callers |
+| **B2** | Model routing `get_client_for_model()` | **A** | Now | Additive method, no existing routes changed |
+| **B3** | WalletService + two-pool logic | **A** | Now | `deduct()` signature unchanged |
+| **B4** | BillingEnforcementService two-pool | **A** | Now | `check_can_afford` / `deduct_cost` signatures unchanged |
+| **B5** | Free credit on signup | **A** | Now | Try/except — won't break existing reg flow |
+| **C1** | RazorpayService + config endpoint | **B** | After GSTIN | `/billing/config` always returns; payment calls gate on `RAZORPAY_ENABLED` |
+| **C2** | Create order endpoint | **B** | After GSTIN | Returns 503 if `RAZORPAY_ENABLED=false` |
+| **C3** | Verify payment endpoint | **B** | After GSTIN | Returns 503 if `RAZORPAY_ENABLED=false` |
+| **C4** | Razorpay webhook handler | **B** | After GSTIN | 200 always; signature check skipped if disabled |
+| **C5** | Wallet endpoints (balance + txns) | **A** | Now | Pure read — no Razorpay dependency |
+| **C6** | Enterprise contact endpoint | **A** | Now | Email only — no Razorpay dependency |
+| **C7** | Nightly reconciliation Celery task | **B** | After GSTIN | No orders to reconcile until B is live |
+| **D1** | Cost export service | **A** | Now | Works from existing usage_logs table |
+| **D2** | Export endpoint | **A** | Now | RBAC only — no payment dependency |
+| **D3** | Demo org seeder | **A** | Dev/staging | Never in production cron |
+| **E1** | BillingContext + hooks | **A** | Now | Wallet read endpoints are Track A |
+| **E2** | Free credit banner | **A** | Now | Read-only — no payment |
+| **E3** | Low balance alert | **A** | Now | Read-only — no payment |
+| **E4** | Model selector | **B** | After GSTIN | Locked state shown in Track A |
+| **E5** | Cost preview modal | **B** | After GSTIN | Skip in Track A |
+| **E6** | Cost receipt drawer | **A** | Now | Works with Track A markup from B1 |
+| **E7** | Recharge modal | **B** | After GSTIN | Maintenance screen shown if `razorpay_enabled=false` |
+| **E8** | Export UI | **A** | Now | Calls D2 export endpoint |
+
+---
+
+## F3 — Track A Acceptance Gate (what must pass before any Track A ticket goes live)
+
+All of the following must be true before Track A is considered production-ready:
+
+- [ ] **A1 migration** applied on staging without data loss or column errors
+- [ ] **B0** — `GEMINI_MODEL` env var set to `gemini-3-flash` on all environments
+- [ ] **B1** — all analysis endpoints returning `cost_breakdown` in response
+- [ ] **B3 / B4** — wallet `deduct()` tested with concurrent load (SELECT FOR UPDATE verified)
+- [ ] **B5** — new user registration creates a `wallet_transaction` row with `type=credit`
+- [ ] **C5** — `GET /billing/wallet` returns 200 for authenticated user
+- [ ] **D1 / D2** — CSV export downloads successfully for a CXO user
+- [ ] **E1** — `useBillingContext` available in authenticated layout
+- [ ] **E2 / E3** — banner and alert render correctly for a new test user
+
+---
+
+## F4 — Track B Flip Checklist (when GSTIN arrives)
+
+Perform these steps **in order** on the day of Track B activation:
+
+1. Obtain Razorpay live `key_id`, `key_secret`, and `webhook_secret` from the Razorpay dashboard.
+2. Update `.env` on production:
+   ```
+   RAZORPAY_ENABLED=true
+   RAZORPAY_KEY_ID=rzp_live_XXXX
+   RAZORPAY_KEY_SECRET=XXXX
+   RAZORPAY_WEBHOOK_SECRET=XXXX
+   ```
+3. Restart only the web server process (gunicorn / uvicorn) — **no code deploy**.
+4. Register webhook URL in Razorpay dashboard:
+   `https://app.dokydoc.com/billing/webhook/razorpay`
+   Events: `payment.captured`, `payment.failed`, `refund.created`
+5. Place a test ₹100 payment using a Razorpay test card against the live endpoint.
+6. Verify: wallet credited, ledger row created, receipt visible in UI.
+7. Enable Celery beat for `nightly_reconciliation_task` (cron `0 1 * * *`).
+8. Announce Track B live in status page.
+
+---
+
+## F5 — Risk Register
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|-----------|
+| Razorpay GSTIN delayed beyond June 17 | Medium | High | B0 (Gemini deprecation) is Track A — ships independently. No revenue blocked. |
+| Two concurrent payments credited twice | Low | High | Idempotency key `"rp:{payment_id}"` + SELECT FOR UPDATE covers both webhook and verify paths |
+| Free credit seeded twice on signup | Low | Medium | Try/except in B5; check `has_free_credit_been_seeded` flag before inserting |
+| Nightly reconciliation misses an order | Low | Low | C7 marks orders `reconciliation_failed` with alert — manual review possible |
+| fpdf2 rendering differs across environments | Very Low | Low | Pin version `fpdf2==2.7.9`; PDF generation is pure Python, no system font dependencies |
+| Demo seeder corrupts production data | Very Low | Critical | Seeder reads `settings.ENVIRONMENT` — aborts if not `development` or `staging` |
+
+---
+
+---
+
+# Master Execution Checklist
+
+Use this checklist to track Phase 9 progress across all parts. Tickets are
+ordered by dependency — top to bottom is a safe execution sequence.
+
+## Track A (ship now — no GSTIN needed)
+
+- [ ] **A1** Run Alembic migration for new billing columns
+- [ ] **B0** Set `GEMINI_MODEL=gemini-3-flash` in all envs
+- [ ] **B1** Implement `CostBreakdown` + `MARKUP_PERCENT` in `cost_service.py`
+- [ ] **B2** Add `get_client_for_model()` to `provider_router.py`
+- [ ] **B3** Implement `WalletService` + `WalletTransaction` + CRUD
+- [ ] **B4** Update `BillingEnforcementService` for two-pool logic
+- [ ] **B5** Seed free credit on tenant registration
+- [ ] **C5** Implement wallet read endpoints (`/wallet`, `/wallet/transactions`)
+- [ ] **C6** Implement enterprise contact endpoint + email
+- [ ] **D1** Implement `CostExportService` (add `fpdf2` to requirements)
+- [ ] **D2** Add `/billing/export` endpoint
+- [ ] **D3** Implement demo org seeder script
+- [ ] **E1** Implement `BillingContext` + `billingApi`
+- [ ] **E2** Implement `FreeCreditBanner`
+- [ ] **E3** Implement `LowBalanceAlert`
+- [ ] **E6** Implement `CostReceiptDrawer`
+- [ ] **E8** Implement `ExportPanel` on BillingSettings page
+
+## Track B (flip one env var when GSTIN arrives)
+
+- [ ] **C1** Implement `RazorpayService` + `/billing/config` endpoint
+- [ ] **C2** Implement `/billing/create-order` endpoint
+- [ ] **C3** Implement `/billing/verify-payment` endpoint
+- [ ] **C4** Implement `/billing/webhook/razorpay` handler
+- [ ] **C7** Implement nightly reconciliation Celery task
+- [ ] **E4** Implement `ModelSelector` component
+- [ ] **E5** Implement `CostPreviewModal`
+- [ ] **E7** Implement `RechargeModal`
+- [ ] **F4** Execute Track B flip checklist on GSTIN day
+
+---
+
+*End of PHASE_9_IMPLEMENTATION_PLAN.md*
+
