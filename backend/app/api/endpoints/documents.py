@@ -701,3 +701,28 @@ def stop_document_analysis(
     )
 
     return {"message": "Stop signal sent. Analysis will halt shortly."}
+
+
+# ── P5B-01: Atom Diff Endpoint ────────────────────────────────────────────────
+
+@router.get("/{document_id}/atom-diff")
+def get_atom_diff(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5B-01: Returns the last atom-level diff result for a document.
+    Used by frontend to show "BRD Updated: 3 new requirements, 2 removed" banner.
+    """
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "document_id": document_id,
+        "last_atom_diff": getattr(document, "last_atom_diff", None) or {
+            "message": "No diff available — document not yet re-uploaded after P5B-01"
+        },
+    }

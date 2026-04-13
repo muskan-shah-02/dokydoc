@@ -584,6 +584,8 @@ RULES:
 4. Keep content as the verbatim or minimally paraphrased requirement sentence.
 5. Number atoms REQ-001, REQ-002, ... in order.
 6. Extract ALL distinct requirements — aim for completeness. A 5-page BRD typically yields 30-80 atoms.
+7. P5B-08: For SECURITY_REQUIREMENT atoms, set regulatory_tags to applicable frameworks
+   (e.g. ["PCI-DSS"], ["HIPAA"], ["GDPR"], ["RBI"], ["PSD2"], ["SWIFT"] — or [] if none apply).
 
 Return ONLY a valid JSON array. No explanations, no markdown fences.
 
@@ -593,7 +595,8 @@ REQUIRED FORMAT:
     "atom_id": "REQ-001",
     "atom_type": "API_CONTRACT",
     "content": "POST /auth/login returns a JWT token containing user_id and role",
-    "criticality": "critical"
+    "criticality": "critical",
+    "regulatory_tags": []
   }}
 ]
 
@@ -640,54 +643,130 @@ BRD TEXT:
             self.logger.error(f"BRD atomization failed: {e}", exc_info=True)
             return []
 
-    # Atom type → focused validation instructions
+    # P5B-09: Comprehensive per-atom-type validation instructions (8-12 checks each)
     _ATOM_TYPE_INSTRUCTIONS = {
-        "API_CONTRACT": (
-            "API CONTRACTS: For each atom, check whether the code implements the specified "
-            "HTTP endpoint with the correct method, path, authentication requirement, request "
-            "parameters, and response shape. Flag: missing endpoints, wrong HTTP method, missing "
-            "auth enforcement, wrong response structure, incorrect status codes."
-        ),
-        "BUSINESS_RULE": (
-            "BUSINESS RULES: For each atom, check whether the code implements the stated "
-            "condition, calculation, or eligibility logic. Verify all branches are covered. "
-            "Flag: missing rule, wrong formula, missing edge-case handling, incorrect conditions."
-        ),
-        "FUNCTIONAL_REQUIREMENT": (
-            "FUNCTIONAL REQUIREMENTS: For each atom, check whether the system capability "
-            "described is implemented. Flag: missing features, partial implementation, or "
-            "capabilities that exist in name only without the specified behaviour."
-        ),
-        "DATA_CONSTRAINT": (
-            "DATA CONSTRAINTS: For each atom, check whether the specified field exists with "
-            "the correct type and stated validation enforced (max length, required, regex, range). "
-            "Flag: missing fields, wrong type, absent validation, no uniqueness enforcement."
-        ),
-        "WORKFLOW_STEP": (
-            "WORKFLOW STEPS: For each atom, check whether all steps occur in the correct order "
-            "and compensating actions (rollback, cleanup) exist for failure paths. "
-            "Flag: missing steps, wrong order, no rollback, missing post-step side effects."
-        ),
-        "ERROR_SCENARIO": (
-            "ERROR SCENARIOS: For each atom, check whether the error case is handled, returns "
-            "the specified HTTP status, and produces the correct message. "
-            "Flag: unhandled error, wrong status code, missing/misleading error message."
-        ),
-        "SECURITY_REQUIREMENT": (
-            "SECURITY REQUIREMENTS: For each atom, check whether the stated auth check, RBAC "
-            "enforcement, or encryption is implemented. "
-            "Flag: missing auth decorator, absent permission check, sensitive data not masked."
-        ),
-        "NFR": (
-            "NON-FUNCTIONAL REQUIREMENTS: For each atom, check whether performance/scalability "
-            "constraints are reflected (pagination, caching, async, timeouts, retry). "
-            "Flag: no pagination on list endpoints, no timeout on external calls, blocking ops."
-        ),
-        "INTEGRATION_POINT": (
-            "INTEGRATION POINTS: For each atom, check whether the external service call is "
-            "implemented on the correct trigger and includes failure handling. "
-            "Flag: missing call, wrong trigger, no retry, missing webhook handler."
-        ),
+        "API_CONTRACT": """API CONTRACTS — check ALL of the following:
+1. ENDPOINT EXISTS: The exact HTTP method + path is present in the code (route registered).
+2. AUTH ENFORCED: Authentication decorator/middleware is applied (JWT, OAuth, API key).
+3. PARAMETERS PRESENT: All required request parameters (path, query, body fields) are handled.
+4. RESPONSE SHAPE: Response schema matches the spec (field names, types, nesting).
+5. STATUS CODES: Correct HTTP status codes returned (200/201 for success, 4xx for client errors, 5xx for server errors).
+6. RATE LIMITING: Rate limit headers or throttle logic applied if specified.
+7. PAGINATION: Pagination (page/limit/cursor) implemented on list endpoints.
+8. IDEMPOTENCY: PUT/PATCH endpoints are idempotent; POST endpoints avoid duplicate creation.
+9. VALIDATION: Input validation rejects malformed requests before processing.
+10. CONTENT-TYPE: Correct Content-Type header (application/json, multipart/form-data) enforced.
+Flag any of the above that are absent or incorrect.""",
+
+        "BUSINESS_RULE": """BUSINESS RULES — check ALL of the following:
+1. RULE EXISTS: The condition, calculation, or eligibility logic is present in code.
+2. FORMULA CORRECT: Numerical calculations match the spec (amounts, percentages, rates).
+3. ALL BRANCHES: All conditional branches (if/else/switch) match the stated logic.
+4. EDGE CASES: Zero-values, null inputs, boundary conditions are handled.
+5. SIDE EFFECTS: Required side effects (notifications, state changes, audit logs) are triggered.
+6. ORDERING: Rule is applied at the correct point in the processing pipeline.
+7. CONFIGURATION: Rule uses configurable thresholds/rates (not magic numbers) if specified.
+8. AUDIT: Business-critical decisions are logged with enough context to reconstruct them.
+9. ROLLBACK: Compensating logic exists if the rule application fails mid-transaction.
+10. CURRENCY/PRECISION: Monetary values use Decimal (not float) and correct rounding mode.
+Flag any of the above that are absent or incorrect.""",
+
+        "FUNCTIONAL_REQUIREMENT": """FUNCTIONAL REQUIREMENTS — check ALL of the following:
+1. FEATURE EXISTS: The described system capability is implemented end-to-end.
+2. COMPLETENESS: All sub-steps of the feature are present, not just the entry point.
+3. PERSISTENCE: Data that must be saved is actually written to the DB/storage.
+4. TRIGGERS: Automated actions (emails, webhooks, tasks) fire at the correct events.
+5. USER FEEDBACK: Appropriate success/error responses are returned to the caller.
+6. PERMISSIONS: Feature is accessible only to authorized roles/users.
+7. ASYNC: Long-running operations are async (Celery/background tasks) if required.
+8. IDEMPOTENCY: Repeated invocations don't create duplicate state.
+9. ROLLBACK: Partial failures leave the system in a consistent state.
+10. CONFIGURATION: Feature behavior is configurable if the spec requires it.
+Flag any of the above that are absent or incorrect.""",
+
+        "DATA_CONSTRAINT": """DATA CONSTRAINTS — check ALL of the following:
+1. FIELD EXISTS: The specified field is present in the model/schema.
+2. TYPE CORRECT: Field type matches (String, Integer, Decimal, DateTime, Boolean, ARRAY).
+3. REQUIRED/NULLABLE: nullable=False where required; nullable=True where optional.
+4. LENGTH LIMIT: max_length/max_digits enforced at DB and API validation layers.
+5. RANGE: min/max value constraints enforced (ge=, le= in Pydantic; CHECK in DB).
+6. REGEX: Pattern validation enforced (email format, phone format, UUID format).
+7. UNIQUENESS: Unique constraint present at DB level (not just application level).
+8. DEFAULT VALUE: Default value matches the spec (not None when a default is stated).
+9. ENUM VALUES: Allowed values enforced (Enum type or CHECK constraint).
+10. FOREIGN KEY: Referential integrity enforced with appropriate ON DELETE behavior.
+Flag any of the above that are absent or incorrect.""",
+
+        "WORKFLOW_STEP": """WORKFLOW STEPS — check ALL of the following:
+1. ALL STEPS PRESENT: Every step in the workflow is implemented.
+2. ORDER PRESERVED: Steps execute in the specified order (no reordering).
+3. GATES: Precondition checks between steps (can't proceed to step N without step N-1).
+4. ROLLBACK: Compensating actions exist if any step fails (idempotent undo).
+5. STATE MACHINE: Status/state transitions match the spec (e.g. pending→processing→complete).
+6. NOTIFICATIONS: Required notifications (email, webhook, event) are sent at correct steps.
+7. AUDIT TRAIL: Each step transition is logged with actor, timestamp, and reason.
+8. TIMEOUTS: Long-running steps have timeouts and timeout handlers.
+9. CONCURRENCY: Concurrent invocations of the same workflow are handled (locking/idempotency).
+10. DEAD LETTERS: Failed workflows reach a terminal failure state (not stuck in limbo).
+Flag any of the above that are absent or incorrect.""",
+
+        "ERROR_SCENARIO": """ERROR SCENARIOS — check ALL of the following:
+1. ERROR HANDLED: The specific error case has a handler (try/except or validation).
+2. STATUS CODE: Correct HTTP status code returned (400, 401, 403, 404, 409, 422, 500).
+3. ERROR MESSAGE: Descriptive, user-safe error message returned (no stack traces exposed).
+4. ERROR SCHEMA: Error response follows the standard error schema ({detail: ...} or similar).
+5. LOGGING: Error is logged at the appropriate level (WARNING for client errors, ERROR for server).
+6. NO SILENT FAILURE: Errors are not swallowed without a response (no bare `except: pass`).
+7. CLEANUP: Resources (DB connections, locks, temp files) are released on error.
+8. RETRY SAFE: If the caller retries after this error, the system handles it gracefully.
+9. PARTIAL SUCCESS: If partial data was committed before the error, it's handled consistently.
+10. CIRCUIT BREAKER: Repeated errors from external dependencies don't cascade (fallback/circuit).
+Flag any of the above that are absent or incorrect.""",
+
+        "SECURITY_REQUIREMENT": """SECURITY REQUIREMENTS — check ALL of the following:
+1. AUTH CHECK: Authentication is verified before processing (middleware or decorator).
+2. RBAC: Role/permission check enforced for the specific operation.
+3. TENANT ISOLATION: Tenant ID filter applied to all DB queries (no cross-tenant data leakage).
+4. INPUT SANITIZATION: User input is sanitized/validated before use in queries or commands.
+5. SQL INJECTION: ORM used for all DB queries (no raw SQL with string formatting).
+6. SENSITIVE DATA MASKED: PII, tokens, passwords are not logged or returned in responses.
+7. ENCRYPTION: Sensitive fields (passwords, secrets) are hashed/encrypted at rest.
+8. HTTPS ENFORCED: External calls use HTTPS; no HTTP for sensitive endpoints.
+9. SECRET MANAGEMENT: Credentials come from env vars / secret store (no hardcoded secrets).
+10. AUDIT LOG: Security-relevant actions (login, permission change, deletion) are audit-logged.
+11. RATE LIMITING: Authentication and sensitive endpoints have rate limiting.
+12. TOKEN EXPIRY: Short-lived tokens used; refresh token rotation implemented.
+Flag any of the above that are absent or incorrect.""",
+
+        "NFR": """NON-FUNCTIONAL REQUIREMENTS — check ALL of the following:
+1. RESPONSE TIME: Slow operations are async or cached to meet latency targets.
+2. THROUGHPUT: List endpoints have pagination to prevent large result sets.
+3. CACHING: Frequently-read, rarely-changed data is cached (Redis, in-memory, CDN).
+4. DB OPTIMIZATION: N+1 queries avoided (eager loading, batch queries, select_related).
+5. CONNECTION POOLING: DB connections use pooling (not opened/closed per request).
+6. ASYNC OPERATIONS: I/O-bound operations (HTTP calls, DB queries) are async where applicable.
+7. RETRY POLICY: Transient failures retried with exponential backoff and jitter.
+8. GRACEFUL DEGRADATION: Service continues (possibly degraded) when dependencies are unavailable.
+9. MEMORY LIMITS: Large data sets streamed or paginated (not loaded entirely into memory).
+10. MONITORING: Key metrics (latency, error rate, queue depth) are instrumented.
+11. TIMEOUT: All external calls have a timeout (HTTP, DB, queue).
+12. CIRCUIT BREAKER: External dependency failures don't cascade to all requests.
+Flag any of the above that are absent or incorrect.""",
+
+        "INTEGRATION_POINT": """INTEGRATION POINTS — check ALL of the following:
+1. CALL EXISTS: The external service call (HTTP, gRPC, message queue) is implemented.
+2. TRIGGER CORRECT: Call fires on the correct event or schedule.
+3. AUTH CONFIGURED: API key, OAuth token, or service credentials are passed correctly.
+4. TIMEOUT: HTTP client timeout is set (not using default infinite timeout).
+5. RETRY LOGIC: Transient failures (5xx, network errors) retried with backoff.
+6. ERROR HANDLING: Non-2xx responses and network errors are caught and handled.
+7. IDEMPOTENCY KEY: Outbound requests include idempotency keys where supported.
+8. WEBHOOK HANDLER: Inbound webhook endpoint is registered, validates signatures, returns 200 fast.
+9. ASYNC PROCESSING: Webhook processing is done asynchronously (Celery task, not inline).
+10. DATA MAPPING: Request/response fields correctly mapped between internal and external schemas.
+11. CIRCUIT BREAKER: Repeated failures disable the integration temporarily (not hammer the dependency).
+12. DEAD LETTER: Failed integration events are preserved for retry or manual investigation.
+Flag any of the above that are absent or incorrect.""",
     }
 
     async def call_gemini_for_typed_validation(
@@ -740,7 +819,7 @@ VALIDATION FOCUS — {atom_type}:
 
 Return ONLY a valid JSON array. If ALL atoms are satisfied, return [].
 
-RESPONSE FORMAT:
+RESPONSE FORMAT (P5B-05: include evidence + confidence_reasoning for transparency):
 [
   {{
     "atom_local_id": "REQ-003",
@@ -748,6 +827,8 @@ RESPONSE FORMAT:
     "description": "One-sentence summary of the gap.",
     "severity": "High",
     "confidence": "High",
+    "evidence": "One sentence: what in the code confirms this gap (or 'No implementation found').",
+    "confidence_reasoning": "One sentence: why you are confident in this classification.",
     "details": {{
       "expected": "What the requirement atom specifies.",
       "actual": "What the code shows (or 'Not found').",

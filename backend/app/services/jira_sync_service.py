@@ -479,6 +479,72 @@ class JiraSyncService(LoggerMixin):
 
         return sprints
 
+    async def create_issue(
+        self,
+        *,
+        token: str,
+        base_url: str,
+        project_key: str,
+        summary: str,
+        description: str,
+        issue_type: str = "Task",
+        priority: str = "Medium",
+        labels: list | None = None,
+        epic_key: str | None = None,
+        assignee_account_id: str | None = None,
+    ) -> dict:
+        """
+        P5B-03: Creates a single Jira issue from a DokyDoc mismatch.
+        Returns: {"key": "PROJ-123", "id": "10001", "url": "https://..."}
+        """
+        import httpx as _httpx
+
+        payload: dict = {
+            "fields": {
+                "project": {"key": project_key},
+                "summary": summary,
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": description}],
+                        }
+                    ],
+                },
+                "issuetype": {"name": issue_type},
+                "priority": {"name": priority},
+                "labels": labels or ["dokydoc"],
+            }
+        }
+        if epic_key:
+            payload["fields"]["parent"] = {"key": epic_key}
+        if assignee_account_id:
+            payload["fields"]["assignee"] = {"accountId": assignee_account_id}
+
+        async with _httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/rest/api/3/issue",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        issue_key = data["key"]
+        # Build browse URL from base_url
+        browse_base = base_url.split("/rest/")[0] if "/rest/" in base_url else base_url
+        return {
+            "key": issue_key,
+            "id": data["id"],
+            "url": f"{browse_base}/browse/{issue_key}",
+        }
+
 
 # ------------------------------------------------------------------ #
 # Module-level helpers

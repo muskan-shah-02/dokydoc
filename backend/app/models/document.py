@@ -91,6 +91,9 @@ class Document(Base):
 
     # Legacy content field for backward compatibility
     content: Mapped[str] = mapped_column(Text, nullable=True)
+
+    # P5B-01: Stores atom diff result from last re-upload for frontend display
+    last_atom_diff: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     
     # Timestamp fields
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)

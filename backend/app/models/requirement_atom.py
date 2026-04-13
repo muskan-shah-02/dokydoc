@@ -1,7 +1,8 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List
 from datetime import datetime
 
 from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, Boolean
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -58,6 +59,22 @@ class RequirementAtom(Base):
     atomized_at_upload: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+
+    # P5B-01: SHA-256 of normalized content — enables change detection between versions
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+    # P5B-01: Links this atom to its equivalent in the previous document version
+    # NULL = new atom (first version or no prior version)
+    previous_atom_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("requirement_atoms.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # P5B-01: Change classification vs prior version
+    # "added" | "modified" | "unchanged" | NULL (first version)
+    delta_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+
+    # P5B-08: Regulatory frameworks applicable to this atom (e.g. ["PCI-DSS", "RBI"])
+    regulatory_tags: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
 
     document: Mapped["Document"] = relationship("Document")
 

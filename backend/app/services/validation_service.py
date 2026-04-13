@@ -240,20 +240,90 @@ class ValidationService(LoggerMixin):
             self.logger.warning(f"Atomization returned 0 atoms for doc {document.id}")
             return []
 
-        # Delete any stale atoms for this document (different version) then bulk-insert
-        crud.requirement_atom.delete_by_document(db, document_id=document.id)
-        new_atoms = crud.requirement_atom.create_atoms_bulk(
-            db,
-            tenant_id=tenant_id,
-            document_id=document.id,
-            document_version=doc_version,
-            atoms_data=atoms_data,
-            atomized_at_upload=atomized_at_upload,  # P4-01
-        )
-        self.logger.info(
-            f"Stored {len(new_atoms)} RequirementAtoms for doc {document.id}"
-        )
-        return new_atoms
+        # P5B-01: Diff-aware atom storage (preserves triage history on re-upload)
+        try:
+            from app.services.atom_diff_service import atom_diff_service
+            diff = atom_diff_service.compute_diff(
+                db=db,
+                document_id=document.id,
+                new_atoms_data=atoms_data,
+                new_version=doc_version,
+                tenant_id=tenant_id,
+            )
+
+            # Auto-close mismatches for deleted atoms (preserves audit history)
+            if diff.deleted_atom_ids:
+                n_closed = crud.mismatch.close_for_deleted_atoms(
+                    db=db,
+                    deleted_atom_ids=diff.deleted_atom_ids,
+                    tenant_id=tenant_id,
+                )
+                self.logger.info(
+                    f"[P5B-01] Auto-closed {n_closed} mismatches for "
+                    f"{len(diff.deleted_atom_ids)} deleted atoms in doc {document.id}"
+                )
+
+            # Annotate atoms_data with delta fields for storage
+            delta_map = {}
+            for delta in diff.added + diff.modified + diff.unchanged:
+                key = delta.new_atom_content[:80]  # Use prefix as key
+                delta_map[key] = delta
+
+            for atom_data in atoms_data:
+                prefix = atom_data["content"][:80]
+                delta = delta_map.get(prefix)
+                if delta:
+                    atom_data["_content_hash"] = delta.content_hash
+                    atom_data["_previous_atom_id"] = delta.previous_atom_id
+                    atom_data["_delta_status"] = delta.status
+
+            # Delete old atoms and re-insert with delta annotations
+            crud.requirement_atom.delete_by_document(db, document_id=document.id)
+            new_atoms = crud.requirement_atom.create_atoms_bulk(
+                db,
+                tenant_id=tenant_id,
+                document_id=document.id,
+                document_version=doc_version,
+                atoms_data=atoms_data,
+                atomized_at_upload=atomized_at_upload,
+            )
+
+            # Store diff summary on document for frontend display
+            try:
+                from sqlalchemy import update as sql_update
+                from app.models.document import Document as DocModel
+                db.execute(
+                    sql_update(DocModel)
+                    .where(DocModel.id == document.id)
+                    .values(last_atom_diff=diff.summary())
+                )
+                db.commit()
+            except Exception:
+                pass  # Non-fatal
+
+            self.logger.info(
+                f"[P5B-01] Doc {document.id}: {len(diff.added)} added, "
+                f"{len(diff.modified)} modified, {len(diff.unchanged)} unchanged, "
+                f"{len(diff.deleted_atom_ids)} deleted"
+            )
+            return new_atoms
+
+        except Exception as diff_err:
+            self.logger.warning(
+                f"[P5B-01] Diff computation failed (non-fatal), falling back to full re-atomize: {diff_err}"
+            )
+            # Fallback: original behavior
+            crud.requirement_atom.delete_by_document(db, document_id=document.id)
+            new_atoms = crud.requirement_atom.create_atoms_bulk(
+                db,
+                tenant_id=tenant_id,
+                document_id=document.id,
+                document_version=doc_version,
+                atoms_data=atoms_data,
+                atomized_at_upload=atomized_at_upload,
+            )
+            self.logger.info(f"Stored {len(new_atoms)} RequirementAtoms for doc {document.id}")
+            return new_atoms
 
     @staticmethod
     def _calibrate_confidence(

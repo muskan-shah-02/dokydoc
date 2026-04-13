@@ -116,6 +116,54 @@ interface DocSuggestions {
   items: CoverageSuggestion[];
 }
 
+// --- Phase 5B Interfaces ---
+interface ComplianceData {
+  document_id: number;
+  overall_score: number;
+  weighted_score: number;
+  grade: string;
+  by_type: Record<string, { weight: number; covered: number; total: number; score: number }>;
+  total_atoms: number;
+  covered_atoms: number;
+}
+
+interface EvidenceData {
+  mismatch_id: number;
+  brd_requirement: { atom_id: number; atom_type: string; content: string; regulatory_tags: string[] };
+  code_analyzed: { component_id: number; component_name: string; snippet: string };
+  ai_conclusion: { verdict: string; confidence: string; confidence_reasoning: string; evidence: string };
+}
+
+interface CoverageMatrixData {
+  document_id: number;
+  atoms: Array<{ id: number; atom_type: string; content: string }>;
+  components: Array<{ id: number; name: string }>;
+  matrix: Record<string, string>;
+  summary: { total_cells: number; covered: number; partial: number; missing: number; not_linked: number };
+}
+
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  new: ["open", "in_progress", "false_positive"],
+  open: ["in_progress", "resolved", "false_positive", "auto_closed"],
+  in_progress: ["open", "resolved", "false_positive"],
+  resolved: ["verified", "open"],
+  verified: ["open"],
+  false_positive: ["disputed", "open"],
+  disputed: ["open", "false_positive"],
+  auto_closed: ["open"],
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  open: "bg-red-100 text-red-700",
+  in_progress: "bg-yellow-100 text-yellow-700",
+  resolved: "bg-green-100 text-green-700",
+  verified: "bg-blue-100 text-blue-700",
+  false_positive: "bg-gray-100 text-gray-500",
+  disputed: "bg-orange-100 text-orange-700",
+  auto_closed: "bg-slate-100 text-slate-500",
+  new: "bg-red-100 text-red-700",
+};
+
 export default function ValidationPanelPage() {
   const router = useRouter();
 
@@ -141,6 +189,23 @@ export default function ValidationPanelPage() {
 
   // Atom counts per document for coverage score (document_id → total_atoms)
   const [atomCounts, setAtomCounts] = useState<Record<number, number>>({});
+
+  // Phase 5B state
+  const [focusedDocId, setFocusedDocId] = useState<number | null>(null);
+  const [complianceData, setComplianceData] = useState<ComplianceData | null>(null);
+  const [atomDiffSummary, setAtomDiffSummary] = useState<Record<string, number> | null>(null);
+  const [coverageMatrix, setCoverageMatrix] = useState<CoverageMatrixData | null>(null);
+  const [coverageMatrixDocId, setCoverageMatrixDocId] = useState<number | null>(null);
+  const [evidenceMap, setEvidenceMap] = useState<Record<number, EvidenceData>>({});
+  const [expandedEvidence, setExpandedEvidence] = useState<Set<number>>(new Set());
+  const [fpModal, setFpModal] = useState<{ open: boolean; mismatchId: number | null }>({ open: false, mismatchId: null });
+  const [fpReason, setFpReason] = useState("");
+  const [fpSubmitting, setFpSubmitting] = useState(false);
+  const [statusUpdating, setStatusUpdating] = useState<number | null>(null);
+  const [signOffNotes, setSignOffNotes] = useState("");
+  const [signOffSubmitting, setSignOffSubmitting] = useState(false);
+  const [signOffResult, setSignOffResult] = useState<{ sign_off_id: number; certificate_id: string; certificate_hash: string; message: string } | null>(null);
+  const [signOffHistory, setSignOffHistory] = useState<any[]>([]);
 
   // Fetch documents and mismatches
   const fetchData = useCallback(async () => {
@@ -257,6 +322,158 @@ export default function ValidationPanelPage() {
     }
   }, []);
 
+  // Phase 5B: fetch compliance score for a document
+  const fetchComplianceData = useCallback(async (docId: number) => {
+    const tok = localStorage.getItem("accessToken");
+    if (!tok) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/${docId}/compliance-score`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (res.ok) setComplianceData(await res.json());
+    } catch {}
+  }, []);
+
+  // Phase 5B: fetch atom diff summary for a document
+  const fetchAtomDiff = useCallback(async (docId: number) => {
+    const tok = localStorage.getItem("accessToken");
+    if (!tok) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/atom-diff`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.atom_diff) setAtomDiffSummary(data.atom_diff);
+      }
+    } catch {}
+  }, []);
+
+  // Phase 5B: fetch coverage matrix for a document
+  const fetchCoverageMatrix = useCallback(async (docId: number) => {
+    const tok = localStorage.getItem("accessToken");
+    if (!tok) return;
+    setCoverageMatrixDocId(docId);
+    setCoverageMatrix(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/${docId}/coverage-matrix`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (res.ok) setCoverageMatrix(await res.json());
+    } catch {}
+  }, []);
+
+  // Phase 5B: fetch evidence for a mismatch
+  const fetchEvidence = useCallback(async (mismatchId: number) => {
+    if (evidenceMap[mismatchId]) return; // already loaded
+    const tok = localStorage.getItem("accessToken");
+    if (!tok) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/mismatches/${mismatchId}/evidence`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (res.ok) {
+        const data: EvidenceData = await res.json();
+        setEvidenceMap((prev) => ({ ...prev, [mismatchId]: data }));
+      }
+    } catch {}
+  }, [evidenceMap]);
+
+  const toggleEvidence = (mismatchId: number) => {
+    setExpandedEvidence((prev) => {
+      const next = new Set(prev);
+      if (next.has(mismatchId)) {
+        next.delete(mismatchId);
+      } else {
+        next.add(mismatchId);
+        fetchEvidence(mismatchId);
+      }
+      return next;
+    });
+  };
+
+  // Phase 5B: mark mismatch as false positive
+  const handleFalsePositive = async () => {
+    if (!fpModal.mismatchId || fpReason.length < 10) return;
+    setFpSubmitting(true);
+    const tok = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/mismatches/${fpModal.mismatchId}/false-positive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ reason: fpReason }),
+      });
+      if (res.ok) {
+        setFpModal({ open: false, mismatchId: null });
+        setFpReason("");
+        await fetchData();
+      } else {
+        const e = await res.json();
+        setError(e.detail || "Failed to mark as false positive.");
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setFpSubmitting(false);
+    }
+  };
+
+  // Phase 5B: update mismatch status
+  const handleStatusUpdate = async (mismatchId: number, newStatus: string) => {
+    setStatusUpdating(mismatchId);
+    const tok = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/mismatches/${mismatchId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ new_status: newStatus }),
+      });
+      if (res.ok) {
+        setMismatches((prev) => prev.map((m) => m.id === mismatchId ? { ...m, status: newStatus } : m));
+      } else {
+        const e = await res.json();
+        setError(e.detail || "Failed to update status.");
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setStatusUpdating(null);
+    }
+  };
+
+  // Phase 5B: BA sign-off
+  const handleSignOff = async () => {
+    if (!focusedDocId) return;
+    setSignOffSubmitting(true);
+    const tok = localStorage.getItem("accessToken");
+    try {
+      const res = await fetch(`${API_BASE_URL}/validation/${focusedDocId}/sign-off`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+        body: JSON.stringify({ notes: signOffNotes, acknowledge_critical: true }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSignOffResult(data);
+        // Refresh history
+        const histRes = await fetch(`${API_BASE_URL}/validation/${focusedDocId}/sign-off-history`, {
+          headers: { Authorization: `Bearer ${tok}` },
+        });
+        if (histRes.ok) {
+          const h = await histRes.json();
+          setSignOffHistory(h.sign_offs || []);
+        }
+      } else {
+        const e = await res.json();
+        setError(e.detail || "Sign-off failed.");
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSignOffSubmitting(false);
+    }
+  };
+
   // Filter documents based on search and status
   useEffect(() => {
     let filtered = documents.filter(
@@ -359,6 +576,13 @@ export default function ValidationPanelPage() {
         // Fetch coverage suggestions and atom counts for scanned documents
         await fetchSuggestions(Array.from(selectedDocs), documents);
         await fetchAtomCounts(Array.from(selectedDocs));
+        // Phase 5B: load compliance + atom-diff for first selected doc
+        const firstDocId = Array.from(selectedDocs)[0];
+        if (firstDocId) {
+          setFocusedDocId(firstDocId);
+          await fetchComplianceData(firstDocId);
+          await fetchAtomDiff(firstDocId);
+        }
         setIsScanning(false);
       };
       pollForResults();
@@ -639,7 +863,7 @@ export default function ValidationPanelPage() {
         onValueChange={setActiveTab}
         className="space-y-4"
       >
-        <TabsList className="grid w-full grid-cols-3">
+        <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="select" className="flex items-center gap-2">
             <FileText className="h-4 w-4" />
             Select Documents
@@ -647,6 +871,10 @@ export default function ValidationPanelPage() {
           <TabsTrigger value="results" className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4" />
             Validation Results
+          </TabsTrigger>
+          <TabsTrigger value="matrix" className="flex items-center gap-2" onClick={() => { if (focusedDocId) fetchCoverageMatrix(focusedDocId); }}>
+            <Code className="h-4 w-4" />
+            Coverage Matrix
           </TabsTrigger>
           <TabsTrigger value="jira" className="flex items-center gap-2">
             <TicketCheck className="h-4 w-4" />
@@ -829,6 +1057,81 @@ export default function ValidationPanelPage() {
 
         {/* Validation Results Tab */}
         <TabsContent value="results" className="space-y-4">
+
+          {/* P5B-01: Atom Diff Banner */}
+          {atomDiffSummary && (atomDiffSummary.added > 0 || atomDiffSummary.modified > 0 || atomDiffSummary.deleted > 0) && (
+            <div className="flex items-center justify-between border border-amber-300 bg-amber-50 rounded-lg px-4 py-3">
+              <div className="flex items-center gap-2">
+                <GitBranch className="h-4 w-4 text-amber-600 shrink-0" />
+                <span className="text-sm font-medium text-amber-900">BRD Updated —</span>
+                {atomDiffSummary.added > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-semibold">{atomDiffSummary.added} new</span>}
+                {atomDiffSummary.modified > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-semibold">{atomDiffSummary.modified} changed</span>}
+                {atomDiffSummary.deleted > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 font-semibold">{atomDiffSummary.deleted} removed</span>}
+                <span className="text-xs text-amber-600">Requirements since last scan. Re-validate to get fresh results.</span>
+              </div>
+              <button onClick={() => setAtomDiffSummary(null)} className="text-amber-400 hover:text-amber-600 text-xs ml-4">✕</button>
+            </div>
+          )}
+
+          {/* P5B-02: Compliance Score Card */}
+          {complianceData && (
+            <Card className="border-l-4 border-l-blue-500">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className={`text-3xl font-black ${complianceData.grade === "A" ? "text-green-600" : complianceData.grade === "B" ? "text-blue-600" : complianceData.grade === "C" ? "text-yellow-600" : "text-red-600"}`}>
+                      {complianceData.grade}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">Compliance Score</p>
+                      <p className="text-2xl font-bold text-gray-900">{Math.round(complianceData.overall_score)}%</p>
+                    </div>
+                  </div>
+                  <div className="text-right text-xs text-muted-foreground">
+                    <p>{complianceData.covered_atoms}/{complianceData.total_atoms} atoms covered</p>
+                    <p>Weighted: {Math.round(complianceData.weighted_score)}%</p>
+                  </div>
+                </div>
+                {/* Per-type breakdown bars */}
+                <div className="space-y-1.5">
+                  {Object.entries(complianceData.by_type).map(([atomType, data]) => (
+                    <div key={atomType} className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-500 w-32 shrink-0">{atomType.replace(/_/g, " ")}</span>
+                      <div className="flex-1 bg-gray-100 rounded-full h-1.5">
+                        <div
+                          className={`h-1.5 rounded-full ${data.score >= 80 ? "bg-green-500" : data.score >= 60 ? "bg-yellow-500" : "bg-red-500"}`}
+                          style={{ width: `${Math.round(data.score)}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] text-gray-600 w-8 text-right">{Math.round(data.score)}%</span>
+                      {data.weight > 1 && <span className="text-[9px] px-1 py-0.5 bg-purple-100 text-purple-600 rounded font-semibold">{data.weight}×</span>}
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* P5B-02: Document selector for compliance/sign-off when no scan run yet */}
+          {!complianceData && documents.length > 0 && (
+            <div className="flex items-center gap-3 p-3 border border-dashed rounded-lg">
+              <ShieldCheck className="h-4 w-4 text-muted-foreground shrink-0" />
+              <span className="text-sm text-muted-foreground">View compliance score for:</span>
+              <select
+                className="text-sm border border-gray-200 rounded px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                value={focusedDocId ?? ""}
+                onChange={(e) => {
+                  const id = Number(e.target.value);
+                  setFocusedDocId(id);
+                  fetchComplianceData(id);
+                  fetchAtomDiff(id);
+                }}
+              >
+                <option value="">Select document…</option>
+                {documents.map((d) => <option key={d.id} value={d.id}>{d.filename}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* Coverage Suggestion Banners */}
           {suggestions.map((suggestion) => (
@@ -1109,7 +1412,7 @@ export default function ValidationPanelPage() {
                           {isExpanded && (
                             <div className="divide-y">
                               {items.map((mismatch) => (
-                                <div key={mismatch.id} className="px-4 py-3 hover:bg-gray-50">
+                                <div key={mismatch.id} className="px-4 py-3 hover:bg-gray-50 space-y-2">
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="flex items-start gap-3 min-w-0 flex-1">
                                       <Badge
@@ -1152,6 +1455,26 @@ export default function ValidationPanelPage() {
                                       </div>
                                     </div>
                                     <div className="flex flex-col items-end gap-1.5 shrink-0">
+                                      {/* P5B-10: Status lifecycle badge */}
+                                      <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                          <button
+                                            className={`text-[10px] px-2 py-0.5 rounded-full font-semibold cursor-pointer ${STATUS_COLORS[mismatch.status] ?? "bg-gray-100 text-gray-600"}`}
+                                            disabled={statusUpdating === mismatch.id}
+                                          >
+                                            {statusUpdating === mismatch.id ? "…" : (mismatch.status ?? "open").replace(/_/g, " ")}
+                                          </button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end">
+                                          {(VALID_TRANSITIONS[mismatch.status ?? "open"] ?? []).map((s) => (
+                                            <DropdownMenuItem key={s} onClick={() => handleStatusUpdate(mismatch.id, s)}>
+                                              {s.replace(/_/g, " ")}
+                                            </DropdownMenuItem>
+                                          ))}
+                                        </DropdownMenuContent>
+                                      </DropdownMenu>
+
+                                      <div className="flex items-center gap-1">
                                     <Dialog>
                                       <DialogTrigger asChild>
                                         <Button variant="outline" size="sm" className="shrink-0 h-7 text-xs">
@@ -1208,13 +1531,71 @@ export default function ValidationPanelPage() {
                                         </div>
                                       </DialogContent>
                                     </Dialog>
+                                    {/* P5B-04: False Positive button */}
+                                    {mismatch.status !== "false_positive" && (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 text-xs text-gray-400 hover:text-orange-600"
+                                        onClick={() => { setFpModal({ open: true, mismatchId: mismatch.id }); setFpReason(""); }}
+                                      >
+                                        Not Real
+                                      </Button>
+                                    )}
+                                    </div>
                                     {/* Phase 1: Data Flywheel feedback buttons */}
                                     <MismatchFeedback
                                       mismatchId={mismatch.id}
                                       trainingExampleId={mismatch.training_example_id}
                                     />
+                                    {/* P5B-05: Evidence toggle */}
+                                    <button
+                                      onClick={() => toggleEvidence(mismatch.id)}
+                                      className="text-[10px] text-blue-500 hover:text-blue-700 underline"
+                                    >
+                                      {expandedEvidence.has(mismatch.id) ? "Hide Evidence" : "Show Evidence"}
+                                    </button>
                                     </div>
                                   </div>
+                                  {/* P5B-05: Evidence panel */}
+                                  {expandedEvidence.has(mismatch.id) && (
+                                    <div className="mt-1 ml-2 border border-blue-100 bg-blue-50 rounded-lg p-3 text-xs space-y-2">
+                                      {!evidenceMap[mismatch.id] ? (
+                                        <div className="flex items-center gap-2 text-blue-500">
+                                          <Loader2 className="w-3 h-3 animate-spin" /> Loading evidence…
+                                        </div>
+                                      ) : (
+                                        <>
+                                          <div>
+                                            <p className="font-semibold text-blue-800 mb-1">BRD Requirement</p>
+                                            <p className="text-gray-700 italic">"{evidenceMap[mismatch.id].brd_requirement?.content}"</p>
+                                            {evidenceMap[mismatch.id].brd_requirement?.regulatory_tags?.length > 0 && (
+                                              <div className="flex gap-1 mt-1 flex-wrap">
+                                                {evidenceMap[mismatch.id].brd_requirement.regulatory_tags.map((t) => (
+                                                  <span key={t} className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-[9px] font-semibold">{t}</span>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                          {evidenceMap[mismatch.id].code_analyzed?.snippet && (
+                                            <div>
+                                              <p className="font-semibold text-blue-800 mb-1">Code Analyzed</p>
+                                              <pre className="text-[10px] bg-white border border-blue-100 rounded p-2 overflow-x-auto text-gray-600">{evidenceMap[mismatch.id].code_analyzed.snippet}</pre>
+                                            </div>
+                                          )}
+                                          {evidenceMap[mismatch.id].ai_conclusion?.evidence && (
+                                            <div>
+                                              <p className="font-semibold text-blue-800 mb-1">AI Reasoning</p>
+                                              <p className="text-gray-600">{evidenceMap[mismatch.id].ai_conclusion.evidence}</p>
+                                              {evidenceMap[mismatch.id].ai_conclusion.confidence_reasoning && (
+                                                <p className="text-gray-400 mt-1 italic">{evidenceMap[mismatch.id].ai_conclusion.confidence_reasoning}</p>
+                                              )}
+                                            </div>
+                                          )}
+                                        </>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
@@ -1227,7 +1608,193 @@ export default function ValidationPanelPage() {
               })()}
             </CardContent>
           </Card>
+          {/* P5B-12: BA Sign-Off Panel */}
+          {focusedDocId && (
+            <Card className="border-t-4 border-t-green-500">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <CircleCheck className="h-5 w-5 text-green-600" />
+                  BA Sign-Off — Document #{focusedDocId}
+                </CardTitle>
+                <CardDescription>
+                  Formally acknowledge the validation state and generate a tamper-evident compliance certificate.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {signOffResult ? (
+                  <div className="border border-green-200 bg-green-50 rounded-lg p-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <CircleCheck className="h-5 w-5 text-green-600" />
+                      <span className="font-semibold text-green-800">Sign-Off Completed</span>
+                    </div>
+                    <p className="text-sm text-green-700">{signOffResult.message}</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      <div className="bg-white border border-green-100 rounded p-2">
+                        <p className="text-gray-500 font-medium">Certificate ID</p>
+                        <p className="font-mono text-green-800 font-bold">{signOffResult.certificate_id}</p>
+                      </div>
+                      <div className="bg-white border border-green-100 rounded p-2">
+                        <p className="text-gray-500 font-medium">Certificate Hash (SHA-256)</p>
+                        <p className="font-mono text-gray-600 break-all text-[10px]">{signOffResult.certificate_hash}</p>
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-xs h-7 border-green-300 text-green-700"
+                      onClick={() => setSignOffResult(null)}
+                    >
+                      New Sign-Off
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs font-medium text-gray-600 block mb-1">Sign-Off Notes (optional)</label>
+                      <textarea
+                        value={signOffNotes}
+                        onChange={(e) => setSignOffNotes(e.target.value)}
+                        placeholder="e.g. Reviewed all high-severity mismatches. Accepted risk on PROJ-42..."
+                        className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 h-20 resize-none focus:outline-none focus:ring-2 focus:ring-green-400"
+                      />
+                    </div>
+                    {complianceData && (
+                      <div className="flex items-center gap-3 text-xs text-gray-600 bg-gray-50 rounded p-2">
+                        <span>Current compliance: <strong>{Math.round(complianceData.overall_score)}% ({complianceData.grade})</strong></span>
+                        <span>•</span>
+                        <span>Open mismatches: <strong>{mismatches.filter((m) => m.status === "open" || m.status === "in_progress").length}</strong></span>
+                        <span>•</span>
+                        <span>High severity: <strong className="text-red-600">{mismatches.filter((m) => m.severity === "High" && m.status !== "resolved" && m.status !== "false_positive").length}</strong></span>
+                      </div>
+                    )}
+                    <Button
+                      onClick={handleSignOff}
+                      disabled={signOffSubmitting}
+                      className="bg-green-600 hover:bg-green-700 text-sm"
+                    >
+                      {signOffSubmitting ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating Certificate…</> : <><CircleCheck className="h-4 w-4 mr-2" />Sign Off & Generate Certificate</>}
+                    </Button>
+                    {signOffHistory.length > 0 && (
+                      <div className="text-xs text-gray-500">
+                        Last sign-off: {new Date(signOffHistory[0].signed_at).toLocaleString()} by user #{signOffHistory[0].signed_by_user_id} — cert {signOffHistory[0].certificate_id ?? "—"}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
+
+        {/* P5B-07: Coverage Matrix Tab */}
+        <TabsContent value="matrix" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Code className="h-5 w-5 text-purple-600" />
+                Coverage Matrix
+              </CardTitle>
+              <CardDescription>
+                BRD requirements × code components — see which atoms are covered, partially covered, or missing.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Document selector */}
+              <div className="flex items-center gap-3">
+                <label className="text-sm font-medium text-gray-600">Document:</label>
+                <select
+                  className="text-sm border border-gray-200 rounded px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-purple-400"
+                  value={coverageMatrixDocId ?? ""}
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    if (id) fetchCoverageMatrix(id);
+                  }}
+                >
+                  <option value="">Select document…</option>
+                  {documents.map((d) => <option key={d.id} value={d.id}>{d.filename}</option>)}
+                </select>
+                {coverageMatrixDocId && !coverageMatrix && (
+                  <Loader2 className="h-4 w-4 animate-spin text-purple-500" />
+                )}
+              </div>
+
+              {coverageMatrix && (
+                <>
+                  {/* Summary pills */}
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { label: "Covered", value: coverageMatrix.summary.covered, color: "bg-green-100 text-green-700" },
+                      { label: "Partial", value: coverageMatrix.summary.partial, color: "bg-yellow-100 text-yellow-700" },
+                      { label: "Missing", value: coverageMatrix.summary.missing, color: "bg-red-100 text-red-700" },
+                      { label: "Not Linked", value: coverageMatrix.summary.not_linked, color: "bg-gray-100 text-gray-500" },
+                    ].map((s) => (
+                      <span key={s.label} className={`px-3 py-1 rounded-full text-xs font-semibold ${s.color}`}>
+                        {s.label}: {s.value}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Matrix grid — scrollable */}
+                  {coverageMatrix.atoms.length > 0 && coverageMatrix.components.length > 0 ? (
+                    <div className="overflow-auto max-h-[500px] border rounded-lg">
+                      <table className="text-xs w-full">
+                        <thead className="sticky top-0 bg-white shadow-sm">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-gray-600 font-semibold border-b w-48 min-w-[12rem]">Requirement Atom</th>
+                            {coverageMatrix.components.map((c) => (
+                              <th key={c.id} className="px-2 py-2 text-gray-500 font-medium border-b border-l text-center max-w-[100px]">
+                                <span className="block truncate" title={c.name}>{c.name.split("/").pop()}</span>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {coverageMatrix.atoms.map((atom, i) => (
+                            <tr key={atom.id} className={i % 2 === 0 ? "bg-gray-50" : "bg-white"}>
+                              <td className="px-3 py-2 border-b text-gray-700 font-medium truncate max-w-[12rem]" title={atom.content}>
+                                <span className="text-[9px] text-purple-500 font-mono mr-1">{atom.atom_type.slice(0, 3)}</span>
+                                {atom.content.substring(0, 50)}{atom.content.length > 50 ? "…" : ""}
+                              </td>
+                              {coverageMatrix.components.map((c) => {
+                                const key = `${atom.id}::${c.id}`;
+                                const status = coverageMatrix.matrix[key] ?? "not_linked";
+                                const cellColors: Record<string, string> = {
+                                  covered: "bg-green-100 text-green-700",
+                                  partial: "bg-yellow-100 text-yellow-700",
+                                  missing: "bg-red-100 text-red-600",
+                                  not_linked: "bg-gray-50 text-gray-300",
+                                };
+                                const cellIcons: Record<string, string> = { covered: "✓", partial: "~", missing: "✗", not_linked: "·" };
+                                return (
+                                  <td key={c.id} className={`border-b border-l text-center py-1 ${cellColors[status]}`} title={`${atom.content.substring(0, 40)} × ${c.name}: ${status}`}>
+                                    {cellIcons[status] ?? "?"}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No atoms or components linked to this document yet.</p>
+                      <p className="text-sm mt-1">Run a validation scan first to populate the matrix.</p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!coverageMatrixDocId && (
+                <div className="text-center py-12 text-muted-foreground">
+                  <Code className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                  <p>Select a document above to view its coverage matrix.</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
         {/* JIRA Validation Tab */}
         <TabsContent value="jira" className="space-y-4">
           <Card>
@@ -1419,6 +1986,45 @@ export default function ValidationPanelPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* P5B-04: False Positive Modal */}
+      {fpModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold text-gray-800">Mark as False Positive</h2>
+              <button onClick={() => setFpModal({ open: false, mismatchId: null })} className="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <p className="text-sm text-gray-600">
+              Explain why this finding is not a real issue. This helps train the AI to avoid similar false positives.
+            </p>
+            <div>
+              <textarea
+                value={fpReason}
+                onChange={(e) => setFpReason(e.target.value)}
+                placeholder="Reason (minimum 10 characters)…"
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 h-24 resize-none focus:outline-none focus:ring-2 focus:ring-orange-400"
+              />
+              <p className={`text-xs mt-1 ${fpReason.length < 10 ? "text-red-400" : "text-green-500"}`}>
+                {fpReason.length}/10 minimum characters
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setFpModal({ open: false, mismatchId: null })}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                className="bg-orange-600 hover:bg-orange-700"
+                disabled={fpReason.length < 10 || fpSubmitting}
+                onClick={handleFalsePositive}
+              >
+                {fpSubmitting ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Submitting…</> : "Mark False Positive"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

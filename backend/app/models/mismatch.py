@@ -1,6 +1,6 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -27,7 +27,10 @@ class Mismatch(Base):
     mismatch_type: Mapped[str] = mapped_column(String, index=True, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str] = mapped_column(String, index=True, nullable=False)
-    status: Mapped[str] = mapped_column(String, default="new", index=True, nullable=False)
+
+    # P5B-10: Status lifecycle — open → in_progress → resolved → verified
+    # Also: false_positive, auto_closed, disputed
+    status: Mapped[str] = mapped_column(String, default="open", index=True, nullable=False)
     details: Mapped[dict] = mapped_column(JSONB, nullable=True)
     confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     user_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -45,7 +48,25 @@ class Mismatch(Base):
     code_component_id: Mapped[int] = mapped_column(Integer, ForeignKey("code_components.id"), nullable=False)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
 
-    owner: Mapped["User"] = relationship("User")
+    # P5B-04: False Positive Workflow
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status_changed_by_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    status_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # P5B-03: Jira integration
+    jira_issue_key: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    jira_issue_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # P5B-11: Version-linked mismatches
+    document_version_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    created_commit_hash: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    resolved_commit_hash: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+    owner: Mapped["User"] = relationship("User", foreign_keys=[owner_id])
     document: Mapped["Document"] = relationship("Document")
     code_component: Mapped["CodeComponent"] = relationship("CodeComponent")
 

@@ -87,6 +87,12 @@ class CRUDRequirementAtom(CRUDBase[RequirementAtom, RequirementAtomCreate, Requi
                 content=atom.get("content", ""),
                 criticality=atom.get("criticality", "standard"),
                 atomized_at_upload=atomized_at_upload,  # P4-01
+                # P5B-01: delta annotation fields (present only after diff computation)
+                content_hash=atom.get("_content_hash"),
+                previous_atom_id=atom.get("_previous_atom_id"),
+                delta_status=atom.get("_delta_status"),
+                # P5B-08: regulatory framework tags from Gemini atomization
+                regulatory_tags=atom.get("regulatory_tags") or None,
                 created_at=now,
                 updated_at=now,
             )

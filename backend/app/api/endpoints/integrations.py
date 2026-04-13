@@ -540,6 +540,87 @@ def get_jira_sync_status(
     }
 
 
+@router.post("/jira/create-issue")
+async def create_jira_issue_from_mismatch(
+    mismatch_id: int = Body(...),
+    project_key: str = Body(...),
+    issue_type: str = Body("Task"),
+    priority: Optional[str] = Body(None),
+    epic_key: Optional[str] = Body(None),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5B-03: Creates a Jira issue from a DokyDoc mismatch in one click.
+    Auto-populates summary, description, severity-mapped priority, and dokydoc label.
+    Stores jira_issue_key on the mismatch to prevent duplicates.
+    """
+    config = crud_integration_config.get_by_provider(db, tenant_id=tenant_id, provider="jira")
+    if not config or not config.is_active or not config.access_token:
+        raise HTTPException(status_code=404, detail="No active Jira integration found.")
+
+    from app import crud as app_crud
+    mismatch = app_crud.mismatch.get(db, id=mismatch_id)
+    if not mismatch or mismatch.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Mismatch not found.")
+
+    if mismatch.jira_issue_key:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Jira issue already exists: {mismatch.jira_issue_key}",
+        )
+
+    # Map DokyDoc severity → Jira priority
+    priority_map = {
+        "critical": "Highest", "compliance_risk": "Highest",
+        "high": "High", "medium": "Medium", "low": "Low", "info": "Lowest",
+    }
+    jira_priority = priority or priority_map.get((mismatch.severity or "").lower(), "Medium")
+
+    mismatch_type = (mismatch.mismatch_type or "MISMATCH").replace("_", " ").title()
+    summary = f"[DokyDoc] {mismatch_type}: {mismatch.description[:100]}"
+    description = (
+        f"DokyDoc detected a validation mismatch.\n\n"
+        f"Type: {mismatch.mismatch_type}\n"
+        f"Severity: {mismatch.severity}\n"
+        f"Description: {mismatch.description}\n\n"
+        f"Document ID: {mismatch.document_id}\n"
+        f"Component ID: {mismatch.code_component_id}\n"
+        f"Mismatch ID: {mismatch.id}\n"
+    )
+
+    from app.services.jira_sync_service import jira_sync_service
+    issue = await jira_sync_service.create_issue(
+        token=config.access_token,
+        base_url=config.base_url or "",
+        project_key=project_key,
+        summary=summary,
+        description=description,
+        issue_type=issue_type,
+        priority=jira_priority,
+        labels=["dokydoc", mismatch.mismatch_type.lower() if mismatch.mismatch_type else "validation"],
+        epic_key=epic_key,
+    )
+
+    # Persist Jira key on mismatch (idempotency guard)
+    from sqlalchemy import update as sql_update
+    from app.models.mismatch import Mismatch as MismatchModel
+    db.execute(
+        sql_update(MismatchModel)
+        .where(MismatchModel.id == mismatch_id)
+        .values(jira_issue_key=issue["key"], jira_issue_url=issue["url"])
+    )
+    db.commit()
+
+    return {
+        "mismatch_id": mismatch_id,
+        "jira_key": issue["key"],
+        "jira_url": issue["url"],
+        "message": f"Jira issue {issue['key']} created successfully",
+    }
+
+
 @router.post("/jira/webhook", status_code=200)
 async def jira_webhook(
     request: Any,
