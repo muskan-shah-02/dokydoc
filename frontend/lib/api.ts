@@ -206,6 +206,22 @@ export class ApiClient {
   }
 
   /**
+   * PATCH request (partial update)
+   */
+  async patch<T>(endpoint: string, data?: any): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'PATCH',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+
+    const retryFn = () => fetch(`${this.baseUrl}${endpoint}`, {
+      method: 'PATCH', headers: this.getAuthHeaders(), body: JSON.stringify(data),
+    });
+    return this.handleResponse<T>(response, retryFn);
+  }
+
+  /**
    * DELETE request
    */
   async delete<T>(endpoint: string): Promise<T> {

@@ -4,6 +4,7 @@ Sprint 2 Phase 3: Tenant Registration Flow
 """
 from datetime import timedelta
 from typing import Any, Dict
+from fastapi import Body
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -247,7 +248,7 @@ def patch_tenant_settings(
     tenant_id: int = Depends(deps.get_tenant_id),
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user_with_role(schemas.user.Role.CXO)),
-    payload: Dict[str, Any]
+    payload: Dict[str, Any] = Body(...)
 ) -> Any:
     """
     Merge-update tenant settings JSON.
