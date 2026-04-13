@@ -233,7 +233,7 @@ class ValidationService(LoggerMixin):
         )
 
         atoms_data = await gemini_service.call_gemini_for_atomization(
-            doc_text, tenant_id=tenant_id, user_id=user_id
+            doc_text, tenant_id=tenant_id, user_id=user_id, db=db  # P5-08
         )
 
         if not atoms_data:
@@ -415,6 +415,7 @@ class ValidationService(LoggerMixin):
                                     code_analysis=code_analysis,
                                     tenant_id=tenant_id,
                                     user_id=user_id,
+                                    db=db,  # P5-08: inject industry context
                                 )
                                 for atype, atype_atoms in atoms_by_type.items()
                             ]

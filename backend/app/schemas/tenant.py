@@ -24,6 +24,12 @@ class TenantCreate(TenantBase):
     tier: str = Field(default="free", description="Subscription tier: free, pro, enterprise")
     billing_type: str = Field(default="prepaid", description="Billing type: prepaid or postpaid")
 
+    # P5-10: Company website for industry auto-detection (optional)
+    company_website: Optional[str] = Field(
+        None,
+        description="Company website URL for automatic industry classification (e.g. https://acme.com)"
+    )
+
     # First user (tenant admin) info
     admin_email: str = Field(..., description="Email for the first admin user")
     admin_password: str = Field(..., min_length=8, description="Password for admin user (min 8 chars)")

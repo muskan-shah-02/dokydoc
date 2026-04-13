@@ -3,7 +3,7 @@ Tenant registration and management endpoints.
 Sprint 2 Phase 3: Tenant Registration Flow
 """
 from datetime import timedelta
-from typing import Any
+from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -92,6 +92,18 @@ def register_tenant(
         tenant = crud.tenant.create_tenant(db=db, obj_in=tenant_in)
         logger.info(f"Tenant {tenant.id} created: {tenant.name} ({tenant.subdomain})")
 
+        # P5-10: Set initial onboarding flag in tenant settings
+        from sqlalchemy import update as sql_update
+        from app.models.tenant import Tenant as TenantModel
+        initial_settings = dict(tenant.settings or {})
+        if "onboarding_complete" not in initial_settings:
+            initial_settings["onboarding_complete"] = False
+            db.execute(
+                sql_update(TenantModel).where(TenantModel.id == tenant.id).values(settings=initial_settings)
+            )
+            db.commit()
+            db.refresh(tenant)
+
         # 4. Create first admin user (CXO role with full permissions)
         from app.schemas.user import UserCreate
         admin_user_data = UserCreate(
@@ -134,6 +146,18 @@ def register_tenant(
             f"Tenant registration complete: {tenant.name} (ID={tenant.id}, subdomain={tenant.subdomain}), "
             f"Admin: {admin_user.email}"
         )
+
+        # P5-10: Dispatch background industry detection if company_website provided
+        if tenant_in.company_website:
+            try:
+                from app.tasks.tenant_tasks import detect_tenant_industry
+                detect_tenant_industry.delay(tenant.id, tenant_in.company_website)
+                logger.info(
+                    f"[P5-10] Queued industry detection for tenant {tenant.id} from {tenant_in.company_website}"
+                )
+            except Exception as bg_err:
+                # Non-fatal — user can set industry manually in onboarding wizard
+                logger.warning(f"[P5-10] Could not queue industry detection: {bg_err}")
 
         # 7. Return tenant info and tokens
         return {
@@ -190,6 +214,71 @@ def get_current_tenant(
 
     logger.info(f"Retrieved tenant info: {tenant.name} (ID={tenant.id})")
     return tenant
+
+
+@router.get("/me/settings")
+def get_tenant_settings(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Get current tenant's settings JSON blob.
+
+    P5-10: Used by onboarding wizard to check onboarding_complete flag
+    and read auto-detected industry.
+
+    Returns:
+        {"tenant_id": int, "settings": dict}
+    """
+    logger = tenant_endpoints.logger
+    from app.models.tenant import Tenant as TenantModel
+    tenant = db.query(TenantModel).filter(TenantModel.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    return {"tenant_id": tenant_id, "settings": tenant.settings or {}}
+
+
+@router.patch("/me/settings")
+def patch_tenant_settings(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user_with_role(schemas.user.Role.CXO)),
+    payload: Dict[str, Any]
+) -> Any:
+    """
+    Merge-update tenant settings JSON.
+
+    P5-10: Used by onboarding wizard to set onboarding_complete=true, preferred
+    industry, glossary entries, etc. Only top-level keys in the payload are
+    merged — existing keys not in payload are preserved.
+
+    Only CXO role can update settings.
+
+    Returns:
+        {"tenant_id": int, "settings": dict}
+    """
+    logger = tenant_endpoints.logger
+    from sqlalchemy import update as sql_update
+    from app.models.tenant import Tenant as TenantModel
+
+    tenant = db.query(TenantModel).filter(TenantModel.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    merged = dict(tenant.settings or {})
+    merged.update(payload)
+
+    db.execute(
+        sql_update(TenantModel).where(TenantModel.id == tenant_id).values(settings=merged)
+    )
+    db.commit()
+
+    logger.info(f"[P5-10] Settings updated for tenant {tenant_id}: keys={list(payload.keys())}")
+    return {"tenant_id": tenant_id, "settings": merged}
 
 
 @router.get("/me/stats", response_model=schemas.tenant.TenantDetailResponse)

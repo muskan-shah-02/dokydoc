@@ -1,0 +1,175 @@
+{
+  "__meta__": {
+    "version": "1.0.0",
+    "description": "Phase 5 Industry Context Library — injects domain-specific vocabulary, regulations, and prompt preambles into all Gemini validation calls",
+    "industries": ["fintech/payments", "fintech/lending", "banking", "healthcare", "saas", "ecommerce", "logistics", "devtools"]
+  },
+
+  "__taxonomy__": {
+    "fintech": ["fintech/payments", "fintech/lending"],
+    "finance": ["fintech/payments", "fintech/lending", "banking"],
+    "health": ["healthcare"],
+    "tech": ["saas", "devtools"],
+    "commerce": ["ecommerce", "logistics"]
+  },
+
+  "fintech/payments": {
+    "display_name": "Fintech — Payments",
+    "regulatory": ["PCI-DSS", "PSD2", "ISO 27001", "SOC 2 Type II", "AML", "KYC"],
+    "vocabulary": {
+      "PSP": "Payment Service Provider — intermediary processing card transactions",
+      "acquirer": "Bank that processes payments on behalf of merchant",
+      "issuer": "Bank that issues payment cards to consumers",
+      "chargeback": "Forced reversal of a card transaction initiated by the issuing bank",
+      "tokenization": "Replacing sensitive card data with a non-sensitive token (PCI requirement)",
+      "PAN": "Primary Account Number — the 16-digit card number",
+      "CVV": "Card Verification Value — 3/4-digit security code on card",
+      "3DS": "3-D Secure — additional authentication layer for online card payments",
+      "gateway": "Service routing payment authorization requests between merchant and acquirer",
+      "settlement": "Transfer of funds from acquirer to merchant bank",
+      "refund": "Merchant-initiated reversal of a completed payment",
+      "idempotency": "Property ensuring duplicate payment requests produce same result without double charge",
+      "webhook": "Real-time HTTP callback notifying merchant of payment status changes"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: FINTECH / PAYMENTS ===\nThis system processes financial payments. Apply PCI-DSS standards rigorously.\nKey compliance areas: card data tokenization, no PAN storage post-auth, TLS 1.2+ on all payment endpoints, webhook signature verification, idempotency on charge endpoints.\nFlag ANY requirement that involves storing raw card data (PAN, CVV) as a CRITICAL security violation.\n=== END TENANT CONTEXT ==="
+  },
+
+  "fintech/lending": {
+    "display_name": "Fintech — Lending",
+    "regulatory": ["FCRA", "ECOA", "TILA", "HMDA", "BSA/AML", "GDPR", "RBI Guidelines"],
+    "vocabulary": {
+      "APR": "Annual Percentage Rate — total cost of borrowing expressed as yearly rate",
+      "origination": "Process of creating a new loan from application to disbursal",
+      "underwriting": "Risk assessment process to determine loan eligibility and terms",
+      "credit bureau": "Agency compiling credit history (CIBIL, Equifax, Experian)",
+      "CIBIL score": "Credit score ranging 300-900 used by Indian lenders",
+      "NPA": "Non-Performing Asset — loan with principal/interest overdue > 90 days",
+      "EMI": "Equated Monthly Installment — fixed monthly repayment amount",
+      "disbursement": "Transfer of approved loan funds to borrower",
+      "collateral": "Asset pledged as security for a loan",
+      "LTV": "Loan-to-Value ratio — loan amount as percentage of asset value",
+      "delinquency": "Failure to make scheduled payment on time",
+      "soft pull": "Credit inquiry that does not affect credit score",
+      "hard pull": "Credit inquiry that temporarily reduces credit score"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: FINTECH / LENDING ===\nThis system manages loan origination and servicing. Key compliance areas: TILA disclosure of APR and fees before loan agreement, FCRA requirements on credit bureau data handling, BSA/AML checks on borrower identity, no discriminatory lending (ECOA).\nFlag any endpoint that calculates interest/fees without explicit APR disclosure.\n=== END TENANT CONTEXT ==="
+  },
+
+  "banking": {
+    "display_name": "Banking",
+    "regulatory": ["Basel III", "Dodd-Frank", "BSA/AML", "GDPR", "FFIEC", "RBI", "SEBI"],
+    "vocabulary": {
+      "KYC": "Know Your Customer — identity verification before account opening",
+      "AML": "Anti-Money Laundering — controls to detect and prevent money laundering",
+      "RTGS": "Real-Time Gross Settlement — instant large-value interbank transfer system",
+      "NEFT": "National Electronic Funds Transfer — batch-based fund transfer in India",
+      "UPI": "Unified Payments Interface — Indian real-time payment system via VPA",
+      "SWIFT": "Society for Worldwide Interbank Financial Telecommunication",
+      "nostro": "Bank's account held at a foreign bank in foreign currency",
+      "core banking": "Centralized system processing all bank transactions in real-time",
+      "CASA": "Current Account Savings Account — low-cost deposit base for banks",
+      "provisioning": "Setting aside reserves for potential loan losses (NPA)",
+      "reconciliation": "Process of matching internal records with counterparty records"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: BANKING ===\nThis system operates in a regulated banking environment. Mandatory areas: KYC/AML checks before account activation, transaction monitoring for suspicious activity (BSA), RBI-compliant data residency, audit trails for all financial operations, multi-factor authentication for privileged actions.\nFlag any transaction endpoint without idempotency or audit logging.\n=== END TENANT CONTEXT ==="
+  },
+
+  "healthcare": {
+    "display_name": "Healthcare",
+    "regulatory": ["HIPAA", "HITECH", "HL7 FHIR R4", "21 CFR Part 11", "ICD-10", "GDPR"],
+    "vocabulary": {
+      "PHI": "Protected Health Information — individually identifiable health data (HIPAA)",
+      "EHR": "Electronic Health Record — digital version of patient's medical history",
+      "EMR": "Electronic Medical Record — practice-specific patient record",
+      "FHIR": "Fast Healthcare Interoperability Resources — modern HL7 API standard",
+      "HL7": "Health Level 7 — healthcare data exchange standards organization",
+      "ICD-10": "International Classification of Diseases — medical diagnosis coding system",
+      "CPT": "Current Procedural Terminology — medical procedure billing codes",
+      "DICOM": "Digital Imaging and Communications in Medicine — medical imaging standard",
+      "audit trail": "Immutable chronological record of all PHI access (HIPAA requirement)",
+      "de-identification": "Removing all 18 PHI identifiers so data is no longer protected",
+      "consent": "Patient authorization for data sharing or specific treatments",
+      "BAA": "Business Associate Agreement — HIPAA contract with third-party vendors"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: HEALTHCARE ===\nThis system handles Protected Health Information (PHI). HIPAA compliance is mandatory.\nCritical requirements: encryption at rest and in transit for ALL PHI, audit logs for every PHI access/modification, minimum necessary access principle, BAA required before any PHI sharing with third parties, no PHI in logs or error messages.\nFlag any endpoint that returns patient data without access control checks.\n=== END TENANT CONTEXT ==="
+  },
+
+  "saas": {
+    "display_name": "SaaS / Software",
+    "regulatory": ["SOC 2 Type II", "GDPR", "CCPA", "ISO 27001"],
+    "vocabulary": {
+      "multi-tenancy": "Architecture serving multiple customers from shared infrastructure with data isolation",
+      "tenant isolation": "Guarantee that one tenant cannot access another's data",
+      "SLA": "Service Level Agreement — contractual uptime/performance commitment",
+      "RBAC": "Role-Based Access Control — permissions tied to user roles",
+      "SSO": "Single Sign-On — one login credential for multiple services (SAML/OAuth)",
+      "webhook": "HTTP callback delivering real-time event notifications to subscribers",
+      "rate limiting": "Throttling API requests to prevent abuse and ensure fair usage",
+      "idempotency": "Repeating the same API call produces the same result without side effects",
+      "soft delete": "Marking records as deleted without removing from database",
+      "audit log": "Immutable record of all user actions for compliance and debugging",
+      "feature flag": "Toggle to enable/disable features per tenant or user segment"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: SAAS ===\nThis is a multi-tenant SaaS application. Key validation areas: every data query must filter by tenant_id, no cross-tenant data leakage, RBAC enforcement on all endpoints, audit logging for destructive operations, idempotency on mutation endpoints, rate limiting on public APIs.\nFlag any DB query missing tenant_id isolation as CRITICAL.\n=== END TENANT CONTEXT ==="
+  },
+
+  "ecommerce": {
+    "display_name": "E-commerce",
+    "regulatory": ["PCI-DSS", "GDPR", "CCPA", "CAN-SPAM", "Consumer Protection Act"],
+    "vocabulary": {
+      "SKU": "Stock Keeping Unit — unique identifier for each distinct product variant",
+      "cart abandonment": "User adds items to cart but leaves without completing purchase",
+      "checkout funnel": "Sequence of steps from cart to completed order",
+      "fulfillment": "Process of picking, packing, and shipping an order",
+      "inventory": "Stock of products available for sale",
+      "backorder": "Order for out-of-stock item to be fulfilled when stock arrives",
+      "return": "Customer-initiated reversal of a completed purchase",
+      "refund": "Repayment to customer after return or complaint",
+      "AOV": "Average Order Value — total revenue divided by number of orders",
+      "conversion rate": "Percentage of visitors who complete a purchase",
+      "wishlist": "Saved list of products user intends to buy later",
+      "promo code": "Alphanumeric code granting discount at checkout"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: E-COMMERCE ===\nThis is an e-commerce platform. Key validation areas: PCI-DSS for payment processing, GDPR/CCPA consent before marketing emails (CAN-SPAM), inventory consistency (no overselling), order idempotency, customer PII protection.\nFlag any product/pricing endpoint missing input validation as a potential injection vector.\n=== END TENANT CONTEXT ==="
+  },
+
+  "logistics": {
+    "display_name": "Logistics",
+    "regulatory": ["DOT regulations", "FMCSA", "IATA", "Incoterms 2020", "GST/customs"],
+    "vocabulary": {
+      "AWB": "Air Waybill — shipping document for air cargo",
+      "BOL": "Bill of Lading — receipt and contract between shipper and carrier",
+      "POD": "Proof of Delivery — confirmation shipment was received by consignee",
+      "last-mile": "Final leg of delivery from local hub to customer address",
+      "3PL": "Third-Party Logistics — outsourced logistics provider",
+      "WMS": "Warehouse Management System — controls warehouse operations",
+      "TMS": "Transport Management System — optimizes freight movement",
+      "consignee": "Recipient of a shipment",
+      "manifest": "List of cargo contents for a shipment or vehicle",
+      "dwell time": "Duration cargo waits at a facility before next movement",
+      "ETA": "Estimated Time of Arrival",
+      "SLA breach": "Delivery outside the contractual time window"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: LOGISTICS ===\nThis system manages shipment and delivery operations. Key validation areas: chain of custody tracking (immutable scan events), GPS coordinate validation, SLA breach alerting, hazardous material compliance flags, customs documentation completeness.\nFlag any tracking endpoint that allows backdating scan events.\n=== END TENANT CONTEXT ==="
+  },
+
+  "devtools": {
+    "display_name": "Developer Tools",
+    "regulatory": ["SOC 2", "GitHub/GitLab API ToS", "OSS license compliance", "GDPR"],
+    "vocabulary": {
+      "CI/CD": "Continuous Integration/Continuous Deployment pipeline",
+      "linting": "Static analysis to catch style and logic errors before runtime",
+      "SAST": "Static Application Security Testing — analyzing code for vulnerabilities",
+      "DAST": "Dynamic Application Security Testing — testing running application",
+      "semantic versioning": "Version numbering format: MAJOR.MINOR.PATCH",
+      "monorepo": "Single repository containing multiple projects or packages",
+      "trunk-based development": "All developers integrate to main branch frequently",
+      "feature flag": "Code toggle to enable features for subset of users",
+      "observability": "Ability to understand system state from logs, metrics, traces",
+      "SLO": "Service Level Objective — internal performance target",
+      "dependency graph": "Map of relationships between software packages",
+      "SBOM": "Software Bill of Materials — inventory of all software components"
+    },
+    "prompt_injection": "=== TENANT CONTEXT: DEVELOPER TOOLS ===\nThis is a developer tooling platform. Key validation areas: API key scoping (least privilege), webhook signature verification, rate limiting on compute-heavy endpoints, OSS license compatibility checks, audit logs for sensitive operations (delete, admin actions).\nFlag any public API endpoint lacking authentication or rate limiting.\n=== END TENANT CONTEXT ==="
+  }
+}

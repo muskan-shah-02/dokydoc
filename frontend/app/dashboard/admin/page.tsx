@@ -29,7 +29,18 @@ import {
   CheckCircle2,
   Clock,
   Loader2,
+  Briefcase,
+  Sparkles,
+  ChevronRight,
 } from "lucide-react";
+
+interface IndustrySettings {
+  industry?: string;
+  industry_display_name?: string;
+  industry_confidence?: number;
+  onboarding_complete?: boolean;
+  glossary?: Record<string, string>;
+}
 
 interface AdminDashboardData {
   userCount: number;
@@ -55,6 +66,7 @@ export default function AdminDashboardPage() {
   const [permissionChecked, setPermissionChecked] = useState(false);
   const [data, setData] = useState<AdminDashboardData | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
+  const [industrySettings, setIndustrySettings] = useState<IndustrySettings | null>(null);
 
   // Check if user has admin dashboard permission (CXO or Admin role)
   const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
@@ -62,12 +74,17 @@ export default function AdminDashboardPage() {
   const fetchData = useCallback(async () => {
     setDataLoading(true);
     try {
-      const [usersRes, docsRes, billingRes, auditRes] = await Promise.all([
+      const [usersRes, docsRes, billingRes, auditRes, settingsRes] = await Promise.all([
         api.get<any[]>("/users").catch(() => []),
         api.get<any>("/documents?page_size=1").catch(() => ({ items: [] })),
         api.get<any>("/billing/usage").catch(() => null),
         api.get<any>("/audit/logs?page_size=5").catch(() => ({ items: [] })),
+        api.get<{ settings: IndustrySettings }>("/tenants/me/settings").catch(() => null),
       ]);
+
+      if (settingsRes?.settings) {
+        setIndustrySettings(settingsRes.settings);
+      }
 
       const userCount = Array.isArray(usersRes) ? usersRes.length : 1;
       const documentCount = docsRes?.total || (Array.isArray(docsRes?.items) ? docsRes.items.length : 0);
@@ -314,6 +331,80 @@ export default function AdminDashboardPage() {
               />
             </div>
           </div>
+        </div>
+
+        {/* P5-09: Industry Profile Card */}
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Briefcase className="h-5 w-5 text-blue-600" />
+              <h2 className="text-lg font-semibold text-gray-900">Industry Profile</h2>
+            </div>
+            <Link
+              href="/dashboard/onboarding"
+              className="flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700"
+            >
+              {industrySettings?.industry ? "Update" : "Configure"}
+              <ChevronRight className="h-4 w-4" />
+            </Link>
+          </div>
+
+          {industrySettings?.industry ? (
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 rounded-lg bg-blue-50 px-4 py-3">
+                <Sparkles className="h-5 w-5 text-blue-600 flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-blue-900">
+                    {industrySettings.industry_display_name || industrySettings.industry}
+                  </p>
+                  {industrySettings.industry_confidence !== undefined && (
+                    <p className="text-xs text-blue-600 mt-0.5">
+                      Auto-detected &middot; {Math.round((industrySettings.industry_confidence || 0) * 100)}% confidence
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {industrySettings.glossary && Object.keys(industrySettings.glossary).length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
+                    Glossary ({Object.keys(industrySettings.glossary).length} terms)
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.keys(industrySettings.glossary).slice(0, 6).map((term) => (
+                      <span
+                        key={term}
+                        className="inline-flex rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700"
+                      >
+                        {term}
+                      </span>
+                    ))}
+                    {Object.keys(industrySettings.glossary).length > 6 && (
+                      <span className="text-xs text-gray-400 self-center">
+                        +{Object.keys(industrySettings.glossary).length - 6} more
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-6 text-center">
+              <div className="rounded-full bg-gray-100 p-3 mb-3">
+                <Briefcase className="h-6 w-6 text-gray-400" />
+              </div>
+              <p className="text-sm font-medium text-gray-900">No industry configured</p>
+              <p className="mt-1 text-xs text-gray-500 max-w-xs">
+                Configure your industry profile so DokyDoc can tailor validation prompts and glossary suggestions
+              </p>
+              <Link
+                href="/dashboard/onboarding"
+                className="mt-3 inline-flex items-center gap-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+              >
+                Set Up Industry Profile
+              </Link>
+            </div>
+          )}
         </div>
 
         {/* Activity Timeline */}

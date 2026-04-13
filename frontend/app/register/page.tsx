@@ -95,6 +95,9 @@ export default function RegisterPage() {
   );
   const [checkingSubdomain, setCheckingSubdomain] = useState(false);
 
+  // Step 1 extras
+  const [companyWebsite, setCompanyWebsite] = useState("");
+
   // Step 2: Tier selection
   const [selectedTier, setSelectedTier] = useState("pro");
 
@@ -210,13 +213,14 @@ export default function RegisterPage() {
         tier: selectedTier,
         admin_email: adminEmail,
         admin_password: adminPassword,
+        ...(companyWebsite.trim() && { company_website: companyWebsite.trim() }),
       });
 
       // Set auth state from registration response
       setAuthFromResponse(response.user, response.tenant, response.access_token);
 
-      // Redirect to dashboard
-      router.push("/dashboard");
+      // Redirect to onboarding wizard for new tenants
+      router.push("/dashboard/onboarding");
     } catch (err: any) {
       console.error("Registration failed:", err);
       setError(
@@ -308,6 +312,28 @@ export default function RegisterPage() {
                 )}
               </div>
             </div>
+          </div>
+
+          {/* Company Website (P5-10: used for industry auto-detection) */}
+          <div className="space-y-2">
+            <Label htmlFor="companyWebsite">
+              Company Website{" "}
+              <span className="text-gray-400 font-normal">(optional)</span>
+            </Label>
+            <div className="relative">
+              <Globe className="absolute left-3 top-3 h-5 w-5 text-gray-400" />
+              <Input
+                id="companyWebsite"
+                type="url"
+                placeholder="https://acme.com"
+                value={companyWebsite}
+                onChange={(e) => setCompanyWebsite(e.target.value)}
+                className="h-11 pl-10"
+              />
+            </div>
+            <p className="text-xs text-gray-500">
+              We&apos;ll automatically detect your industry to personalise DokyDoc for your team
+            </p>
           </div>
         </div>
       );

@@ -545,6 +545,7 @@ class GeminiService(LoggerMixin):
         doc_text: str,
         tenant_id: int = None,
         user_id: int = None,
+        db=None,  # P5-08: DB session for tenant context injection
     ) -> list:
         """
         Sprint 10: BRD Atomization Pass.
@@ -553,13 +554,26 @@ class GeminiService(LoggerMixin):
         one testable requirement. Atoms are cached per document version so this runs
         only once per document unless the document changes.
 
+        P5-08: When db + tenant_id are provided, industry context is prepended to
+        the prompt so the AI understands domain vocabulary (e.g. PAN, EMI, PHI).
+
         Atom types:
           API_CONTRACT | BUSINESS_RULE | FUNCTIONAL_REQUIREMENT | DATA_CONSTRAINT |
           WORKFLOW_STEP | ERROR_SCENARIO | SECURITY_REQUIREMENT | NFR | INTEGRATION_POINT
 
         Returns list of dicts: [{"atom_id": "REQ-001", "atom_type": "...", "content": "...", "criticality": "..."}]
         """
-        prompt = f"""You are a requirements engineering expert. Decompose the following Business Requirements Document (BRD) into atomic, typed requirements.
+        # P5-08: Build tenant context preamble (non-blocking — empty string if unavailable)
+        context_preamble = ""
+        if db is not None and tenant_id:
+            try:
+                from app.services.ai.prompt_context import build_prompt_context
+                ctx = build_prompt_context(db, tenant_id=tenant_id, example_type="atomization")
+                context_preamble = ctx.render_full_preamble()
+            except Exception:
+                pass  # Never block atomization for context failure
+
+        prompt = f"""{context_preamble}You are a requirements engineering expert. Decompose the following Business Requirements Document (BRD) into atomic, typed requirements.
 
 RULES:
 1. Each atom must represent exactly ONE testable requirement — not a paragraph.
@@ -683,6 +697,7 @@ BRD TEXT:
         code_analysis: dict,
         tenant_id: int = None,
         user_id: int = None,
+        db=None,  # P5-08: DB session for tenant context injection
     ) -> dict:
         """
         Sprint 10: One typed forward-pass validation.
@@ -691,8 +706,21 @@ BRD TEXT:
         Each mismatch includes atom_local_id (REQ-001 string) which the caller resolves
         to the DB RequirementAtom.id for the requirement_atom_id FK.
 
+        P5-08: When db + tenant_id are provided, industry vocabulary and regulatory
+        context are prepended so the AI understands domain-specific requirements.
+
         Returns {"mismatches": [...], "_cost": {...}}
         """
+        # P5-08: Build tenant context preamble
+        context_preamble = ""
+        if db is not None and tenant_id:
+            try:
+                from app.services.ai.prompt_context import build_prompt_context
+                ctx = build_prompt_context(db, tenant_id=tenant_id, example_type="validation")
+                context_preamble = ctx.render_full_preamble()
+            except Exception:
+                pass
+
         instructions = self._ATOM_TYPE_INSTRUCTIONS.get(
             atom_type,
             "Check each requirement against the code and report genuine implementation gaps."
@@ -702,7 +730,7 @@ BRD TEXT:
             for a in atoms
         ], indent=2)
 
-        prompt = f"""You are a senior software architect performing a focused validation check.
+        prompt = f"""{context_preamble}You are a senior software architect performing a focused validation check.
 
 TASK: For each requirement atom below, determine whether the code analysis shows it is implemented.
 Flag ONLY genuine, high-confidence gaps. Do not flag things that are clearly implemented.
