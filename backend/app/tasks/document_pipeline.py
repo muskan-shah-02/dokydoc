@@ -173,6 +173,37 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
                 except Exception as ontology_err:
                     logger.warning(f"Failed to enqueue ontology task (non-critical): {ontology_err}")
 
+            # P4-01: Pre-atomize BRD/SRS/FRD documents at upload time.
+            # Atoms are stored now so the FIRST validation run can skip the
+            # atomization Gemini call — reducing cold-start latency.
+            # Non-blocking: runs in same async context but never fails the pipeline.
+            if tenant_id:
+                BRD_DOC_TYPES = {"brd", "srs", "frd", "prd", "requirements", "specification"}
+                doc_type_raw = (getattr(document, "document_type", "") or "").lower()
+                should_pre_atomize = (
+                    any(t in doc_type_raw for t in BRD_DOC_TYPES)
+                    or doc_type_raw in BRD_DOC_TYPES
+                    # If no explicit doc type, check if it has raw_text (means it's a text doc)
+                    or (not doc_type_raw and getattr(document, "raw_text", None))
+                )
+                if should_pre_atomize:
+                    try:
+                        from app.services.validation_service import ValidationService
+                        vs = ValidationService()
+                        await vs.atomize_document(
+                            db=db,
+                            document=document,
+                            tenant_id=tenant_id,
+                            user_id=document.owner_id,
+                            atomized_at_upload=True,  # P4-01: flag eagerly-created atoms
+                        )
+                        logger.info(f"[P4-01] Pre-atomization complete for document {document_id}")
+                    except Exception as atom_err:
+                        # Never fail the pipeline for pre-atomization errors
+                        logger.warning(
+                            f"[P4-01] Pre-atomization failed (non-critical): {atom_err}"
+                        )
+
             # SPRINT 2 Phase 4: Deduct cost from tenant after successful analysis
             if tenant_id:
                 try:

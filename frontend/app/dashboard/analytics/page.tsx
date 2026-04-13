@@ -51,6 +51,16 @@ interface ActivityMetrics {
 
 type Period = "week" | "month" | "quarter";
 
+// P4-09: BOE Savings Analytics Widget types
+interface BOESavingsSummary {
+  confirmed_mapping_count: number;
+  auto_approved_count: number;
+  coverage_pct: number;
+  auto_approve_threshold: number;
+  estimated_calls_saved_this_month: number;
+  estimated_inr_saved: number;
+}
+
 const FEATURE_COLORS: Record<string, string> = {
   document_analysis: "#6366f1",
   code_analysis: "#f59e0b",
@@ -166,21 +176,25 @@ export default function AnalyticsDashboardPage() {
   const [activity, setActivity] = useState<ActivityMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // P4-09: BOE savings state
+  const [boeSavings, setBoeSavings] = useState<BOESavingsSummary | null>(null);
 
   const fetchAll = useCallback(async (p: Period, isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const [ov, cs, cn, act] = await Promise.allSettled([
+      const [ov, cs, cn, act, boe] = await Promise.allSettled([
         api.get<Overview>("/analytics/overview"),
         api.get<CostEntry[]>(`/analytics/costs?period=${p}`),
         api.get<ConceptEntry[]>(`/analytics/concepts?period=${p}`),
         api.get<ActivityMetrics>("/analytics/activity"),
+        api.get<BOESavingsSummary>("/analysis/boe-savings-summary"),  // P4-09
       ]);
       if (ov.status === "fulfilled") setOverview(ov.value);
       if (cs.status === "fulfilled") setCosts(Array.isArray(cs.value) ? cs.value : []);
       if (cn.status === "fulfilled") setConcepts(Array.isArray(cn.value) ? cn.value : []);
       if (act.status === "fulfilled") setActivity(act.value);
+      if (boe.status === "fulfilled") setBoeSavings(boe.value);  // P4-09
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -319,6 +333,86 @@ export default function AnalyticsDashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* P4-09: BOE Savings Analytics Widget */}
+      {boeSavings && (
+        <div className="mb-6 rounded-lg border bg-white p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-green-50 p-2.5">
+                <Zap className="h-5 w-5 text-green-600" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">
+                  BOE Cost Savings — Business Ontology Engine
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Gemini calls avoided through high-confidence concept auto-approval
+                </p>
+              </div>
+            </div>
+            <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700">
+              Active
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div className="rounded-lg bg-gray-50 p-3">
+              <p className="text-xs font-medium text-gray-500">Confirmed Mappings</p>
+              <p className="mt-1 text-xl font-bold text-gray-900">
+                {boeSavings.confirmed_mapping_count.toLocaleString()}
+              </p>
+              <p className="mt-0.5 text-[10px] text-gray-400">doc ↔ code concept links</p>
+            </div>
+            <div className="rounded-lg bg-green-50 p-3">
+              <p className="text-xs font-medium text-gray-500">Auto-Approvable</p>
+              <p className="mt-1 text-xl font-bold text-green-700">
+                {boeSavings.auto_approved_count.toLocaleString()}
+              </p>
+              <p className="mt-0.5 text-[10px] text-gray-400">
+                confidence ≥ {(boeSavings.auto_approve_threshold * 100).toFixed(0)}%
+              </p>
+            </div>
+            <div className="rounded-lg bg-blue-50 p-3">
+              <p className="text-xs font-medium text-gray-500">Calls Saved / Month</p>
+              <p className="mt-1 text-xl font-bold text-blue-700">
+                ~{boeSavings.estimated_calls_saved_this_month.toLocaleString()}
+              </p>
+              <p className="mt-0.5 text-[10px] text-gray-400">estimated Gemini skips</p>
+            </div>
+            <div className="rounded-lg bg-amber-50 p-3">
+              <p className="text-xs font-medium text-gray-500">Est. Savings / Month</p>
+              <p className="mt-1 text-xl font-bold text-amber-700">
+                ₹{boeSavings.estimated_inr_saved.toFixed(2)}
+              </p>
+              <p className="mt-0.5 text-[10px] text-gray-400">at ₹0.03/call</p>
+            </div>
+          </div>
+
+          {/* Coverage progress bar */}
+          <div className="mt-4">
+            <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+              <span>BOE Coverage</span>
+              <span className="font-semibold text-gray-700">
+                {boeSavings.coverage_pct}%
+              </span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-gray-100">
+              <div
+                className="h-2 rounded-full bg-green-500 transition-all duration-500"
+                style={{ width: `${Math.min(boeSavings.coverage_pct, 100)}%` }}
+              />
+            </div>
+            <p className="mt-1 text-[10px] text-gray-400">
+              {boeSavings.coverage_pct < 30
+                ? "BOE is learning — run more validations to improve auto-approval rate"
+                : boeSavings.coverage_pct < 70
+                ? "BOE is building confidence — costs reducing with each validation run"
+                : "BOE is mature — high percentage of validations run cost-free"}
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Daily Cost Chart */}

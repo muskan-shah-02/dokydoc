@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Optional
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Integer, String, Text, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -52,6 +52,12 @@ class RequirementAtom(Base):
 
     # Document version at time of atomization — used to detect when re-atomization is needed
     document_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # P4-01: True when atoms were extracted eagerly at upload time
+    # (vs lazily at first validation run). Enables hit-rate analytics.
+    atomized_at_upload: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     document: Mapped["Document"] = relationship("Document")
 

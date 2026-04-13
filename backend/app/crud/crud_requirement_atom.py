@@ -64,6 +64,7 @@ class CRUDRequirementAtom(CRUDBase[RequirementAtom, RequirementAtomCreate, Requi
         document_id: int,
         document_version: str,
         atoms_data: List[dict],
+        atomized_at_upload: bool = False,
     ) -> List[RequirementAtom]:
         """
         Bulk-insert RequirementAtom rows in a single transaction.
@@ -85,6 +86,7 @@ class CRUDRequirementAtom(CRUDBase[RequirementAtom, RequirementAtomCreate, Requi
                 atom_type=atom.get("atom_type", "FUNCTIONAL_REQUIREMENT"),
                 content=atom.get("content", ""),
                 criticality=atom.get("criticality", "standard"),
+                atomized_at_upload=atomized_at_upload,  # P4-01
                 created_at=now,
                 updated_at=now,
             )

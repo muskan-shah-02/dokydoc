@@ -21,6 +21,11 @@ from app.services.flywheel import capture_mismatch_judgment
 from app.core.logging import LoggerMixin
 from app.core.exceptions import ValidationException, AIAnalysisException
 
+# P4-02: BOEContext for TYPE_CHECKING only (avoid circular import at runtime)
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from app.services.boe_context import BOEContext
+
 # Your semaphore for rate limiting is preserved
 GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
@@ -100,8 +105,42 @@ class ValidationService(LoggerMixin):
                     )
                     return
 
-                # SPRINT 2 Phase 6: Pass tenant_id to validate_single_link
-                tasks = [self.validate_single_link(link, user_id, tenant_id) for link in links]
+                # P4-04: Build one BOEContext per unique document before scatter.
+                # This is O(unique_documents) DB queries instead of O(links) — the
+                # key cost reduction for tenants with many document-code link pairs.
+                boe_contexts: dict = {}
+                if tenant_id:
+                    try:
+                        from app.services.boe_context import BOEContext
+                        unique_doc_ids = list({link.document_id for link in links})
+                        for doc_id in unique_doc_ids:
+                            boe_contexts[doc_id] = BOEContext.build(
+                                db=db,
+                                document_id=doc_id,
+                                component_id=0,   # 0 = tenant-wide context (not per-component)
+                                tenant_id=tenant_id,
+                            )
+                        self.logger.info(
+                            f"[P4-04] Built {len(boe_contexts)} BOEContext(s) for scan. "
+                            f"Total auto-approvable concepts: "
+                            f"{sum(c.auto_approved_count for c in boe_contexts.values())}"
+                        )
+                    except Exception as boe_err:
+                        self.logger.warning(
+                            f"[P4-04] BOEContext build failed — proceeding without BOE. "
+                            f"Error: {boe_err}"
+                        )
+
+                # Pass BOEContext per link (None if build failed or no tenant)
+                tasks = [
+                    self.validate_single_link(
+                        link,
+                        user_id,
+                        tenant_id,
+                        boe_context=boe_contexts.get(link.document_id),
+                    )
+                    for link in links
+                ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 successful_validations = 0
@@ -119,7 +158,14 @@ class ValidationService(LoggerMixin):
             finally:
                 self.logger.info(f"Validation scan finished for user_id: {user_id}")
 
-    async def atomize_document(self, db, document, tenant_id: int, user_id: int) -> list:
+    async def atomize_document(
+        self,
+        db,
+        document,
+        tenant_id: int,
+        user_id: int,
+        atomized_at_upload: bool = False,
+    ) -> list:
         """
         Sprint 10: BRD Atomization.
 
@@ -202,13 +248,56 @@ class ValidationService(LoggerMixin):
             document_id=document.id,
             document_version=doc_version,
             atoms_data=atoms_data,
+            atomized_at_upload=atomized_at_upload,  # P4-01
         )
         self.logger.info(
             f"Stored {len(new_atoms)} RequirementAtoms for doc {document.id}"
         )
         return new_atoms
 
-    async def validate_single_link(self, link: DocumentCodeLink, user_id: int, tenant_id: int = None):
+    @staticmethod
+    def _calibrate_confidence(
+        old_confidence: float,
+        validation_verdict: str,
+        validation_confidence: float,
+    ) -> float:
+        """
+        P4-06: Update a concept mapping's confidence score based on a validation result.
+
+        Each time the AI validates an atom and we can correlate it to a ConceptMapping,
+        we nudge the mapping's confidence_score up (MATCH) or down (MISMATCH).
+        Scores are clamped to [0.0, 1.0].
+
+        Deltas (weighted by validation_confidence):
+          MATCH         → +0.10  (strong positive signal)
+          PARTIAL_MATCH → +0.02  (weak positive signal)
+          MISMATCH      → -0.15  (stronger negative — failures matter more)
+
+        Examples:
+          _calibrate_confidence(0.80, 'MATCH', 0.90)         → 0.89
+          _calibrate_confidence(0.80, 'PARTIAL_MATCH', 0.85) → 0.817
+          _calibrate_confidence(0.80, 'MISMATCH', 0.95)      → 0.6575
+          _calibrate_confidence(0.05, 'MISMATCH', 1.00)      → 0.0   (floor)
+          _calibrate_confidence(0.98, 'MATCH', 1.00)         → 1.0   (ceiling)
+        """
+        DELTAS = {
+            "MATCH": +0.10,
+            "PARTIAL_MATCH": +0.02,
+            "MISMATCH": -0.15,
+        }
+        delta = DELTAS.get(validation_verdict, 0.0)
+        # Weight the delta by the AI's own confidence in its verdict
+        weighted_delta = delta * max(0.0, min(1.0, validation_confidence))
+        new_confidence = old_confidence + weighted_delta
+        return max(0.0, min(1.0, new_confidence))
+
+    async def validate_single_link(
+        self,
+        link: DocumentCodeLink,
+        user_id: int,
+        tenant_id: int = None,
+        boe_context: "BOEContext" = None,
+    ):
         """
         Sprint 10: Full 9-pass atomic validation engine.
 
@@ -285,6 +374,38 @@ class ValidationService(LoggerMixin):
                             f"{len(atoms_by_type)} types: {list(atoms_by_type.keys())}"
                         )
 
+                        # ── Step 3.5: P4-03 BOE auto-approve filter ───────────────────
+                        # Skip Gemini calls for atoms whose concepts are already
+                        # confirmed with high confidence in the Business Ontology Engine.
+                        if boe_context is not None and not boe_context.is_empty:
+                            filtered_atoms_by_type: dict = {}
+                            skipped_count = 0
+                            for atype, atype_atoms in atoms_by_type.items():
+                                non_approved = []
+                                for atom_dict in atype_atoms:
+                                    atom_content_lower = (
+                                        atom_dict.get("content", "") or ""
+                                    ).lower()
+                                    if boe_context.is_auto_approved(atom_content_lower):
+                                        skipped_count += 1
+                                        self.logger.debug(
+                                            f"[Link {link.id}] BOE auto-approved "
+                                            f"atom {atom_dict.get('atom_id')} — "
+                                            f"skipping Gemini"
+                                        )
+                                    else:
+                                        non_approved.append(atom_dict)
+                                if non_approved:
+                                    filtered_atoms_by_type[atype] = non_approved
+
+                            if skipped_count > 0:
+                                self.logger.info(
+                                    f"[Link {link.id}] BOE skipped {skipped_count} atoms "
+                                    f"({sum(len(v) for v in filtered_atoms_by_type.values())} "
+                                    f"remaining for Gemini validation)"
+                                )
+                            atoms_by_type = filtered_atoms_by_type
+
                         # ── Step 4: Run all typed forward passes in parallel ──────────
                         if gemini_service:
                             forward_tasks = [
@@ -343,6 +464,97 @@ class ValidationService(LoggerMixin):
                                 cost_info = result.get("_cost") or {}
                                 total_cost_inr += cost_info.get("cost_inr", 0)
                                 total_cost_usd += cost_info.get("cost_usd", 0)
+
+                        # ── Step 4.3: P4-05 Calibration write-back to BOE ────────────
+                        # Write each forward pass verdict back to the ConceptMapping
+                        # that corresponds to this atom — nudging confidence_score
+                        # up (MATCH) or down (MISMATCH) for future scans.
+                        if boe_context is not None and not boe_context.is_empty:
+                            try:
+                                from datetime import datetime, timezone
+                                from app.models.concept_mapping import ConceptMapping as CMModel
+
+                                for fwd_result in forward_results:
+                                    if isinstance(fwd_result, Exception):
+                                        continue
+                                    for m in fwd_result.get("mismatches", []):
+                                        mismatch_type = m.get("mismatch_type", "MISMATCH")
+                                        val_confidence = float(m.get("confidence", 0.5))
+
+                                        # Normalize to calibration categories
+                                        if mismatch_type in ("MATCH", "CONSISTENT"):
+                                            cal_verdict = "MATCH"
+                                        elif mismatch_type in ("PARTIAL_MATCH", "PARTIAL"):
+                                            cal_verdict = "PARTIAL_MATCH"
+                                        else:
+                                            cal_verdict = "MISMATCH"
+
+                                        # Find mapping for this atom's concept text
+                                        atom_content = (m.get("title", "") or "").lower()
+                                        mapping_entry = boe_context.get_mapping_for_concept(
+                                            atom_content
+                                        )
+                                        if not mapping_entry:
+                                            continue
+
+                                        mapping_id = mapping_entry.get("mapping_id")
+                                        old_conf = mapping_entry.get("confidence", 0.5)
+                                        new_conf = self._calibrate_confidence(
+                                            old_confidence=old_conf,
+                                            validation_verdict=cal_verdict,
+                                            validation_confidence=val_confidence,
+                                        )
+
+                                        cm_row = db.query(CMModel).filter_by(
+                                            id=mapping_id
+                                        ).first()
+                                        if cm_row:
+                                            cm_row.confidence_score = new_conf
+                                            cm_row.last_validated_at = datetime.now(
+                                                timezone.utc
+                                            )
+                                            cm_row.validation_verdict = cal_verdict
+                                            db.add(cm_row)
+
+                                db.commit()
+                            except Exception as cal_err:
+                                self.logger.debug(
+                                    f"[Link {link.id}] Calibration write-back failed "
+                                    f"(non-fatal): {cal_err}"
+                                )
+                                db.rollback()
+
+                        # ── Step 4.5: P4-03 BOE document-only gap injection ───────────
+                        # Concepts that exist in the BRD ontology but have NO code
+                        # mapping are auto-created as MISSING_IMPLEMENTATION mismatches.
+                        # This costs zero Gemini calls — pure graph gap analysis.
+                        if boe_context is not None and boe_context.document_only_concepts:
+                            for gap_concept in boe_context.document_only_concepts[:20]:
+                                try:
+                                    crud.mismatch.create_with_link(
+                                        db=db,
+                                        obj_in={
+                                            "mismatch_type": "MISSING_IMPLEMENTATION",
+                                            "severity": "medium",
+                                            "title": f"No code found for: {gap_concept}",
+                                            "description": (
+                                                f"The business concept '{gap_concept}' appears "
+                                                f"in the BRD ontology but has no corresponding "
+                                                f"code implementation. "
+                                                f"(Detected by BOE gap analysis — no Gemini call)"
+                                            ),
+                                            "direction": "forward",
+                                            "confidence": 0.85,
+                                        },
+                                        link_id=link.id,
+                                        owner_id=user_id,
+                                        tenant_id=tenant_id,
+                                    )
+                                except Exception as gap_err:
+                                    self.logger.debug(
+                                        f"[Link {link.id}] Could not store BOE gap "
+                                        f"mismatch for '{gap_concept}': {gap_err}"
+                                    )
 
                         # ── Step 5: Build atoms summary for reverse pass ──────────────
                         atoms_summary_lines = [

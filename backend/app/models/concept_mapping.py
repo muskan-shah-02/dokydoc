@@ -64,6 +64,15 @@ class ConceptMapping(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # P4-05: Validation feedback loop — write AI verdict back to BOE
+    # Closes the loop: validation result → confidence_score nudge → better BOE cache
+    last_validated_at: Mapped[Optional[DateTime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    validation_verdict: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # 'MATCH' | 'PARTIAL_MATCH' | 'MISMATCH' — None means never validated
+
     # Timestamps
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

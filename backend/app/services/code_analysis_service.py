@@ -635,6 +635,23 @@ class CodeAnalysisService(LoggerMixin):
             except Exception as e:
                 self.logger.warning(f"Graph version save failed (non-fatal): {e}")
 
+            # P4-07: Trigger cross-graph mapping after code analysis completes.
+            # New code concepts have been extracted → BOE should re-check for
+            # matches against the document ontology to keep mappings current.
+            if tenant_id:
+                try:
+                    from app.tasks.ontology_tasks import run_cross_graph_mapping
+                    run_cross_graph_mapping.delay(tenant_id)
+                    self.logger.info(
+                        f"[P4-07] Cross-graph mapping queued for tenant {tenant_id} "
+                        f"after component {component.id} analysis"
+                    )
+                except Exception as mapping_err:
+                    self.logger.warning(
+                        f"[P4-07] Cross-graph mapping dispatch failed (non-critical): "
+                        f"{mapping_err}"
+                    )
+
         except httpx.RequestError as e:
             self.logger.error(f"HTTP Error fetching code for component {component_id}: {e}")
             if component:
