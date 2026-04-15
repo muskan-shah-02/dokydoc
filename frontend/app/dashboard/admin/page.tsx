@@ -32,6 +32,7 @@ import {
   Briefcase,
   Sparkles,
   ChevronRight,
+  ShieldCheck,
 } from "lucide-react";
 
 interface IndustrySettings {
@@ -40,6 +41,16 @@ interface IndustrySettings {
   industry_confidence?: number;
   onboarding_complete?: boolean;
   glossary?: Record<string, string>;
+  company_profile?: { mission?: string; description?: string; team_size?: string; founded_year?: string };
+}
+
+interface ComplianceSelection {
+  id: number;
+  framework_id: number;
+  code: string;
+  name: string;
+  category: string;
+  geography?: string;
 }
 
 interface AdminDashboardData {
@@ -67,6 +78,7 @@ export default function AdminDashboardPage() {
   const [data, setData] = useState<AdminDashboardData | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
   const [industrySettings, setIndustrySettings] = useState<IndustrySettings | null>(null);
+  const [complianceSelections, setComplianceSelections] = useState<ComplianceSelection[]>([]);
 
   // Check if user has admin dashboard permission (CXO or Admin role)
   const canAccessAdminDashboard = hasPermission(Permission.DASHBOARD_ADMIN);
@@ -85,6 +97,10 @@ export default function AdminDashboardPage() {
       if (settingsRes?.settings) {
         setIndustrySettings(settingsRes.settings);
       }
+      // Fetch compliance selections (non-blocking)
+      api.get<{ selections: ComplianceSelection[] }>("/compliance/tenants/me/compliance")
+        .then((r) => setComplianceSelections(r.selections || []))
+        .catch(() => {});
 
       const userCount = Array.isArray(usersRes) ? usersRes.length : 1;
       const documentCount = docsRes?.total || (Array.isArray(docsRes?.items) ? docsRes.items.length : 0);
@@ -402,6 +418,72 @@ export default function AdminDashboardPage() {
                 className="mt-3 inline-flex items-center gap-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
               >
                 Set Up Industry Profile
+              </Link>
+            </div>
+          )}
+        </div>
+
+        {/* Compliance Frameworks Card */}
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-green-600" />
+              <h2 className="text-lg font-semibold text-gray-900">Compliance Frameworks</h2>
+            </div>
+            <Link
+              href="/dashboard/onboarding?step=3"
+              className="text-sm text-blue-600 hover:text-blue-700"
+            >
+              Edit
+            </Link>
+          </div>
+
+          {complianceSelections.length > 0 ? (
+            <div className="space-y-3">
+              {/* Group by category */}
+              {Object.entries(
+                complianceSelections.reduce<Record<string, ComplianceSelection[]>>((acc, s) => {
+                  (acc[s.category] = acc[s.category] || []).push(s);
+                  return acc;
+                }, {})
+              ).map(([cat, items]) => (
+                <div key={cat}>
+                  <p className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1.5">{cat}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {items.map((s) => (
+                      <span
+                        key={s.id}
+                        className="inline-flex items-center gap-1 rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-semibold text-green-700"
+                        title={s.name}
+                      >
+                        {s.code}
+                        {s.geography && (
+                          <span className="rounded bg-green-100 px-1 text-[9px] font-normal text-green-600">{s.geography}</span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs text-gray-400 mt-2">
+                {complianceSelections.length} framework{complianceSelections.length !== 1 ? "s" : ""} active — DokyDoc flags relevant gaps during validation
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-6 text-center">
+              <div className="rounded-full bg-gray-100 p-3 mb-3">
+                <ShieldCheck className="h-6 w-6 text-gray-400" />
+              </div>
+              <p className="text-sm font-medium text-gray-900">No compliance frameworks selected</p>
+              <p className="mt-1 text-xs text-gray-500 max-w-xs">
+                Select the regulatory frameworks your organisation follows so DokyDoc can tailor compliance validation
+              </p>
+              <Link
+                href="/dashboard/onboarding?step=3"
+                className="mt-3 inline-flex items-center gap-1 rounded-md bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 transition-colors"
+              >
+                <ShieldCheck className="h-4 w-4 mr-1" />
+                Set Up Compliance
               </Link>
             </div>
           )}

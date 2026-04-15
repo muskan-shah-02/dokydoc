@@ -28,6 +28,7 @@ from app.models.concept_mapping import ConceptMapping  # noqa
 from app.models.audit_log import AuditLog  # noqa
 from app.models.notification import Notification  # noqa
 from app.models.brd_sign_off import BRDSignOff  # noqa  Phase 5B: BA Sign-Off
+from app.models.compliance_framework import ComplianceFramework, TenantComplianceSelection  # noqa  Phase 6
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}

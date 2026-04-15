@@ -28,6 +28,7 @@ from app.api.endpoints import (
     analytics,  # SPRINT 8: Analytics Dashboard
     training_examples,  # Phase 1: Data Flywheel
 )
+from app.api.endpoints import compliance  # Phase 6: Compliance Library
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
 from app.middleware.audit_middleware import AuditMiddleware
@@ -454,6 +455,13 @@ app.include_router(
     training_examples.router,
     prefix=f"/api/{settings.API_VERSION}/training-examples",
     tags=["Training Examples"]
+)
+
+# Phase 6: Compliance Library
+app.include_router(
+    compliance.router,
+    prefix=f"/api/{settings.API_VERSION}",
+    tags=["Compliance Library"]
 )
 
 # --- Startup Event (Legacy support) ---

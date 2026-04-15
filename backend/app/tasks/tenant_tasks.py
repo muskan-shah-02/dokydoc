@@ -85,7 +85,7 @@ def detect_tenant_industry(self, tenant_id: int, website_url: str):
             )
             return
 
-        # ── Step 2: Classify with Gemini ──────────────────────────────────────
+        # ── Step 2: Classify with Gemini (also extracts company profile) ─────────
         classification = _classify_industry(website_text, tenant_id)
         if not classification:
             return
@@ -95,21 +95,14 @@ def detect_tenant_industry(self, tenant_id: int, website_url: str):
         display_name = classification.get("display_name", detected_slug)
         parent_slug = classification.get("parent_slug")
         is_known = classification.get("is_known", detected_slug in KNOWN_INDUSTRY_SLUGS)
+        company_profile = classification.get("company_profile") or {}
 
         logger.info(
             f"[P5-04] Tenant {tenant_id}: detected '{detected_slug}' "
             f"(confidence={confidence:.2f}, known={is_known})"
         )
 
-        # ── Step 3: Apply if confidence is sufficient ─────────────────────────
-        if confidence < MIN_AUTO_DETECT_CONFIDENCE:
-            logger.info(
-                f"[P5-04] Confidence {confidence:.2f} below threshold "
-                f"{MIN_AUTO_DETECT_CONFIDENCE} — skipping auto-set for tenant {tenant_id}"
-            )
-            return
-
-        # ── Step 4: Write to tenant.settings ─────────────────────────────────
+        # ── Step 3: Write company profile draft (always, regardless of confidence) ──
         from app.models.tenant import Tenant
 
         tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
@@ -119,6 +112,31 @@ def detect_tenant_industry(self, tenant_id: int, website_url: str):
 
         current_settings = dict(tenant.settings or {})
 
+        # Store company profile draft so onboarding wizard can pre-fill fields
+        if company_profile and not current_settings.get("company_profile"):
+            current_settings["company_profile_draft"] = {
+                "mission": company_profile.get("mission"),
+                "description": company_profile.get("description"),
+                "team_size": company_profile.get("team_size"),
+                "founded_year": str(company_profile.get("founded_year") or ""),
+                "headquarters": company_profile.get("headquarters"),
+                "source": "website_research",
+            }
+            logger.info(f"[P5-04] Stored company_profile_draft for tenant {tenant_id}")
+
+        # ── Step 4: Apply industry if confidence is sufficient ────────────────
+        if confidence < MIN_AUTO_DETECT_CONFIDENCE:
+            # Still save the profile draft even if industry confidence is low
+            tenant.settings = current_settings
+            db.add(tenant)
+            db.commit()
+            logger.info(
+                f"[P5-04] Confidence {confidence:.2f} below threshold "
+                f"{MIN_AUTO_DETECT_CONFIDENCE} — skipping auto-set industry for tenant {tenant_id}"
+            )
+            return
+
+        # ── Step 5: Write industry to tenant.settings ─────────────────────────
         # Only set if industry not already manually chosen by user
         if not current_settings.get("industry"):
             current_settings["industry"] = detected_slug
@@ -127,12 +145,12 @@ def detect_tenant_industry(self, tenant_id: int, website_url: str):
             if parent_slug:
                 current_settings["industry_parent"] = parent_slug
 
-            tenant.settings = current_settings
-            db.add(tenant)
-            db.commit()
-            logger.info(
-                f"[P5-04] Set industry='{detected_slug}' for tenant {tenant_id}"
-            )
+        tenant.settings = current_settings
+        db.add(tenant)
+        db.commit()
+        logger.info(
+            f"[P5-04] Set industry='{detected_slug}' for tenant {tenant_id}"
+        )
 
         # ── Step 5: Trigger profile generation for unknown industries ─────────
         if not is_known and detected_slug:
@@ -190,25 +208,36 @@ def _classify_industry(website_text: str, tenant_id: int) -> Optional[dict]:
         genai.configure(api_key=app_settings.GEMINI_API_KEY)
         model = genai.GenerativeModel(app_settings.GEMINI_MODEL)
 
-        prompt = f"""Analyze the following website text and classify the company's industry.
+        prompt = f"""Analyze the following company website text. Return TWO things:
+1. Industry classification
+2. Company profile summary
 
 RESPOND WITH JSON ONLY (no explanations, no markdown fences):
 {{
   "industry_slug": "<slug>",
   "parent_slug": "<parent_slug or null>",
   "is_known": true,
-  "display_name": "<human readable name>",
+  "display_name": "<human readable industry name>",
   "confidence": 0.0,
-  "reasoning": "<one sentence>"
+  "reasoning": "<one sentence>",
+  "company_profile": {{
+    "mission": "<mission statement or value proposition — 1 sentence, or null>",
+    "description": "<what the company does and who it serves — 2-3 sentences, or null>",
+    "team_size": "<one of: 1-10 | 11-50 | 51-200 | 201-500 | 500+ | null>",
+    "founded_year": "<4-digit year or null>",
+    "headquarters": "<City, Country or null>"
+  }}
 }}
 
-Valid known slugs: {', '.join(sorted(KNOWN_INDUSTRY_SLUGS))}
+Valid known industry slugs: {', '.join(sorted(KNOWN_INDUSTRY_SLUGS))}
 
 RULES:
 - Use snake_case or parent/sub format (e.g. "fintech/payments", "healthcare")
 - Set is_known=false if the slug is NOT in the known slugs list
 - confidence: 0.0-1.0 (how certain you are of this classification)
 - If website text is too generic to classify, set confidence < 0.4
+- For company_profile: extract verbatim where possible. Use null if info is not present.
+- team_size: infer from context ("fast-growing team", "global workforce of 300+", etc.) or null
 
 WEBSITE TEXT:
 {website_text}"""

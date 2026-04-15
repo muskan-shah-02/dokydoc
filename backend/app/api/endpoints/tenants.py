@@ -278,6 +278,15 @@ def patch_tenant_settings(
     )
     db.commit()
 
+    # P6: Invalidate compressed context cache if industry/glossary/compliance changed
+    ctx_affecting_keys = {"industry", "glossary", "compliance_frameworks", "regulatory_context", "sub_domain"}
+    if ctx_affecting_keys.intersection(payload.keys()):
+        try:
+            from app.services.ai.prompt_context import invalidate_compressed_cache
+            invalidate_compressed_cache(db, tenant_id)
+        except Exception:
+            pass
+
     logger.info(f"[P5-10] Settings updated for tenant {tenant_id}: keys={list(payload.keys())}")
     return {"tenant_id": tenant_id, "settings": merged}
 

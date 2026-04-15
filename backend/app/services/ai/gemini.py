@@ -563,13 +563,20 @@ class GeminiService(LoggerMixin):
 
         Returns list of dicts: [{"atom_id": "REQ-001", "atom_type": "...", "content": "...", "criticality": "..."}]
         """
-        # P5-08: Build tenant context preamble (non-blocking — empty string if unavailable)
+        # P5-08 / P6: Build budget-aware tenant context preamble
         context_preamble = ""
         if db is not None and tenant_id:
             try:
                 from app.services.ai.prompt_context import build_prompt_context
-                ctx = build_prompt_context(db, tenant_id=tenant_id, example_type="atomization")
-                context_preamble = ctx.render_full_preamble()
+                ctx = build_prompt_context(
+                    db, tenant_id=tenant_id,
+                    content_hint=doc_text[:500],
+                    operation="atomization",
+                )
+                context_preamble = ctx.render_full_preamble(
+                    content_hint=doc_text[:500],
+                    operation="atomization",
+                )
             except Exception:
                 pass  # Never block atomization for context failure
 
@@ -790,13 +797,22 @@ Flag any of the above that are absent or incorrect.""",
 
         Returns {"mismatches": [...], "_cost": {...}}
         """
-        # P5-08: Build tenant context preamble
+        # P5-08 / P6: Build budget-aware tenant context preamble
+        # Use atom content as hint to inject only relevant glossary terms
+        atom_hint = " ".join(a.get("content", "") for a in atoms[:3])[:500]
         context_preamble = ""
         if db is not None and tenant_id:
             try:
                 from app.services.ai.prompt_context import build_prompt_context
-                ctx = build_prompt_context(db, tenant_id=tenant_id, example_type="validation")
-                context_preamble = ctx.render_full_preamble()
+                ctx = build_prompt_context(
+                    db, tenant_id=tenant_id,
+                    content_hint=atom_hint,
+                    operation="validation",
+                )
+                context_preamble = ctx.render_full_preamble(
+                    content_hint=atom_hint,
+                    operation="validation",
+                )
             except Exception:
                 pass
 

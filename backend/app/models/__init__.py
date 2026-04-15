@@ -31,3 +31,4 @@ from .generated_doc import GeneratedDoc  # Sprint 8: Auto Docs
 from .integration_config import IntegrationConfig  # Sprint 8: Integrations
 from .training_example import TrainingExample, FeedbackSource  # Phase 1: Data Flywheel
 from .brd_sign_off import BRDSignOff  # Phase 5B: BA Sign-Off Workflow
+from .compliance_framework import ComplianceFramework, TenantComplianceSelection  # Phase 6: Compliance Library
