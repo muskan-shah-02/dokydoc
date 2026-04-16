@@ -720,9 +720,13 @@ def get_atom_diff(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
+    # ARC-DB-04: last_atom_diff is written by validation_service.atomize_document()
+    # after every re-atomization (diff.summary()) and consumed here.
+    diff = getattr(document, "last_atom_diff", None) or {}
+    has_diff = bool(diff.get("added") or diff.get("modified") or diff.get("deleted"))
     return {
         "document_id": document_id,
-        "last_atom_diff": getattr(document, "last_atom_diff", None) or {
-            "message": "No diff available — document not yet re-uploaded after P5B-01"
-        },
+        "has_diff": has_diff,
+        "atom_diff": diff if has_diff else None,
+        "message": None if has_diff else "No diff available — document not yet re-uploaded",
     }

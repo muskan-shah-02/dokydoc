@@ -331,15 +331,16 @@ class ValidationService(LoggerMixin):
                     f"{len(diff.deleted_atom_ids)} deleted atoms in doc {document.id}"
                 )
 
-            # Annotate atoms_data with delta fields for storage
+            # ARC-BE-07: Key delta_map by SHA-256 hash (was 80-char prefix —
+            # two atoms sharing the same first 80 chars would silently collide).
+            from app.services.atom_diff_service import _hash_content
             delta_map = {}
             for delta in diff.added + diff.modified + diff.unchanged:
-                key = delta.new_atom_content[:80]  # Use prefix as key
-                delta_map[key] = delta
+                delta_map[delta.content_hash] = delta
 
             for atom_data in atoms_data:
-                prefix = atom_data["content"][:80]
-                delta = delta_map.get(prefix)
+                h = _hash_content(atom_data["content"])
+                delta = delta_map.get(h)
                 if delta:
                     atom_data["_content_hash"] = delta.content_hash
                     atom_data["_previous_atom_id"] = delta.previous_atom_id

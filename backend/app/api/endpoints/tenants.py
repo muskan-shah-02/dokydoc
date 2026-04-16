@@ -287,6 +287,21 @@ def patch_tenant_settings(
         except Exception:
             pass
 
+    # ARC-BE-08: Re-fire industry detection if company_website is added/changed
+    # (covers the case where the tenant skipped it at registration or updates it later)
+    new_website = payload.get("company_website", "").strip()
+    old_website = (tenant.settings or {}).get("company_website", "").strip()
+    if new_website and new_website != old_website:
+        try:
+            from app.tasks.tenant_tasks import detect_tenant_industry
+            detect_tenant_industry.delay(tenant_id, new_website)
+            logger.info(
+                f"[ARC-BE-08] Queued industry re-detection for tenant {tenant_id} "
+                f"from updated website {new_website}"
+            )
+        except Exception:
+            pass
+
     logger.info(f"[P5-10] Settings updated for tenant {tenant_id}: keys={list(payload.keys())}")
     return {"tenant_id": tenant_id, "settings": merged}
 

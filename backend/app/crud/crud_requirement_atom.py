@@ -110,5 +110,58 @@ class CRUDRequirementAtom(CRUDBase[RequirementAtom, RequirementAtomCreate, Requi
             self.model.document_id == document_id
         ).count()
 
+    def get_by_regulatory_tag(
+        self,
+        db: Session,
+        *,
+        tag: str,
+        tenant_id: int,
+        document_id: Optional[int] = None,
+    ) -> List[RequirementAtom]:
+        """
+        ARC-DB-03: Filter atoms by a single regulatory tag using the PostgreSQL
+        GIN @> (array contains) operator.
+
+        IMPORTANT: Always use .contains([tag]) — NOT .in_() or string .like().
+        Only .contains() triggers the GIN index on regulatory_tags TEXT[].
+
+        Example:
+            atoms = requirement_atom.get_by_regulatory_tag(db, tag="GDPR", tenant_id=1)
+        """
+        query = db.query(self.model).filter(
+            self.model.tenant_id == tenant_id,
+            # GIN @> operator — uses ix_requirement_atoms_regulatory_tags index
+            self.model.regulatory_tags.contains([tag]),
+        )
+        if document_id is not None:
+            query = query.filter(self.model.document_id == document_id)
+        return query.all()
+
+    def get_by_regulatory_tags_any(
+        self,
+        db: Session,
+        *,
+        tags: List[str],
+        tenant_id: int,
+        document_id: Optional[int] = None,
+    ) -> List[RequirementAtom]:
+        """
+        ARC-DB-03: Filter atoms that contain ANY of the given tags (overlap check).
+        Uses PostgreSQL && operator (array overlap) which also uses the GIN index.
+        """
+        from sqlalchemy.dialects.postgresql import array as pg_array
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import ARRAY
+        from sqlalchemy import String
+
+        query = db.query(self.model).filter(
+            self.model.tenant_id == tenant_id,
+            # GIN && operator — array overlap, uses GIN index
+            self.model.regulatory_tags.overlap(tags),
+        )
+        if document_id is not None:
+            query = query.filter(self.model.document_id == document_id)
+        return query.all()
+
 
 requirement_atom = CRUDRequirementAtom(RequirementAtom)
