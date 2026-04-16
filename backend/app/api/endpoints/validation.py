@@ -229,10 +229,12 @@ def get_validation_report(
     """
     logger = validation_endpoints.logger
 
-    # Fetch mismatches for this tenant
+    # ARC-BE-04: Fetch mismatches with explicit cap; flag truncation in response
+    REPORT_LIMIT = 500
     mismatches = crud.mismatch.get_multi_by_owner(
-        db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=0, limit=500
+        db=db, owner_id=current_user.id, tenant_id=tenant_id, skip=0, limit=REPORT_LIMIT
     )
+    report_truncated = len(mismatches) == REPORT_LIMIT
 
     # Fetch requirement traces for the initiative
     traces = []
@@ -258,6 +260,9 @@ def get_validation_report(
     report = {
         "initiative_id": initiative_id,
         "generated_at": str(schemas.datetime_now()) if hasattr(schemas, 'datetime_now') else None,
+        # ARC-BE-04: Tell callers when the mismatch list was capped
+        "truncated": report_truncated,
+        "mismatch_limit": REPORT_LIMIT,
         "summary": {
             "total_mismatches": len(mismatches),
             "critical": sum(1 for m in mismatches if getattr(m, 'severity', '') == "critical"),
@@ -472,6 +477,9 @@ def get_coverage_matrix(
         models.Mismatch.status.in_(["open", "in_progress", "new"]),
     ).all()
 
+    # ARC-BE-01: Pre-build set for O(1) link lookup (was O(N) any() inside O(N²) loop)
+    linked_component_ids = {l.code_component_id for l in links}
+
     # Build matrix: (atom_id, component_id) → {open, critical}
     from collections import defaultdict
     cell_data: dict = defaultdict(lambda: {"open": 0, "critical": 0})
@@ -490,9 +498,8 @@ def get_coverage_matrix(
             open_count = cell["open"]
             crit_count = cell["critical"]
 
-            # Determine status
-            link_exists = any(l.code_component_id == comp.id for l in links)
-            if not link_exists:
+            # ARC-BE-01: O(1) set lookup instead of O(N) any()
+            if comp.id not in linked_component_ids:
                 cell_status = "not_linked"
                 cov_score = 0.0
             elif crit_count > 0:
@@ -788,6 +795,8 @@ def get_sign_off_history(
         "sign_offs": [
             {
                 "id": s.id,
+                # ARC-BE-02: Include certificate_id so frontend history panel renders it
+                "certificate_id": f"DOKYDOC-{s.id:06d}",
                 "signed_at": str(s.signed_at),
                 "signed_by_user_id": s.signed_by_user_id,
                 "compliance_score": s.compliance_score_at_signoff,
@@ -796,6 +805,7 @@ def get_sign_off_history(
                 "critical_mismatches": s.critical_mismatches_count,
                 "has_unresolved_critical": s.has_unresolved_critical,
                 "certificate_hash": s.certificate_hash,
+                "sign_off_notes": s.sign_off_notes,
             }
             for s in sign_offs
         ],

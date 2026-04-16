@@ -196,6 +196,7 @@ export default function ValidationPanelPage() {
   const [atomDiffSummary, setAtomDiffSummary] = useState<Record<string, number> | null>(null);
   const [coverageMatrix, setCoverageMatrix] = useState<CoverageMatrixData | null>(null);
   const [coverageMatrixDocId, setCoverageMatrixDocId] = useState<number | null>(null);
+  const [coverageMatrixLoading, setCoverageMatrixLoading] = useState(false); // ARC-FE-04
   const [evidenceMap, setEvidenceMap] = useState<Record<number, EvidenceData>>({});
   const [expandedEvidence, setExpandedEvidence] = useState<Set<number>>(new Set());
   const [fpModal, setFpModal] = useState<{ open: boolean; mismatchId: number | null }>({ open: false, mismatchId: null });
@@ -331,7 +332,9 @@ export default function ValidationPanelPage() {
         headers: { Authorization: `Bearer ${tok}` },
       });
       if (res.ok) setComplianceData(await res.json());
-    } catch {}
+      // ARC-FE-01: surface non-2xx compliance errors as inline warning
+      else if (res.status !== 404) setError(`Compliance score unavailable (HTTP ${res.status})`);
+    } catch (e: any) { console.warn("[fetchComplianceData]", e?.message); }
   }, []);
 
   // Phase 5B: fetch atom diff summary for a document
@@ -346,7 +349,7 @@ export default function ValidationPanelPage() {
         const data = await res.json();
         if (data.atom_diff) setAtomDiffSummary(data.atom_diff);
       }
-    } catch {}
+    } catch (e: any) { console.warn("[fetchAtomDiff]", e?.message); }
   }, []);
 
   // Phase 5B: fetch coverage matrix for a document
@@ -355,12 +358,20 @@ export default function ValidationPanelPage() {
     if (!tok) return;
     setCoverageMatrixDocId(docId);
     setCoverageMatrix(null);
+    setCoverageMatrixLoading(true); // ARC-FE-04
     try {
       const res = await fetch(`${API_BASE_URL}/validation/${docId}/coverage-matrix`, {
         headers: { Authorization: `Bearer ${tok}` },
       });
+      // ARC-FE-01: surface coverage matrix errors
       if (res.ok) setCoverageMatrix(await res.json());
-    } catch {}
+      else setError(`Coverage matrix unavailable (HTTP ${res.status})`);
+    } catch (e: any) {
+      console.warn("[fetchCoverageMatrix]", e?.message);
+      setError("Coverage matrix failed to load. Check your connection.");
+    } finally {
+      setCoverageMatrixLoading(false); // ARC-FE-04
+    }
   }, []);
 
   // Phase 5B: fetch evidence for a mismatch
@@ -376,7 +387,12 @@ export default function ValidationPanelPage() {
         const data: EvidenceData = await res.json();
         setEvidenceMap((prev) => ({ ...prev, [mismatchId]: data }));
       }
-    } catch {}
+      // ARC-FE-01: surface evidence errors inline
+      else setEvidenceMap((prev) => ({ ...prev, [mismatchId]: { error: `Evidence unavailable (HTTP ${res.status})` } as any }));
+    } catch (e: any) {
+      console.warn("[fetchEvidence]", e?.message);
+      setEvidenceMap((prev) => ({ ...prev, [mismatchId]: { error: "Evidence failed to load." } as any }));
+    }
   }, [evidenceMap]);
 
   const toggleEvidence = (mismatchId: number) => {
@@ -422,6 +438,10 @@ export default function ValidationPanelPage() {
   const handleStatusUpdate = async (mismatchId: number, newStatus: string) => {
     setStatusUpdating(mismatchId);
     const tok = localStorage.getItem("accessToken");
+    // ARC-FE-03: capture previous status for rollback on error
+    const previousStatus = mismatches.find((m) => m.id === mismatchId)?.status ?? "open";
+    // Optimistic update — UI reflects change immediately
+    setMismatches((prev) => prev.map((m) => m.id === mismatchId ? { ...m, status: newStatus } : m));
     try {
       const res = await fetch(`${API_BASE_URL}/validation/mismatches/${mismatchId}/status`, {
         method: "PATCH",
@@ -429,8 +449,12 @@ export default function ValidationPanelPage() {
         body: JSON.stringify({ new_status: newStatus }),
       });
       if (res.ok) {
-        setMismatches((prev) => prev.map((m) => m.id === mismatchId ? { ...m, status: newStatus } : m));
+        // Already updated optimistically — sync server response fields
+        const data = await res.json();
+        setMismatches((prev) => prev.map((m) => m.id === mismatchId ? { ...m, status: data.status ?? newStatus } : m));
       } else {
+        // ARC-FE-03: revert to previous status on server rejection
+        setMismatches((prev) => prev.map((m) => m.id === mismatchId ? { ...m, status: previousStatus } : m));
         const e = await res.json();
         setError(e.detail || "Failed to update status.");
       }
@@ -548,9 +572,11 @@ export default function ValidationPanelPage() {
       setActiveTab("results");
       const initialCount = mismatches.length;
       const pollForResults = async () => {
-        const maxAttempts = 15;  // up to 45 seconds
+        // ARC-FE-05: hard cap prevents infinite poll if scan hangs permanently
+        const MAX_ATTEMPTS = 40; // 40 × 3s = 2 minutes maximum
         const minAttempts = 3;   // wait at least 9 seconds before early exit
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        let networkErrors = 0;
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
             const mismatchRes = await fetch(
@@ -558,6 +584,7 @@ export default function ValidationPanelPage() {
               { headers: { Authorization: `Bearer ${token}` } }
             );
             if (mismatchRes.ok) {
+              networkErrors = 0;
               const freshMismatches: Mismatch[] = await mismatchRes.json();
               setMismatches(freshMismatches);
               // Only stop early if results changed AND we've waited the minimum time
@@ -566,8 +593,16 @@ export default function ValidationPanelPage() {
               }
             }
           } catch {
-            // Silently retry on network errors
+            // ARC-FE-05: abort after 5 consecutive network errors
+            if (++networkErrors >= 5) {
+              setError("Scan polling stopped — too many network errors. Refresh to see results.");
+              break;
+            }
           }
+        }
+        // ARC-FE-05: notify user if scan is still not done after max wait
+        if (isScanning) {
+          setError("The scan is taking longer than expected. Refresh the page to check results.");
         }
         // Final full refresh to sync documents + mismatches
         await fetchData();
@@ -1713,8 +1748,15 @@ export default function ValidationPanelPage() {
                   <option value="">Select document…</option>
                   {documents.map((d) => <option key={d.id} value={d.id}>{d.filename}</option>)}
                 </select>
-                {coverageMatrixDocId && !coverageMatrix && (
-                  <Loader2 className="h-4 w-4 animate-spin text-purple-500" />
+                {/* ARC-FE-04: distinct loading vs empty states */}
+                {coverageMatrixLoading && (
+                  <div className="flex items-center gap-2 text-purple-600 text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Loading matrix…</span>
+                  </div>
+                )}
+                {coverageMatrixDocId && !coverageMatrixLoading && !coverageMatrix && (
+                  <p className="text-xs text-gray-400 italic">No coverage data yet — click a document to load.</p>
                 )}
               </div>
 

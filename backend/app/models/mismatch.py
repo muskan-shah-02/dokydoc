@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, Optional, List
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -73,4 +73,10 @@ class Mismatch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now, nullable=False
+    )
+
+    # ARC-BE-05 / ARC-DB-02: composite index for hot query path + document_id index
+    __table_args__ = (
+        Index("ix_mismatches_tenant_doc_status", "tenant_id", "document_id", "status"),
+        Index("ix_mismatches_document_id", "document_id"),
     )

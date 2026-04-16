@@ -29,6 +29,19 @@ if TYPE_CHECKING:
 # Your semaphore for rate limiting is preserved
 GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
+# ARC-BE-03: Gemini returns confidence as "High"/"Medium"/"Low" string.
+# The BOE calibration needs a float. Use this map everywhere.
+_CONFIDENCE_TO_FLOAT: dict = {"high": 0.90, "medium": 0.60, "low": 0.30}
+
+
+def _parse_confidence(value) -> float:
+    """Convert Gemini confidence string OR float to a normalised float 0.0–1.0."""
+    if isinstance(value, float):
+        return max(0.0, min(1.0, value))
+    if isinstance(value, int):
+        return max(0.0, min(1.0, float(value)))
+    return _CONFIDENCE_TO_FLOAT.get(str(value).lower().strip(), 0.5)
+
 
 def _split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
     """
@@ -605,7 +618,8 @@ class ValidationService(LoggerMixin):
                                         continue
                                     for m in fwd_result.get("mismatches", []):
                                         mismatch_type = m.get("mismatch_type", "MISMATCH")
-                                        val_confidence = float(m.get("confidence", 0.5))
+                                        # ARC-BE-03: normalise "High"/"Medium"/"Low" → float
+                                        val_confidence = _parse_confidence(m.get("confidence", 0.5))
 
                                         # Normalize to calibration categories
                                         if mismatch_type in ("MATCH", "CONSISTENT"):
