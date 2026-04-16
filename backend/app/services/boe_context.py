@@ -219,6 +219,84 @@ class BOEContext:
             )
 
     # ──────────────────────────────────────────────────────────────────────────
+    # GAP-P4-07: Confidence decay on atom change
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def apply_staleness_decay(
+        cls,
+        db: Session,
+        tenant_id: int,
+        affected_concept_names: List[str],
+        decay_factor: float = 0.70,
+    ) -> int:
+        """
+        GAP-P4-07: Downgrade ConceptMapping.confidence_score by decay_factor
+        (default 30% reduction) for all confirmed mappings whose concept name
+        matches any of the affected names.
+
+        Called by AtomDiffService after detecting MODIFIED or DELETED atoms
+        so that stale high-confidence mappings are forced back through Gemini.
+
+        Args:
+            db                   SQLAlchemy session
+            tenant_id            Tenant scope
+            affected_concept_names  Concept names extracted from modified/deleted atoms
+            decay_factor         Multiplier applied to current score (0.70 = 30% drop)
+
+        Returns:
+            Number of ConceptMapping rows updated.
+        """
+        if not affected_concept_names:
+            return 0
+        try:
+            from app.models.concept_mapping import ConceptMapping
+            from app.models.concept import Concept
+            from sqlalchemy import text as sa_text
+
+            # Normalise names for case-insensitive matching
+            names_lower = {n.lower().strip() for n in affected_concept_names if n}
+
+            # Load mappings whose document or code concept name overlaps
+            mappings = (
+                db.query(ConceptMapping)
+                .join(Concept, ConceptMapping.document_concept_id == Concept.id)
+                .filter(
+                    ConceptMapping.tenant_id == tenant_id,
+                    ConceptMapping.confidence_score >= cls.AUTO_APPROVE_THRESHOLD,
+                )
+                .all()
+            )
+
+            decayed = 0
+            for cm in mappings:
+                try:
+                    doc_name = (cm.document_concept.name or "").lower().strip()
+                    code_name = (cm.code_concept.name or "").lower().strip()
+                    if doc_name in names_lower or code_name in names_lower:
+                        old_score = cm.confidence_score
+                        cm.confidence_score = round(old_score * decay_factor, 4)
+                        decayed += 1
+                        _logger.info(
+                            f"[GAP-P4-07] Decayed mapping {cm.id} "
+                            f"({doc_name!r}↔{code_name!r}): "
+                            f"{old_score:.3f} → {cm.confidence_score:.3f}"
+                        )
+                except Exception:
+                    continue
+
+            if decayed:
+                db.commit()
+            _logger.info(
+                f"[GAP-P4-07] Staleness decay applied: {decayed} mappings "
+                f"downgraded for tenant {tenant_id}"
+            )
+            return decayed
+        except Exception as e:
+            _logger.warning(f"[GAP-P4-07] Staleness decay failed (non-fatal): {e}")
+            return 0
+
+    # ──────────────────────────────────────────────────────────────────────────
     # O(1) lookup methods
     # ──────────────────────────────────────────────────────────────────────────
 

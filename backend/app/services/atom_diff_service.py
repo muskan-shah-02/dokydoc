@@ -204,6 +204,26 @@ class AtomDiffService:
             f"+{len(diff.added)} added, ~{len(diff.modified)} modified, "
             f"={len(diff.unchanged)} unchanged, -{len(diff.deleted_atom_ids)} deleted"
         )
+
+        # GAP-P4-07: Decay BOE confidence for concepts whose atoms changed/deleted.
+        # Forces the validation engine to re-verify them via Gemini instead of
+        # blindly auto-approving stale high-confidence mappings.
+        if diff.modified or diff.deleted_atom_ids:
+            try:
+                from app.services.boe_context import BOEContext
+                affected_names = [d.new_atom_content[:60] for d in diff.modified]
+                # Fetch content of deleted atoms for their concept names
+                for atom in prior_atoms:
+                    if atom.id in set(diff.deleted_atom_ids):
+                        affected_names.append(atom.content[:60])
+                BOEContext.apply_staleness_decay(
+                    db=db,
+                    tenant_id=tenant_id,
+                    affected_concept_names=affected_names,
+                )
+            except Exception as decay_err:
+                logger.warning(f"[GAP-P4-07] Decay hook failed (non-fatal): {decay_err}")
+
         return diff
 
 

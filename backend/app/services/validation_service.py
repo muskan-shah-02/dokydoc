@@ -29,6 +29,35 @@ if TYPE_CHECKING:
 # Your semaphore for rate limiting is preserved
 GEMINI_API_SEMAPHORE = asyncio.Semaphore(5)
 
+
+def _split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """
+    GAP-P4-01: Recursively split text into chunks at paragraph/sentence
+    boundaries to avoid cutting requirements mid-sentence.
+    Tries to break at double-newline, then single newline, then space.
+    """
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks: List[str] = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end >= len(text):
+            chunks.append(text[start:])
+            break
+        # Prefer paragraph boundary
+        boundary = text.rfind("\n\n", start, end)
+        if boundary == -1:
+            boundary = text.rfind("\n", start, end)
+        if boundary == -1:
+            boundary = text.rfind(" ", start, end)
+        if boundary == -1 or boundary <= start:
+            boundary = end  # hard cut as last resort
+        chunks.append(text[start:boundary])
+        start = max(boundary - overlap, start + 1)
+    return chunks
+
 class ValidationService(LoggerMixin):
     
     def __init__(self):
@@ -199,7 +228,7 @@ class ValidationService(LoggerMixin):
         doc_text = ""
         raw = getattr(document, "raw_text", None) or ""
         if raw and len(raw) >= 200:
-            doc_text = raw[:12000]
+            doc_text = raw
         else:
             # Fallback: synthesise from AnalysisResult.structured_data fields
             try:
@@ -216,7 +245,7 @@ class ValidationService(LoggerMixin):
                             parts.extend(str(v)[:300] for v in val[:10])
                         elif isinstance(val, str) and val:
                             parts.append(val[:500])
-                doc_text = "\n".join(parts)[:12000]
+                doc_text = "\n".join(parts)
             except Exception as e:
                 self.logger.warning(f"Could not build doc text from analysis rows: {e}")
 
@@ -232,9 +261,35 @@ class ValidationService(LoggerMixin):
             f"({len(doc_text)} chars) — version {doc_version}"
         )
 
-        atoms_data = await gemini_service.call_gemini_for_atomization(
-            doc_text, tenant_id=tenant_id, user_id=user_id, db=db  # P5-08
-        )
+        # GAP-P4-01: Chunked atomization — split large BRDs into overlapping
+        # chunks and merge atoms, rather than hard-truncating at 12 000 chars.
+        CHUNK_SIZE = 10_000   # chars per Gemini call
+        CHUNK_OVERLAP = 500   # trailing overlap to avoid boundary cuts
+        atoms_data: list = []
+        if len(doc_text) <= CHUNK_SIZE:
+            atoms_data = await gemini_service.call_gemini_for_atomization(
+                doc_text, tenant_id=tenant_id, user_id=user_id, db=db
+            )
+        else:
+            chunks = _split_into_chunks(doc_text, CHUNK_SIZE, CHUNK_OVERLAP)
+            self.logger.info(
+                f"[GAP-P4-01] BRD too large ({len(doc_text)} chars) — "
+                f"atomizing in {len(chunks)} chunks"
+            )
+            seen_contents: set = set()
+            for i, chunk in enumerate(chunks):
+                chunk_atoms = await gemini_service.call_gemini_for_atomization(
+                    chunk, tenant_id=tenant_id, user_id=user_id, db=db
+                )
+                for atom in (chunk_atoms or []):
+                    norm = " ".join(atom.get("content", "").lower().split())[:120]
+                    if norm and norm not in seen_contents:
+                        seen_contents.add(norm)
+                        atoms_data.append(atom)
+            self.logger.info(
+                f"[GAP-P4-01] Chunked atomization produced {len(atoms_data)} "
+                f"de-duped atoms across {len(chunks)} chunks"
+            )
 
         if not atoms_data:
             self.logger.warning(f"Atomization returned 0 atoms for doc {document.id}")

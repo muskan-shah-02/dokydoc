@@ -561,8 +561,18 @@ async def create_jira_issue_from_mismatch(
         raise HTTPException(status_code=404, detail="No active Jira integration found.")
 
     from app import crud as app_crud
-    mismatch = app_crud.mismatch.get(db, id=mismatch_id)
-    if not mismatch or mismatch.tenant_id != tenant_id:
+    from app.models.mismatch import Mismatch as MismatchModel
+
+    # GAP-P5B-03A: SELECT FOR UPDATE acquires a row-level lock so concurrent
+    # requests are serialised. The second request will see jira_issue_key already
+    # set and return 409 rather than creating a duplicate Jira ticket.
+    mismatch = (
+        db.query(MismatchModel)
+        .filter(MismatchModel.id == mismatch_id, MismatchModel.tenant_id == tenant_id)
+        .with_for_update(nowait=False)
+        .first()
+    )
+    if not mismatch:
         raise HTTPException(status_code=404, detail="Mismatch not found.")
 
     if mismatch.jira_issue_key:

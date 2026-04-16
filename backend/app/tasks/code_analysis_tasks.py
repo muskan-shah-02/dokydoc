@@ -1607,6 +1607,9 @@ def auto_revalidate_after_analysis(self, repo_id: int, tenant_id: int):
 
         re_validated = 0
         auto_closed = 0
+        # GAP-P5B-06: Track mismatch IDs we set to in_progress so we can
+        # roll them back to 'open' if the task ultimately fails.
+        marked_in_progress_ids: list = []
 
         for link in links:
             try:
@@ -1630,13 +1633,7 @@ def auto_revalidate_after_analysis(self, repo_id: int, tenant_id: int):
                 if not component or not getattr(component, 'structured_analysis', None):
                     continue
 
-                # Auto-close mismatches that are stale (older than 24h + component re-analyzed)
-                # This is a lightweight heuristic — full re-validation is expensive
                 for m in existing_open:
-                    # If this mismatch's component was re-analyzed after the mismatch was created,
-                    # mark as needs_recheck — don't auto-close without running validation
-                    # Full re-run would require the validation service (async, expensive)
-                    # For P5B-06, we mark as in_progress to signal "pending recheck"
                     component_updated = getattr(component, 'updated_at', None)
                     if component_updated and component_updated > m.created_at:
                         if m.status == "open":
@@ -1644,12 +1641,14 @@ def auto_revalidate_after_analysis(self, repo_id: int, tenant_id: int):
                             m.resolution_note = (m.resolution_note or "") + \
                                 f"\n[P5B-06] Component re-analyzed at {component_updated.isoformat()} — recheck pending."
                             m.updated_at = datetime.now()
+                            marked_in_progress_ids.append(m.id)
 
                 db.commit()
                 re_validated += 1
 
             except Exception as link_err:
                 logger.warning(f"[P5B-06] Link {link.id} re-validation error: {link_err}")
+                db.rollback()
                 continue
 
         logger.info(
@@ -1660,8 +1659,27 @@ def auto_revalidate_after_analysis(self, repo_id: int, tenant_id: int):
 
     except Exception as exc:
         logger.error(f"[P5B-06] Auto re-validation failed for repo {repo_id}: {exc}")
+        # GAP-P5B-06: DLQ rollback — revert any in_progress we set back to open
+        # so the BA is never permanently blocked from sign-off.
+        if marked_in_progress_ids:
+            try:
+                from app.models.mismatch import Mismatch as MismatchModel
+                db.query(MismatchModel).filter(
+                    MismatchModel.id.in_(marked_in_progress_ids),
+                    MismatchModel.status == "in_progress",
+                ).update(
+                    {"status": "open", "resolution_note": MismatchModel.resolution_note},
+                    synchronize_session=False,
+                )
+                db.commit()
+                logger.info(
+                    f"[GAP-P5B-06] Rolled back {len(marked_in_progress_ids)} "
+                    f"mismatches from in_progress → open after task failure"
+                )
+            except Exception as rb_err:
+                logger.error(f"[GAP-P5B-06] Rollback itself failed: {rb_err}")
         try:
-            self.retry(exc=exc)
+            self.retry(exc=exc, countdown=60)
         except Exception:
             pass
     finally:
