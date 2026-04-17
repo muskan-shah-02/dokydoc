@@ -9,6 +9,7 @@ Provides aggregated metrics for the analytics dashboard:
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from typing import Any
 
 from app.api import deps
 from app import models
@@ -136,3 +137,140 @@ def get_activity_metrics(
         f"concepts={result['total_concepts']}"
     )
     return result
+
+
+# ── P5C-09: Cross-Project Aggregate Compliance Dashboard ─────────────────────
+
+@router.get("/compliance-overview")
+def get_compliance_overview(
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-09: CTO/VP dashboard — aggregate compliance across all documents in the tenant.
+    Returns overall compliance %, per-document breakdown, mismatch severity, regulatory risk,
+    and QA time saved estimate.
+    """
+    from app.models.document import Document
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.mismatch import Mismatch
+    from app.models.compliance_score_snapshot import ComplianceScoreSnapshot
+    from app.models.tenant import Tenant
+    from sqlalchemy import func, distinct
+    from datetime import date
+
+    docs_with_atoms = db.query(
+        RequirementAtom.document_id,
+        func.count(RequirementAtom.id).label("atom_count"),
+    ).filter(RequirementAtom.tenant_id == tenant_id).group_by(RequirementAtom.document_id).all()
+
+    doc_ids = [r.document_id for r in docs_with_atoms]
+    atom_count_by_doc = {r.document_id: r.atom_count for r in docs_with_atoms}
+
+    if not doc_ids:
+        return {
+            "tenant_id": tenant_id, "total_documents": 0, "total_atoms": 0,
+            "overall_compliance_pct": 100.0, "total_open_mismatches": 0,
+            "mismatch_breakdown": {}, "regulatory_risk": {},
+            "qa_time_saved_hours": 0.0, "auto_testable_atoms": 0,
+            "qa_baseline_hours_per_atom": 0.5, "projects": [],
+            "generated_at": date.today().isoformat(),
+        }
+
+    latest_subq = db.query(
+        ComplianceScoreSnapshot.document_id,
+        func.max(ComplianceScoreSnapshot.snapshot_date).label("latest_date"),
+    ).filter(
+        ComplianceScoreSnapshot.tenant_id == tenant_id,
+        ComplianceScoreSnapshot.document_id.in_(doc_ids),
+    ).group_by(ComplianceScoreSnapshot.document_id).subquery()
+
+    latest_snapshots = db.query(ComplianceScoreSnapshot).join(
+        latest_subq,
+        (ComplianceScoreSnapshot.document_id == latest_subq.c.document_id) &
+        (ComplianceScoreSnapshot.snapshot_date == latest_subq.c.latest_date),
+    ).all()
+    score_by_doc = {s.document_id: s for s in latest_snapshots}
+
+    docs = db.query(Document).filter(Document.id.in_(doc_ids), Document.tenant_id == tenant_id).all()
+    doc_meta = {d.id: d for d in docs}
+
+    mismatch_rows = db.query(
+        Mismatch.severity, func.count(Mismatch.id).label("count"),
+    ).filter(
+        Mismatch.tenant_id == tenant_id,
+        Mismatch.document_id.in_(doc_ids),
+        Mismatch.status.in_(["open", "in_progress"]),
+    ).group_by(Mismatch.severity).all()
+
+    mismatch_breakdown = {r.severity: r.count for r in mismatch_rows}
+    total_open_mismatches = sum(mismatch_breakdown.values())
+
+    regulatory_risk: dict = {}
+    try:
+        reg_rows = db.execute(
+            """
+            SELECT ra.regulatory_tags, COUNT(*) as cnt
+            FROM requirement_atoms ra
+            WHERE ra.tenant_id = :tenant_id
+              AND ra.document_id = ANY(:doc_ids)
+              AND ra.regulatory_tags IS NOT NULL
+              AND array_length(ra.regulatory_tags, 1) > 0
+            GROUP BY ra.regulatory_tags
+            """,
+            {"tenant_id": tenant_id, "doc_ids": doc_ids}
+        ).fetchall()
+        for row in reg_rows:
+            for tag in (row[0] or []):
+                regulatory_risk[tag] = regulatory_risk.get(tag, 0) + row[1]
+    except Exception:
+        pass
+
+    auto_testable_count = db.query(func.count(RequirementAtom.id)).filter(
+        RequirementAtom.tenant_id == tenant_id,
+        RequirementAtom.document_id.in_(doc_ids),
+        RequirementAtom.testability.in_(["static", "runtime"]),
+    ).scalar() or 0
+
+    tenant_obj = db.query(Tenant).filter_by(id=tenant_id).first()
+    ts = (tenant_obj.settings if tenant_obj and hasattr(tenant_obj, "settings") and tenant_obj.settings else {})
+    baseline_hours = float(ts.get("qa_baseline_hours_per_atom", 0.5))
+    qa_time_saved = round(auto_testable_count * baseline_hours, 1)
+
+    total_atoms = sum(atom_count_by_doc.values())
+    weighted_sum = sum(
+        (score_by_doc[did].score_percentage if did in score_by_doc else 100.0) * atom_count_by_doc[did]
+        for did in doc_ids
+    )
+    overall_compliance = round(weighted_sum / total_atoms, 1) if total_atoms > 0 else 100.0
+
+    projects = []
+    for doc_id in doc_ids:
+        snap = score_by_doc.get(doc_id)
+        doc = doc_meta.get(doc_id)
+        projects.append({
+            "document_id": doc_id,
+            "title": doc.title if doc else f"Document {doc_id}",
+            "atom_count": atom_count_by_doc[doc_id],
+            "compliance_score": snap.score_percentage if snap else None,
+            "open_mismatches": snap.open_mismatches if snap else 0,
+            "critical_mismatches": snap.critical_mismatches if snap else 0,
+            "last_snapshot_date": snap.snapshot_date.isoformat() if snap else None,
+        })
+    projects.sort(key=lambda p: p["compliance_score"] if p["compliance_score"] is not None else 100.0)
+
+    return {
+        "tenant_id": tenant_id,
+        "total_documents": len(doc_ids),
+        "total_atoms": total_atoms,
+        "overall_compliance_pct": overall_compliance,
+        "total_open_mismatches": total_open_mismatches,
+        "mismatch_breakdown": mismatch_breakdown,
+        "regulatory_risk": regulatory_risk,
+        "qa_time_saved_hours": qa_time_saved,
+        "auto_testable_atoms": auto_testable_count,
+        "qa_baseline_hours_per_atom": baseline_hours,
+        "projects": projects,
+        "generated_at": date.today().isoformat(),
+    }

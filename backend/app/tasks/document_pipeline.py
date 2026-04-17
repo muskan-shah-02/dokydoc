@@ -198,6 +198,38 @@ async def _run_async_pipeline(db, document, storage_path, document_id, tenant_id
                             atomized_at_upload=True,  # P4-01: flag eagerly-created atoms
                         )
                         logger.info(f"[P4-01] Pre-atomization complete for document {document_id}")
+                        # P5C-01: Generate file suggestions after atomization
+                        try:
+                            from app.services.file_suggestion_service import file_suggestion_service
+                            await file_suggestion_service.generate_and_store(
+                                db,
+                                document_id=document_id,
+                                tenant_id=tenant_id,
+                            )
+                        except Exception as fs_err:
+                            logger.warning(f"[P5C-01] File suggestion generation failed (non-critical): {fs_err}")
+                        # P5C-04: Auto-create UAT checklist from manual-testability atoms
+                        try:
+                            from app.models.requirement_atom import RequirementAtom
+                            from app.models.uat_checklist_item import UATChecklistItem
+                            db.query(UATChecklistItem).filter_by(
+                                document_id=document_id, tenant_id=tenant_id,
+                            ).delete()
+                            manual_atoms = db.query(RequirementAtom).filter(
+                                RequirementAtom.document_id == document_id,
+                                RequirementAtom.tenant_id == tenant_id,
+                                RequirementAtom.testability == "manual",
+                            ).all()
+                            for atom in manual_atoms:
+                                db.add(UATChecklistItem(
+                                    tenant_id=tenant_id,
+                                    document_id=document_id,
+                                    atom_id=atom.id,
+                                ))
+                            db.commit()
+                            logger.info(f"[P5C-04] Created {len(manual_atoms)} UAT checklist items for doc {document_id}")
+                        except Exception as uat_err:
+                            logger.warning(f"[P5C-04] UAT checklist creation failed (non-critical): {uat_err}")
                     except Exception as atom_err:
                         # Never fail the pipeline for pre-atomization errors
                         logger.warning(

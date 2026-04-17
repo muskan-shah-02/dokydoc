@@ -1,6 +1,7 @@
 # backend/app/worker.py
 
 from celery import Celery
+from celery.schedules import crontab
 from app.core.config import settings
 
 # Create the Celery app instance
@@ -15,6 +16,8 @@ celery_app = Celery(
         "app.tasks.embedding_tasks",      # Phase 2: Embedding backfill + concept embeddings
         "app.tasks.document_pipeline",    # Document processing pipeline
         "app.tasks.tenant_tasks",         # P5-04: Industry auto-detection + profile generation
+        "app.tasks.analytics_tasks",      # P5C-08: Nightly compliance snapshots
+        "app.tasks.test_generation_tasks", # P5C-05: Test suite generation
     ]
 )
 
@@ -28,6 +31,14 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
     task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    beat_schedule={
+        # P5C-08: Nightly compliance score snapshots for all active documents
+        "nightly-compliance-snapshots": {
+            "task": "nightly_compliance_snapshots",
+            "schedule": crontab(hour=0, minute=0),  # midnight UTC
+            "options": {"expires": 3600},
+        },
+    },
 )
 
 if __name__ == "__main__":

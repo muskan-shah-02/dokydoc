@@ -76,6 +76,9 @@ class RequirementAtom(Base):
     # P5B-08: Regulatory frameworks applicable to this atom (e.g. ["PCI-DSS", "RBI"])
     regulatory_tags: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
 
+    # P5C-04: Testability classification — static | runtime | manual
+    testability: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
     document: Mapped["Document"] = relationship("Document")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)

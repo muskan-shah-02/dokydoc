@@ -65,6 +65,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { MismatchFeedback } from "@/components/feedback/MismatchFeedback";
+import { MismatchSuggestedFix } from "@/components/validation/MismatchSuggestedFix";
+import { MismatchClarificationPanel } from "@/components/validation/MismatchClarificationPanel";
+import { ComplianceTrendChart } from "@/components/validation/ComplianceTrendChart";
+import { TestSuiteDownload } from "@/components/validation/TestSuiteDownload";
+import { UATChecklist } from "@/components/validation/UATChecklist";
 
 // --- Data Structures ---
 interface Document {
@@ -1631,6 +1636,10 @@ export default function ValidationPanelPage() {
                                       )}
                                     </div>
                                   )}
+                                  {/* P5C-07: AI Suggested Fix */}
+                                  <MismatchSuggestedFix mismatchId={mismatch.id} />
+                                  {/* P5C-03: Clarification Thread */}
+                                  <MismatchClarificationPanel mismatchId={mismatch.id} />
                                 </div>
                               ))}
                             </div>
@@ -1643,6 +1652,34 @@ export default function ValidationPanelPage() {
               })()}
             </CardContent>
           </Card>
+          {/* P5C-08: Compliance Trend Chart */}
+          {focusedDocId && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-semibold">Compliance Trend</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ComplianceTrendChart documentId={focusedDocId} />
+              </CardContent>
+            </Card>
+          )}
+          {/* P5C-04: UAT Checklist */}
+          {focusedDocId && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-semibold">UAT Checklist</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <UATChecklist documentId={focusedDocId} />
+              </CardContent>
+            </Card>
+          )}
+          {/* P5C-05: Test Suite Download */}
+          {focusedDocId && (
+            <div className="flex justify-end">
+              <TestSuiteDownload documentId={focusedDocId} />
+            </div>
+          )}
           {/* P5B-12: BA Sign-Off Panel */}
           {focusedDocId && (
             <Card className="border-t-4 border-t-green-500">

@@ -339,6 +339,28 @@ def static_analysis_worker(
             except Exception as onto_err:
                 logger.warning(f"Inline ontology extraction failed (non-critical): {onto_err}")
 
+        # P5C-01: Mark matching file suggestions as fulfilled
+        try:
+            from app.services.file_suggestion_service import file_suggestion_service
+            from app.models.document_code_link import DocumentCodeLink
+            linked_doc_ids = [
+                r[0] for r in db.query(DocumentCodeLink.document_id).filter(
+                    DocumentCodeLink.code_component_id == component_id,
+                    DocumentCodeLink.tenant_id == tenant_id,
+                ).distinct().all()
+            ]
+            comp_name = file_path or component.name or ""
+            for doc_id in linked_doc_ids:
+                file_suggestion_service.mark_fulfilled(
+                    db,
+                    document_id=doc_id,
+                    tenant_id=tenant_id,
+                    filename=comp_name.split("/")[-1],
+                    component_id=component_id,
+                )
+        except Exception as fs_err:
+            logger.warning(f"[P5C-01] mark_fulfilled failed (non-critical): {fs_err}")
+
         logger.info(f"ANALYSIS_WORKER completed for component {component_id}")
         return {
             "status": "completed",

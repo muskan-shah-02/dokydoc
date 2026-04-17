@@ -93,6 +93,8 @@ class CRUDRequirementAtom(CRUDBase[RequirementAtom, RequirementAtomCreate, Requi
                 delta_status=atom.get("_delta_status"),
                 # P5B-08: regulatory framework tags from Gemini atomization
                 regulatory_tags=atom.get("regulatory_tags") or None,
+                # P5C-04: testability classification (static/runtime/manual)
+                testability=atom.get("testability") or atom.get("_testability") or "manual",
                 created_at=now,
                 updated_at=now,
             )

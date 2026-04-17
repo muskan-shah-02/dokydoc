@@ -29,6 +29,11 @@ from app.models.audit_log import AuditLog  # noqa
 from app.models.notification import Notification  # noqa
 from app.models.brd_sign_off import BRDSignOff  # noqa  Phase 5B: BA Sign-Off
 from app.models.compliance_framework import ComplianceFramework, TenantComplianceSelection  # noqa  Phase 6
+from app.models.file_suggestion import FileSuggestion  # noqa  P5C-01
+from app.models.mismatch_clarification import MismatchClarification  # noqa  P5C-03
+from app.models.uat_checklist_item import UATChecklistItem  # noqa  P5C-04
+from app.models.ci_webhook_config import CIWebhookConfig  # noqa  P5C-06
+from app.models.compliance_score_snapshot import ComplianceScoreSnapshot  # noqa  P5C-08
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}

@@ -193,6 +193,15 @@ class ValidationService(LoggerMixin):
                         successful_validations += 1
 
                 self.logger.info(f"Validation completed: {successful_validations}/{len(links)} links processed successfully")
+                # P5C-08: Capture compliance snapshot after scan
+                try:
+                    from app.services.compliance_snapshot_service import compliance_snapshot_service
+                    for doc_id in document_ids:
+                        compliance_snapshot_service.capture_for_document(
+                            db=db, document_id=doc_id, tenant_id=tenant_id or 0,
+                        )
+                except Exception as snap_err:
+                    self.logger.warning(f"[P5C-08] Post-scan compliance snapshot failed (non-fatal): {snap_err}")
 
             except Exception as e:
                 self.logger.error(f"Top-level error in validation scan for user {user_id}: {e}", exc_info=True)

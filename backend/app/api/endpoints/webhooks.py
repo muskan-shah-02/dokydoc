@@ -18,8 +18,9 @@ Security:
 
 import hmac
 import hashlib
-from typing import Optional
+from typing import Optional, List, Any
 from fastapi import APIRouter, Depends, Request, Header, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -370,4 +371,156 @@ def post_pr_analysis_comment(
         "pr_number": pr_number,
         "comment_id": result.get("id") if result else None,
         "summary_preview": summary[:500],
+    }
+
+
+# ── P5C-06: CI Test Result Webhook ───────────────────────────────────────────
+
+class CITestResult(BaseModel):
+    test_name: str
+    status: str                              # "pass" | "fail" | "error"
+    error_message: Optional[str] = None
+    file_path: Optional[str] = None
+    atom_id_hint: Optional[str] = None      # e.g. "REQ-004"
+    duration_ms: Optional[float] = None
+
+
+class CIWebhookPayload(BaseModel):
+    document_id: int
+    run_id: str
+    commit_sha: Optional[str] = None
+    test_results: List[CITestResult]
+
+
+def _verify_ci_hmac(payload_bytes: bytes, signature_header: str, secret: str) -> bool:
+    """Verify X-DokyDoc-Signature: sha256=<hmac> header."""
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+    received = signature_header[7:]
+    return hmac.compare_digest(expected, received)
+
+
+@router.post("/ci/test-results", status_code=202)
+async def receive_ci_test_results(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    P5C-06: Receive CI pipeline test results and auto-create mismatches for failures.
+    Authentication: HMAC-SHA256 signature in X-DokyDoc-Signature header.
+    Auto-closes runtime_test_failure mismatches for tests that now pass.
+    """
+    from app.models.document import Document
+    from app.models.ci_webhook_config import CIWebhookConfig
+    from app.models.requirement_atom import RequirementAtom
+    from app.models.mismatch import Mismatch
+    from app.models.code_component import CodeComponent
+
+    raw_body = await request.body()
+    try:
+        payload_data = await request.json()
+        payload = CIWebhookPayload(**payload_data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid payload: {e}")
+
+    doc = db.get(Document, payload.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=doc.tenant_id).first()
+    if not config:
+        raise HTTPException(status_code=401, detail="CI webhook not configured for this tenant")
+
+    sig_header = request.headers.get("X-DokyDoc-Signature", "")
+    if not _verify_ci_hmac(raw_body, sig_header, config.webhook_secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    failures = [r for r in payload.test_results if r.status in ("fail", "error")]
+    created_mismatch_ids = []
+
+    for result in failures:
+        atom = None
+        if result.atom_id_hint:
+            atom = db.query(RequirementAtom).filter(
+                RequirementAtom.document_id == payload.document_id,
+                RequirementAtom.tenant_id == doc.tenant_id,
+                RequirementAtom.atom_id == result.atom_id_hint,
+            ).first()
+
+        # Dedup: skip if same run_id + test_name already created a mismatch
+        existing = db.query(Mismatch).filter(
+            Mismatch.document_id == payload.document_id,
+            Mismatch.tenant_id == doc.tenant_id,
+            Mismatch.details["ci_run_id"].astext == payload.run_id,
+            Mismatch.details["test_name"].astext == result.test_name,
+        ).first()
+        if existing:
+            continue
+
+        # Find or create synthetic CI code component
+        ci_component = db.query(CodeComponent).filter_by(
+            tenant_id=doc.tenant_id,
+            name="__ci_pipeline__",
+        ).first()
+        if not ci_component:
+            ci_component = CodeComponent(
+                tenant_id=doc.tenant_id,
+                name="CI Pipeline",
+                component_type="ci",
+                location="__ci_pipeline__",
+            )
+            db.add(ci_component)
+            db.flush()
+
+        severity = "high" if (atom and getattr(atom, "criticality", None) in ("critical", "high")) else "medium"
+
+        mismatch = Mismatch(
+            tenant_id=doc.tenant_id,
+            document_id=payload.document_id,
+            code_component_id=ci_component.id,
+            requirement_atom_id=atom.id if atom else None,
+            owner_id=doc.owner_id,
+            mismatch_type="runtime_test_failure",
+            severity=severity,
+            status="open",
+            direction="forward",
+            description=(
+                f"CI test failed: {result.test_name}. "
+                f"{result.error_message or 'No error message provided.'}"
+            ),
+            details={
+                "ci_run_id": payload.run_id,
+                "commit_sha": payload.commit_sha,
+                "test_name": result.test_name,
+                "test_file": result.file_path,
+                "error_message": result.error_message,
+                "duration_ms": result.duration_ms,
+                "atom_id_hint": result.atom_id_hint,
+            },
+        )
+        db.add(mismatch)
+        db.flush()
+        created_mismatch_ids.append(mismatch.id)
+
+    # Auto-close previously-open runtime_test_failure mismatches for tests that now pass
+    passing_test_names = {r.test_name for r in payload.test_results if r.status == "pass"}
+    if passing_test_names:
+        stale = db.query(Mismatch).filter(
+            Mismatch.document_id == payload.document_id,
+            Mismatch.tenant_id == doc.tenant_id,
+            Mismatch.mismatch_type == "runtime_test_failure",
+            Mismatch.status == "open",
+        ).all()
+        for m in stale:
+            if m.details and m.details.get("test_name") in passing_test_names:
+                m.status = "auto_closed"
+
+    db.commit()
+
+    return {
+        "received": len(payload.test_results),
+        "failures": len(failures),
+        "mismatches_created": len(created_mismatch_ids),
+        "mismatch_ids": created_mismatch_ids,
     }

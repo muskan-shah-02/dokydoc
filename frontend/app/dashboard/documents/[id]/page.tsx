@@ -66,6 +66,8 @@ import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
 import { Network, History, Upload, GitCompare } from "lucide-react";
 import { VersionHistoryPanel } from "@/components/documents/VersionHistoryPanel";
 import { VersionDiffModal } from "@/components/documents/VersionDiffModal";
+import { FileSuggestionBanner } from "@/components/documents/FileSuggestionBanner";
+import { RequestUploadModal } from "@/components/documents/RequestUploadModal";
 
 // --- 1. Types ---
 
@@ -1122,6 +1124,13 @@ export default function DocumentDetailPage() {
             <ArrowRight className="w-4 h-4 mr-2" /> Back
           </Button>
         </div>
+      </div>
+
+      {/* P5C-01: File Suggestions Banner */}
+      <FileSuggestionBanner documentId={doc.id} />
+      {/* P5C-02: Request Upload Modal (floating trigger) */}
+      <div className="flex justify-end print:hidden">
+        <RequestUploadModal documentId={doc.id} />
       </div>
 
       <AnalysisStatusHUD doc={doc} onStop={handleStopAnalysis} />

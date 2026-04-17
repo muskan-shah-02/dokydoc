@@ -2,9 +2,10 @@
 # Sprint 9: Added JIRA validation scan endpoint.
 
 from typing import Any, List, Optional
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Depends, BackgroundTasks, status, HTTPException, Query, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import io
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -810,4 +811,418 @@ def get_sign_off_history(
             for s in sign_offs
         ],
         "total": len(sign_offs),
+    }
+
+
+# ── P5C-03: Request Clarification Workflow ────────────────────────────────────
+
+class ClarificationRequest(BaseModel):
+    question: str
+    assignee_user_id: Optional[int] = None
+
+
+class ClarificationAnswer(BaseModel):
+    answer: str
+
+
+@router.post("/mismatches/{mismatch_id}/clarification", status_code=201)
+def request_clarification(
+    mismatch_id: int,
+    body: ClarificationRequest,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-03: BA requests clarification from developer on an ambiguous mismatch."""
+    from app.crud.crud_mismatch_clarification import crud_mismatch_clarification
+    from app.models.mismatch import Mismatch
+    from app.services.notification_service import notify
+
+    mismatch = db.query(Mismatch).filter(
+        Mismatch.id == mismatch_id,
+        Mismatch.tenant_id == tenant_id,
+    ).first()
+    if not mismatch:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    try:
+        clarification = crud_mismatch_clarification.create(
+            db=db,
+            tenant_id=tenant_id,
+            mismatch_id=mismatch_id,
+            requested_by_user_id=current_user.id,
+            assignee_user_id=body.assignee_user_id,
+            question=body.question,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    notify_user_id = body.assignee_user_id or getattr(mismatch, "owner_id", None)
+    if notify_user_id:
+        notify(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=notify_user_id,
+            notification_type="clarification_requested",
+            title=f"Clarification requested on mismatch #{mismatch_id}",
+            message=(
+                f"{current_user.full_name or current_user.email} has a question: "
+                f"{body.question[:200]}"
+            ),
+            resource_type="mismatch",
+            resource_id=mismatch_id,
+            details={
+                "clarification_id": clarification.id,
+                "question": body.question,
+                "requested_by": current_user.email,
+            },
+        )
+
+    return {
+        "clarification_id": clarification.id,
+        "status": "open",
+        "message": "Clarification request created and developer notified",
+    }
+
+
+@router.post("/mismatches/{mismatch_id}/clarification/{clarification_id}/answer")
+def answer_clarification(
+    mismatch_id: int,
+    clarification_id: int,
+    body: ClarificationAnswer,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-03: Developer answers a clarification question; notifies the BA who asked."""
+    from app.crud.crud_mismatch_clarification import crud_mismatch_clarification
+    from app.services.notification_service import notify
+
+    try:
+        clarification = crud_mismatch_clarification.answer(
+            db=db,
+            clarification_id=clarification_id,
+            tenant_id=tenant_id,
+            answering_user_id=current_user.id,
+            answer=body.answer,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    notify(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=clarification.requested_by_user_id,
+        notification_type="clarification_answered",
+        title=f"Clarification answered on mismatch #{mismatch_id}",
+        message=(
+            f"{current_user.full_name or current_user.email} answered: "
+            f"{body.answer[:200]}"
+        ),
+        resource_type="mismatch",
+        resource_id=mismatch_id,
+        details={
+            "clarification_id": clarification.id,
+            "answer": body.answer,
+            "answered_by": current_user.email,
+        },
+    )
+
+    return {
+        "clarification_id": clarification.id,
+        "status": "answered",
+        "answer": clarification.answer,
+    }
+
+
+@router.get("/mismatches/{mismatch_id}/clarifications")
+def get_clarifications(
+    mismatch_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-03: Return all clarification threads for a mismatch."""
+    from app.crud.crud_mismatch_clarification import crud_mismatch_clarification
+
+    items = crud_mismatch_clarification.get_by_mismatch(
+        db=db, mismatch_id=mismatch_id, tenant_id=tenant_id,
+    )
+    return {
+        "mismatch_id": mismatch_id,
+        "clarifications": [
+            {
+                "id": c.id,
+                "question": c.question,
+                "answer": c.answer,
+                "status": c.status,
+                "requested_by_user_id": c.requested_by_user_id,
+                "assignee_user_id": c.assignee_user_id,
+                "created_at": c.created_at.isoformat(),
+                "answered_at": c.answered_at.isoformat() if c.answered_at else None,
+            }
+            for c in items
+        ],
+    }
+
+
+# ── P5C-04: UAT Checklist Endpoints ──────────────────────────────────────────
+
+class UATCheckBody(BaseModel):
+    result: str
+    notes: Optional[str] = None
+
+
+@router.get("/{document_id}/uat-checklist")
+def get_uat_checklist(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-04: Return all UAT checklist items for a document (manual-testability atoms only)."""
+    from app.models.uat_checklist_item import UATChecklistItem
+    from app.models.requirement_atom import RequirementAtom
+
+    rows = (
+        db.query(UATChecklistItem, RequirementAtom)
+        .join(RequirementAtom, UATChecklistItem.atom_id == RequirementAtom.id)
+        .filter(
+            UATChecklistItem.document_id == document_id,
+            UATChecklistItem.tenant_id == tenant_id,
+        )
+        .all()
+    )
+
+    total = len(rows)
+    checked = sum(1 for item, _ in rows if item.result is not None)
+    passed = sum(1 for item, _ in rows if item.result == "pass")
+    failed = sum(1 for item, _ in rows if item.result == "fail")
+
+    return {
+        "document_id": document_id,
+        "summary": {
+            "total": total,
+            "checked": checked,
+            "pending": total - checked,
+            "passed": passed,
+            "failed": failed,
+            "completion_pct": round(checked / total * 100) if total > 0 else 0,
+        },
+        "items": [
+            {
+                "id": item.id,
+                "atom_id": atom.atom_id,
+                "atom_type": atom.atom_type,
+                "content": atom.content,
+                "criticality": atom.criticality,
+                "result": item.result,
+                "notes": item.notes,
+                "checked_by_user_id": item.checked_by_user_id,
+                "checked_at": item.checked_at.isoformat() if item.checked_at else None,
+            }
+            for item, atom in rows
+        ],
+    }
+
+
+@router.post("/{document_id}/uat-checklist/{item_id}/check")
+def check_uat_item(
+    document_id: int,
+    item_id: int,
+    body: UATCheckBody,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-04: BA or QA marks a UAT checklist item as pass/fail/blocked with notes."""
+    from app.models.uat_checklist_item import UATChecklistItem
+
+    if body.result not in ("pass", "fail", "blocked"):
+        raise HTTPException(status_code=422, detail="result must be pass, fail, or blocked")
+
+    item = db.query(UATChecklistItem).filter(
+        UATChecklistItem.id == item_id,
+        UATChecklistItem.document_id == document_id,
+        UATChecklistItem.tenant_id == tenant_id,
+    ).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="UAT checklist item not found")
+
+    item.result = body.result
+    item.notes = body.notes
+    item.checked_by_user_id = current_user.id
+    item.checked_at = datetime.utcnow()
+    db.add(item)
+    db.commit()
+
+    return {
+        "id": item_id,
+        "result": body.result,
+        "checked_at": item.checked_at.isoformat(),
+        "message": f"UAT item marked as {body.result}",
+    }
+
+
+# ── P5C-05: Test Suite Generation ─────────────────────────────────────────────
+
+@router.post("/{document_id}/generate-tests", status_code=202)
+def trigger_test_suite_generation(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-05: Trigger async test suite generation. QA polls GET /download-tests until ready."""
+    from app.models.document import Document
+    from app.tasks.test_generation_tasks import generate_test_suite
+
+    doc = db.get(Document, document_id)
+    if not doc or doc.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    task = generate_test_suite.apply_async(
+        args=[document_id, tenant_id, doc.title or "Untitled"]
+    )
+    return {
+        "task_id": task.id,
+        "status": "generating",
+        "poll_url": f"/validation/{document_id}/download-tests",
+    }
+
+
+@router.get("/{document_id}/download-tests")
+def download_test_suite(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    """P5C-05: Download generated test suite zip. Returns 202 if still generating, 200 + zip if ready."""
+    try:
+        from app.core.redis import get_redis_client
+        redis = get_redis_client()
+        redis_key = f"test_suite:{document_id}:{tenant_id}"
+        zip_bytes = redis.get(redis_key)
+    except Exception:
+        zip_bytes = None
+
+    if not zip_bytes:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "generating",
+                "message": "Test suite is being generated. Try again in 30 seconds.",
+            },
+        )
+
+    return StreamingResponse(
+        io.BytesIO(zip_bytes),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=dokydoc_tests_doc{document_id}.zip"},
+    )
+
+
+# ── P5C-07: AI Fix Suggestion ─────────────────────────────────────────────────
+
+@router.post("/mismatches/{mismatch_id}/suggest-fix")
+async def get_fix_suggestion(
+    mismatch_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-07: Return AI-generated fix suggestion for a mismatch.
+    Generated lazily on first call, cached in mismatch.details['suggested_fix'].
+    Subsequent calls return cached result without re-calling Gemini.
+    """
+    from app.services.fix_suggestion_service import fix_suggestion_service
+
+    fix = await fix_suggestion_service.get_or_generate(
+        db=db, mismatch_id=mismatch_id, tenant_id=tenant_id,
+    )
+    return {"mismatch_id": mismatch_id, "suggested_fix": fix}
+
+
+@router.delete("/mismatches/{mismatch_id}/suggest-fix", status_code=204)
+def clear_fix_suggestion(
+    mismatch_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> None:
+    """P5C-07: Clear cached fix suggestion to force regeneration on next POST."""
+    from app.models.mismatch import Mismatch
+
+    mismatch = db.query(Mismatch).filter(
+        Mismatch.id == mismatch_id,
+        Mismatch.tenant_id == tenant_id,
+    ).first()
+    if not mismatch:
+        raise HTTPException(status_code=404, detail="Mismatch not found")
+
+    updated = dict(mismatch.details or {})
+    updated.pop("suggested_fix", None)
+    mismatch.details = updated
+    db.add(mismatch)
+    db.commit()
+
+
+# ── P5C-08: Compliance Score Trend ────────────────────────────────────────────
+
+@router.get("/{document_id}/compliance-trend")
+def get_compliance_trend(
+    document_id: int,
+    days: int = Query(default=30, ge=7, le=365),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-08: Return compliance score snapshots for the last N days for trend chart."""
+    from app.models.compliance_score_snapshot import ComplianceScoreSnapshot
+
+    since = date.today() - timedelta(days=days)
+    snapshots = db.query(ComplianceScoreSnapshot).filter(
+        ComplianceScoreSnapshot.document_id == document_id,
+        ComplianceScoreSnapshot.tenant_id == tenant_id,
+        ComplianceScoreSnapshot.snapshot_date >= since,
+    ).order_by(ComplianceScoreSnapshot.snapshot_date.asc()).all()
+
+    if not snapshots:
+        return {
+            "document_id": document_id,
+            "days": days,
+            "trend": [],
+            "direction": "neutral",
+            "change_pct": 0.0,
+            "current_score": None,
+            "baseline_score": None,
+        }
+
+    trend_data = [
+        {
+            "date": s.snapshot_date.isoformat(),
+            "score": s.score_percentage,
+            "total_atoms": s.total_atoms,
+            "covered_atoms": s.covered_atoms,
+            "open_mismatches": s.open_mismatches,
+            "critical_mismatches": s.critical_mismatches,
+        }
+        for s in snapshots
+    ]
+
+    first_score = snapshots[0].score_percentage
+    last_score = snapshots[-1].score_percentage
+    change = round(last_score - first_score, 1)
+    direction = "improving" if change > 1 else "degrading" if change < -1 else "stable"
+
+    return {
+        "document_id": document_id,
+        "days": days,
+        "trend": trend_data,
+        "direction": direction,
+        "change_pct": change,
+        "current_score": last_score,
+        "baseline_score": first_score,
     }

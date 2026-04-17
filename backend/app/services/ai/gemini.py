@@ -593,6 +593,11 @@ RULES:
 6. Extract ALL distinct requirements — aim for completeness. A 5-page BRD typically yields 30-80 atoms.
 7. P5B-08: For SECURITY_REQUIREMENT atoms, set regulatory_tags to applicable frameworks
    (e.g. ["PCI-DSS"], ["HIPAA"], ["GDPR"], ["RBI"], ["PSD2"], ["SWIFT"] — or [] if none apply).
+8. P5C-04: Set testability for each atom:
+   - "static": verifiable by reading code (API contracts, DB schema, calculations, field validations, constants)
+   - "runtime": requires executing code (response time, load, retry behavior, timeout handling)
+   - "manual": requires human judgment (UX flows, accessibility, visual design, business process correctness)
+   When in doubt, classify as "manual".
 
 Return ONLY a valid JSON array. No explanations, no markdown fences.
 
@@ -603,7 +608,8 @@ REQUIRED FORMAT:
     "atom_type": "API_CONTRACT",
     "content": "POST /auth/login returns a JWT token containing user_id and role",
     "criticality": "critical",
-    "regulatory_tags": []
+    "regulatory_tags": [],
+    "testability": "static"
   }}
 ]
 
@@ -1121,4 +1127,174 @@ async def call_gemini_for_validation(
     except Exception as e:
         logger.error(f"Gemini validation for {context.focus_area.value} failed: {e}", exc_info=True)
         return {"mismatches": [], "_cost": None, "_tokens": None}
+
+
+# ─── P5C-01: File Suggestion ──────────────────────────────────────────────────
+
+_FILE_SUGGESTION_PROMPT = """
+You are a code architecture assistant. Given a list of BRD requirement atoms,
+identify which Python/TypeScript/Go source files a developer would need to upload
+for automated validation of these requirements.
+
+For each suggested file:
+- Extract CLASS NAMES, SERVICE NAMES, FUNCTION NAMES, or MODULE NAMES mentioned
+- Map them to likely filenames (e.g. PaymentService → payment_service.py)
+- If an HTTP endpoint is referenced, suggest the router file
+
+Return ONLY valid JSON:
+{
+  "suggestions": [
+    {
+      "filename": "payment_service.py",
+      "reason": "Atoms REQ-004, REQ-007 reference PaymentService and payment logic",
+      "atom_ids": ["REQ-004", "REQ-007"],
+      "atom_count": 2,
+      "confidence": "high"
+    }
+  ]
+}
+
+Rules:
+- Maximum 8 suggestions. Only files that materially improve coverage.
+- confidence: "high" (filename explicit), "medium" (class/service implied), "low" (indirect)
+- Do NOT suggest config files, __init__.py, or test files.
+"""
+
+
+async def call_gemini_for_file_suggestions(atoms: list) -> list:
+    """P5C-01: Analyse atoms to suggest which code files to upload."""
+    import json
+    import google.generativeai as genai
+    from app.core.config import settings
+
+    if not atoms:
+        return []
+    atom_summary = "\n".join(
+        f"- [{a['atom_id']}] ({a['atom_type']}) {a['content']}"
+        for a in atoms[:60]
+    )
+    prompt = f"{_FILE_SUGGESTION_PROMPT}\n\nATOMS:\n{atom_summary}"
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel("gemini-2.0-flash")
+    response = model_client.generate_content(
+        prompt,
+        generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
+    )
+    data = json.loads(response.text)
+    return data.get("suggestions", [])
+
+
+# ─── P5C-07: AI Fix Suggestion ───────────────────────────────────────────────
+
+_FIX_SUGGESTION_PROMPT = """
+You are a senior software engineer helping fix a BRD compliance mismatch.
+
+BRD REQUIREMENT:
+{atom_content}
+
+ATOM TYPE: {atom_type}
+MISMATCH TYPE: {mismatch_type}
+MISMATCH DESCRIPTION:
+{mismatch_description}
+
+CODE EVIDENCE:
+{code_evidence}
+
+Generate a CONCISE, ACTIONABLE fix suggestion.
+
+Rules:
+1. Minimal code change to satisfy the BRD requirement
+2. One-line summary of what to change
+3. 3-10 line code snippet showing the fix
+4. Comment citing the BRD requirement
+5. Confidence: "high" if precise, "medium" if approximate, "low" if speculative
+
+Return ONLY valid JSON:
+{{
+  "summary": "One-line description of the fix",
+  "code_snippet": "The actual code change",
+  "language": "python|typescript|java|sql|etc",
+  "confidence": "high|medium|low",
+  "caveat": "Any important warning (optional, null if none)"
+}}
+"""
+
+
+async def call_gemini_for_fix_suggestion(
+    atom_content: str,
+    atom_type: str,
+    mismatch_type: str,
+    mismatch_description: str,
+    code_evidence: str,
+) -> dict:
+    """P5C-07: Generate an AI-suggested code fix for a mismatch."""
+    import json
+    import google.generativeai as genai
+    from app.core.config import settings
+
+    prompt = _FIX_SUGGESTION_PROMPT.format(
+        atom_content=atom_content,
+        atom_type=atom_type,
+        mismatch_type=mismatch_type,
+        mismatch_description=mismatch_description,
+        code_evidence=code_evidence,
+    )
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel("gemini-2.0-flash")
+    response = model_client.generate_content(
+        prompt,
+        generation_config={"temperature": 0.1, "response_mime_type": "application/json"},
+    )
+    data = json.loads(response.text)
+    return data
+
+
+# ─── P5C-05: Test Suite Generation ───────────────────────────────────────────
+
+_TEST_GENERATION_PROMPT = """
+You are a senior Python QA engineer. Generate a pytest test function for this BRD requirement atom.
+
+ATOM:
+  ID: {atom_id}
+  Type: {atom_type}
+  Content: {content}
+  Testability: {testability}
+
+GUIDELINES BY ATOM TYPE:
+- API_CONTRACT: Test HTTP endpoint exists, correct status code, response schema.
+- BUSINESS_RULE: Test calculation/condition with valid and boundary inputs.
+- DATA_CONSTRAINT: Test field validation — valid values pass, invalid fail.
+- FUNCTIONAL_REQUIREMENT: Test capability exists and produces expected output.
+- ERROR_SCENARIO: Test error case handled correctly.
+- SECURITY_REQUIREMENT: Test unauthorized access returns 401/403.
+
+RULES:
+1. Generate EXACTLY ONE pytest function named test_{{atom_id_snake}}_{{short_description}}
+2. Include ARRANGE/ACT/ASSERT comments
+3. HTTP tests: use BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000")
+4. For "runtime" testability: add pytest.mark.integration marker
+5. Do NOT import from source code directly
+6. Keep under 50 lines
+
+Return ONLY the Python code, no markdown fences.
+"""
+
+
+async def call_gemini_for_test_generation(atom: dict) -> str:
+    """P5C-05: Generate a pytest test function for a single BRD atom."""
+    import google.generativeai as genai
+    from app.core.config import settings
+
+    prompt = _TEST_GENERATION_PROMPT.format(
+        atom_id=atom["atom_id"],
+        atom_type=atom["atom_type"],
+        content=atom["content"],
+        testability=atom.get("testability", "static"),
+    )
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model_client = genai.GenerativeModel("gemini-2.0-flash")
+    response = model_client.generate_content(
+        prompt, generation_config={"temperature": 0.2}
+    )
+    return response.text.strip()
     

@@ -157,6 +157,12 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     },
     {
       icon: ShieldCheck,
+      text: "Compliance",
+      href: "/dashboard/analytics/compliance",
+      badge: "New",
+    },
+    {
+      icon: ShieldCheck,
       text: "Audit Trail",
       href: "/dashboard/audit-trail",
     },

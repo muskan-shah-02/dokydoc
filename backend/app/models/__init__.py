@@ -32,3 +32,8 @@ from .integration_config import IntegrationConfig  # Sprint 8: Integrations
 from .training_example import TrainingExample, FeedbackSource  # Phase 1: Data Flywheel
 from .brd_sign_off import BRDSignOff  # Phase 5B: BA Sign-Off Workflow
 from .compliance_framework import ComplianceFramework, TenantComplianceSelection  # Phase 6: Compliance Library
+from .file_suggestion import FileSuggestion  # P5C-01: Smart File Suggestion Engine
+from .mismatch_clarification import MismatchClarification  # P5C-03: Clarification Workflow
+from .uat_checklist_item import UATChecklistItem  # P5C-04: UAT Checklist
+from .ci_webhook_config import CIWebhookConfig  # P5C-06: CI Webhook
+from .compliance_score_snapshot import ComplianceScoreSnapshot  # P5C-08: Compliance Trend

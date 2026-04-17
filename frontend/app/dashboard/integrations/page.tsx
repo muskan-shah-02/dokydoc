@@ -29,6 +29,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { CIWebhookCard } from "@/components/settings/CIWebhookCard";
 
 // ----- Types -----
 
@@ -430,6 +431,9 @@ function IntegrationsContent() {
           onClose={() => setToast(null)}
         />
       )}
+
+      {/* P5C-06: CI Webhook Configuration */}
+      <CIWebhookCard />
 
       {/* Header */}
       <div className="flex items-center gap-3">

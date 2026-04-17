@@ -1672,3 +1672,59 @@ async def _slack_fetch_channel_history(
         lines.append(f"**{user}** _{readable_ts}_\n{text}\n")
 
     return "\n".join(lines), display_name
+
+
+# ── P5C-06: CI Webhook Setup ───────────────────────────────────────────────────
+
+@router.post("/ci/setup")
+def setup_ci_webhook(
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-06: Generate or rotate the CI webhook secret for this tenant.
+    Returns the secret to store as a CI environment variable (shown once).
+    """
+    from app.models.ci_webhook_config import CIWebhookConfig
+
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=current_user.tenant_id).first()
+    new_secret = CIWebhookConfig.generate_secret()
+
+    if config:
+        config.webhook_secret = new_secret
+    else:
+        config = CIWebhookConfig(
+            tenant_id=current_user.tenant_id,
+            webhook_secret=new_secret,
+        )
+        db.add(config)
+
+    db.commit()
+
+    webhook_url = f"{settings.BACKEND_URL}/api/v1/webhooks/ci/test-results"
+    return {
+        "webhook_url": webhook_url,
+        "secret": new_secret,
+        "env_var_name": "DOKYDOC_WEBHOOK_SECRET",
+        "instructions": (
+            "Add DOKYDOC_WEBHOOK_SECRET as a CI secret. "
+            "Compute HMAC-SHA256 of the request body and send in X-DokyDoc-Signature header."
+        ),
+    }
+
+
+@router.get("/ci/status")
+def get_ci_webhook_status(
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """P5C-06: Check whether CI webhook is configured for this tenant."""
+    from app.models.ci_webhook_config import CIWebhookConfig
+
+    config = db.query(CIWebhookConfig).filter_by(tenant_id=current_user.tenant_id).first()
+    webhook_url = f"{settings.BACKEND_URL}/api/v1/webhooks/ci/test-results"
+    return {
+        "configured": config is not None,
+        "webhook_url": webhook_url if config else None,
+        "created_at": config.created_at.isoformat() if config else None,
+    }

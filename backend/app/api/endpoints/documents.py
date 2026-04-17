@@ -9,6 +9,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request, Response, Query
 from fastapi.responses import FileResponse # Added for download endpoint
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -729,4 +730,167 @@ def get_atom_diff(
         "has_diff": has_diff,
         "atom_diff": diff if has_diff else None,
         "message": None if has_diff else "No diff available — document not yet re-uploaded",
+    }
+
+
+# ── P5C-01: File Suggestion Endpoints ────────────────────────────────────────
+
+@router.get("/{document_id}/file-suggestions")
+def get_file_suggestions(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-01: Returns AI-generated file suggestions for a document.
+    Each suggestion names a code file the developer should upload to cover specific BRD atoms.
+    """
+    from app.models.file_suggestion import FileSuggestion
+
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    suggestions = (
+        db.query(FileSuggestion)
+        .filter_by(document_id=document_id, tenant_id=tenant_id)
+        .order_by(FileSuggestion.atom_count.desc())
+        .all()
+    )
+    return {
+        "document_id": document_id,
+        "total": len(suggestions),
+        "suggestions": [
+            {
+                "id": s.id,
+                "suggested_filename": s.suggested_filename,
+                "reason": s.reason,
+                "atom_ids": s.atom_ids,
+                "atom_count": s.atom_count,
+                "fulfilled": s.fulfilled_by_component_id is not None,
+                "fulfilled_by_component_id": s.fulfilled_by_component_id,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in suggestions
+        ],
+    }
+
+
+class UploadRequestBody(BaseModel):
+    user_ids: List[int] = []                 # P5C-02: specific user IDs to notify
+    message: Optional[str] = None           # optional custom message from BA
+    suggested_filenames: List[str] = []     # P5C-02: pre-filled from P5C-01 suggestions
+
+
+@router.post("/{document_id}/request-uploads", status_code=202)
+async def request_uploads(
+    document_id: int,
+    body: Optional[UploadRequestBody] = None,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-01: Triggers (or re-triggers) AI file suggestion engine.
+    P5C-02: When body contains user_ids, also notifies those users with upload request.
+    """
+    from app.services.file_suggestion_service import file_suggestion_service
+
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Always refresh suggestions
+    try:
+        stored = await file_suggestion_service.generate_and_store(
+            db, document_id=document_id, tenant_id=tenant_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"File suggestion generation failed: {e}")
+
+    # P5C-02: Notify team members if user_ids provided
+    notified: List[int] = []
+    if body and body.user_ids:
+        from app.services.notification_service import notify
+        filenames_str = ", ".join(body.suggested_filenames) if body.suggested_filenames else "relevant code files"
+        custom_msg = body.message or ""
+        base_msg = (
+            f"{current_user.full_name or current_user.email} has requested that you upload "
+            f"{filenames_str} for BRD validation of '{document.title}'."
+        )
+        full_message = f"{base_msg} {custom_msg}".strip()
+
+        valid_users = db.query(models.User).filter(
+            models.User.id.in_(body.user_ids),
+            models.User.tenant_id == tenant_id,
+            models.User.is_active == True,
+        ).all()
+        valid_ids = {u.id for u in valid_users}
+
+        for uid in body.user_ids:
+            if uid not in valid_ids:
+                continue
+            notify(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=uid,
+                notification_type="upload_request",
+                title=f"Code upload requested for '{document.title}'",
+                message=full_message,
+                resource_type="document",
+                resource_id=document_id,
+                details={
+                    "requested_by_user_id": current_user.id,
+                    "requested_by_name": current_user.full_name or current_user.email,
+                    "suggested_filenames": body.suggested_filenames,
+                    "document_title": document.title,
+                },
+            )
+            notified.append(uid)
+
+    return {
+        "message": f"Generated {len(stored)} file suggestions" + (f"; notified {len(notified)} user(s)" if notified else ""),
+        "total": len(stored),
+        "notified_user_ids": notified,
+    }
+
+
+# ── P5C-02: Team Members Endpoint ─────────────────────────────────────────────
+
+@router.get("/{document_id}/team-members")
+def get_document_team_members(
+    document_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    P5C-02: Return active users in the tenant for the BA to select upload recipients.
+    Sorted by role: tech_lead first, then developer, then others.
+    """
+    document = crud.document.get(db=db, id=document_id, tenant_id=tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    users = db.query(models.User).filter(
+        models.User.tenant_id == tenant_id,
+        models.User.is_active == True,
+        models.User.id != current_user.id,
+    ).all()
+
+    def role_sort_key(u):
+        roles = u.roles or []
+        if "tech_lead" in roles:
+            return 0
+        if "developer" in roles:
+            return 1
+        return 2
+
+    users.sort(key=role_sort_key)
+    return {
+        "team_members": [
+            {"id": u.id, "name": u.full_name or u.email, "email": u.email, "roles": u.roles}
+            for u in users
+        ]
     }
