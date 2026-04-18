@@ -251,7 +251,7 @@ def get_compliance_overview(
         doc = doc_meta.get(doc_id)
         projects.append({
             "document_id": doc_id,
-            "title": doc.title if doc else f"Document {doc_id}",
+            "title": doc.filename if doc else f"Document {doc_id}",
             "atom_count": atom_count_by_doc[doc_id],
             "compliance_score": snap.score_percentage if snap else None,
             "open_mismatches": snap.open_mismatches if snap else 0,

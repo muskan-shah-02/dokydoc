@@ -866,7 +866,7 @@ def request_clarification(
             notification_type="clarification_requested",
             title=f"Clarification requested on mismatch #{mismatch_id}",
             message=(
-                f"{current_user.full_name or current_user.email} has a question: "
+                f"{current_user.email} has a question: "
                 f"{body.question[:200]}"
             ),
             resource_type="mismatch",
@@ -916,7 +916,7 @@ def answer_clarification(
         notification_type="clarification_answered",
         title=f"Clarification answered on mismatch #{mismatch_id}",
         message=(
-            f"{current_user.full_name or current_user.email} answered: "
+            f"{current_user.email} answered: "
             f"{body.answer[:200]}"
         ),
         resource_type="mismatch",
@@ -1082,7 +1082,7 @@ def trigger_test_suite_generation(
         raise HTTPException(status_code=404, detail="Document not found")
 
     task = generate_test_suite.apply_async(
-        args=[document_id, tenant_id, doc.title or "Untitled"]
+        args=[document_id, tenant_id, doc.filename or "Untitled"]
     )
     return {
         "task_id": task.id,

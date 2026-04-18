@@ -1202,7 +1202,7 @@ class AutoDocsService(LoggerMixin):
         if not doc:
             return [f"[Generated doc #{doc_id} not found]"]
 
-        parts.append(f"PREVIOUS ANALYSIS: {doc.title}")
+        parts.append(f"PREVIOUS ANALYSIS: {getattr(doc, 'title', None) or getattr(doc, 'filename', None) or f'Doc #{doc_id}'}")
         parts.append(f"TYPE: {doc.doc_type} | SOURCE: {doc.source_name or 'unknown'}")
         if doc.content:
             parts.append(f"CONTENT:\n{doc.content[:4000]}")

@@ -2,7 +2,6 @@
 P5C-05: Celery task for async test suite generation.
 Stores result in Redis with 1-hour TTL.
 """
-import asyncio
 from app.core.celery_app import celery_app
 from app.core.logging import get_logger
 
@@ -21,13 +20,11 @@ def generate_test_suite(self, document_id: int, tenant_id: int, doc_title: str):
 
     db = SessionLocal()
     try:
-        zip_bytes = asyncio.run(
-            test_suite_service.generate_zip(
-                db=db,
-                document_id=document_id,
-                tenant_id=tenant_id,
-                doc_title=doc_title,
-            )
+        zip_bytes = test_suite_service.generate_zip_sync(
+            db=db,
+            document_id=document_id,
+            tenant_id=tenant_id,
+            doc_title=doc_title,
         )
         # Store in Redis with 1-hour TTL
         try:

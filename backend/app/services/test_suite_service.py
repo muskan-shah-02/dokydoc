@@ -5,6 +5,7 @@ Atoms classified as "static" or "runtime" testability get test functions generat
 Tests are grouped into files by atom_type and returned as an in-memory zip.
 """
 import io
+import asyncio
 import zipfile
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -139,6 +140,31 @@ class TestSuiteService:
             zf.writestr("pytest.ini", _PYTEST_INI)
 
         return buf.getvalue()
+
+
+    def generate_zip_sync(
+        self,
+        db: Session,
+        *,
+        document_id: int,
+        tenant_id: int,
+        doc_title: str,
+    ) -> bytes:
+        """Synchronous wrapper for Celery tasks (BUG-04 fix)."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(
+                self.generate_zip(
+                    db=db,
+                    document_id=document_id,
+                    tenant_id=tenant_id,
+                    doc_title=doc_title,
+                )
+            )
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
 
 test_suite_service = TestSuiteService()

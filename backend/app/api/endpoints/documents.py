@@ -816,8 +816,8 @@ async def request_uploads(
         filenames_str = ", ".join(body.suggested_filenames) if body.suggested_filenames else "relevant code files"
         custom_msg = body.message or ""
         base_msg = (
-            f"{current_user.full_name or current_user.email} has requested that you upload "
-            f"{filenames_str} for BRD validation of '{document.title}'."
+            f"{current_user.email} has requested that you upload "
+            f"{filenames_str} for BRD validation of '{document.filename}'."
         )
         full_message = f"{base_msg} {custom_msg}".strip()
 
@@ -836,15 +836,15 @@ async def request_uploads(
                 tenant_id=tenant_id,
                 user_id=uid,
                 notification_type="upload_request",
-                title=f"Code upload requested for '{document.title}'",
+                title=f"Code upload requested for '{document.filename}'",
                 message=full_message,
                 resource_type="document",
                 resource_id=document_id,
                 details={
                     "requested_by_user_id": current_user.id,
-                    "requested_by_name": current_user.full_name or current_user.email,
+                    "requested_by_name": current_user.email,
                     "suggested_filenames": body.suggested_filenames,
-                    "document_title": document.title,
+                    "document_title": document.filename,
                 },
             )
             notified.append(uid)
@@ -890,7 +890,7 @@ def get_document_team_members(
     users.sort(key=role_sort_key)
     return {
         "team_members": [
-            {"id": u.id, "name": u.full_name or u.email, "email": u.email, "roles": u.roles}
+            {"id": u.id, "name": u.email, "email": u.email, "roles": u.roles}
             for u in users
         ]
     }
