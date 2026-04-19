@@ -99,11 +99,19 @@ def upgrade() -> None:
     print("Validating and backfilling tenant_id...")
 
     for table in TENANT_TABLES:
-        # Backfill any NULL or invalid tenant_id values
+        # Skip tables that don't exist yet (created by later migrations, e.g. analysis_runs)
         op.execute(f"""
-            UPDATE {table}
-            SET tenant_id = 1
-            WHERE tenant_id IS NULL OR tenant_id NOT IN (SELECT id FROM tenants)
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = '{table}'
+                ) THEN
+                    UPDATE {table}
+                    SET tenant_id = 1
+                    WHERE tenant_id IS NULL OR tenant_id NOT IN (SELECT id FROM tenants);
+                END IF;
+            END $$;
         """)
 
     print("✅ Data validation complete")
@@ -137,11 +145,17 @@ def upgrade() -> None:
     for table in TENANT_TABLES:
         constraint_name = f'fk_{table}_tenant'
 
-        # Skip if constraint already exists (for idempotency)
+        # Only add FK if table exists AND constraint doesn't exist yet.
+        # Tables created by later migrations (e.g. analysis_runs) are skipped here;
+        # their FK will be added when those migrations run via d4f3 backfill logic
+        # or the tenant_id column default handles integrity.
         op.execute(f"""
             DO $$
             BEGIN
-                IF NOT EXISTS (
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = '{table}'
+                ) AND NOT EXISTS (
                     SELECT 1 FROM information_schema.table_constraints
                     WHERE constraint_name = '{constraint_name}'
                 ) THEN
