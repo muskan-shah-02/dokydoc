@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 's10a1_requirement_atoms'
-down_revision = 's9d1_repo_language_breakdown'
+down_revision = 's9d1'
 branch_labels = None
 depends_on = None
 
