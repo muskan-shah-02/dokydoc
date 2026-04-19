@@ -58,8 +58,8 @@ def backfill_data_flow_edges(
                 logger.warning(
                     "[P3.6] Edge build failed for component %s: %s", c.id, per_err,
                 )
-            # Progress updates — enables frontend polling card.
-            if processed % 10 == 0:
+            # GAP-11: emit progress with current_component name every 5 components
+            if processed % 5 == 0 or processed == total:
                 self.update_state(
                     state="PROGRESS",
                     meta={
@@ -67,6 +67,7 @@ def backfill_data_flow_edges(
                         "total": total,
                         "edges_written": edges_written,
                         "failed": failed,
+                        "current_component": c.name,  # GAP-11 fix
                     },
                 )
 

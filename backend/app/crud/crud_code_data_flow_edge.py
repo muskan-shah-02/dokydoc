@@ -1,15 +1,18 @@
 """
-Phase 3 — P3.3: CRUD for CodeDataFlowEdge.
+Phase 3 — P3.3 (revised): CRUD for CodeDataFlowEdge.
 
-Idempotent rebuild pattern: delete edges by source_component_id, then
-bulk_create. No UPSERT is necessary because a component's outbound
-edges are always rebuilt as a complete set from its structured_analysis.
+GAP-4: get_egocentric now returns (edges_in, edges_out) tuple.
+GAP-5: count_by_repository returns breakdown dict by edge_type.
+GAP-12: All list queries ordered by step_index ASC NULLS LAST.
 """
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, func
 
 from app.models.code_data_flow_edge import CodeDataFlowEdge
+
+# Canonical analysis_status values (GAP-15A)
+ANALYSIS_STATUS_COMPLETE = ("completed", "complete")
 
 
 class CRUDCodeDataFlowEdge:
@@ -29,6 +32,7 @@ class CRUDCodeDataFlowEdge:
                 CodeDataFlowEdge.source_component_id == source_component_id,
                 CodeDataFlowEdge.tenant_id == tenant_id,
             )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
             .all()
         )
 
@@ -45,6 +49,7 @@ class CRUDCodeDataFlowEdge:
                 CodeDataFlowEdge.target_component_id == target_component_id,
                 CodeDataFlowEdge.tenant_id == tenant_id,
             )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
             .all()
         )
 
@@ -54,19 +59,31 @@ class CRUDCodeDataFlowEdge:
         *,
         component_id: int,
         tenant_id: int,
-    ) -> List[CodeDataFlowEdge]:
-        """Return every edge where component is either the source or target."""
-        return (
+    ) -> Tuple[List[CodeDataFlowEdge], List[CodeDataFlowEdge]]:
+        """Return (edges_in, edges_out) ordered by step_index ASC NULLS LAST.
+
+        GAP-4 fix: was previously returning a flat list — now returns a tuple
+        so callers can cleanly separate inbound callers from outbound callees.
+        """
+        edges_out = (
             db.query(CodeDataFlowEdge)
             .filter(
+                CodeDataFlowEdge.source_component_id == component_id,
                 CodeDataFlowEdge.tenant_id == tenant_id,
-                or_(
-                    CodeDataFlowEdge.source_component_id == component_id,
-                    CodeDataFlowEdge.target_component_id == component_id,
-                ),
             )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
             .all()
         )
+        edges_in = (
+            db.query(CodeDataFlowEdge)
+            .filter(
+                CodeDataFlowEdge.target_component_id == component_id,
+                CodeDataFlowEdge.tenant_id == tenant_id,
+            )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
+            .all()
+        )
+        return edges_in, edges_out
 
     def get_subgraph(
         self,
@@ -89,6 +106,7 @@ class CRUDCodeDataFlowEdge:
                     CodeDataFlowEdge.target_component_id.is_(None),
                 ),
             )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
             .all()
         )
 
@@ -105,6 +123,7 @@ class CRUDCodeDataFlowEdge:
                 CodeDataFlowEdge.repository_id == repository_id,
                 CodeDataFlowEdge.tenant_id == tenant_id,
             )
+            .order_by(CodeDataFlowEdge.step_index.asc().nullslast())
             .all()
         )
 
@@ -115,7 +134,7 @@ class CRUDCodeDataFlowEdge:
         source_component_id: int,
         tenant_id: int,
     ) -> int:
-        """Delete all outbound edges for a component — used before rebuild."""
+        """Delete all outbound edges for a component before rebuild."""
         deleted = (
             db.query(CodeDataFlowEdge)
             .filter(
@@ -133,7 +152,7 @@ class CRUDCodeDataFlowEdge:
         *,
         edges: List[dict],
     ) -> int:
-        """Insert a batch of edges. `edges` is a list of dicts matching model cols."""
+        """Insert a batch of edges. Supports all 7 individual spec columns."""
         if not edges:
             return 0
         objs = [CodeDataFlowEdge(**e) for e in edges]
@@ -147,7 +166,30 @@ class CRUDCodeDataFlowEdge:
         *,
         repository_id: int,
         tenant_id: int,
+    ) -> dict:
+        """Return edge-type breakdown dict — e.g. {"HTTP_TRIGGER": 5, ...}.
+
+        GAP-5 fix: was previously returning a plain int.
+        """
+        rows = (
+            db.query(CodeDataFlowEdge.edge_type, func.count(CodeDataFlowEdge.id))
+            .filter(
+                CodeDataFlowEdge.repository_id == repository_id,
+                CodeDataFlowEdge.tenant_id == tenant_id,
+            )
+            .group_by(CodeDataFlowEdge.edge_type)
+            .all()
+        )
+        return {edge_type: count for edge_type, count in rows}
+
+    def count_total_by_repository(
+        self,
+        db: Session,
+        *,
+        repository_id: int,
+        tenant_id: int,
     ) -> int:
+        """Plain integer count for stats endpoints."""
         return (
             db.query(CodeDataFlowEdge)
             .filter(

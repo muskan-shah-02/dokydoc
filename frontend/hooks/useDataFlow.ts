@@ -1,19 +1,20 @@
 /**
- * Phase 3 (P3.8): Data flow diagram hooks.
- *
- * useEgocentricFlow  — loads the 1-hop neighbourhood for a component
- * useRequestTrace    — BFS forward from an ENDPOINT
- * useTaskStatus      — polls a Celery task until done
+ * Phase 3 (P3.8 revised): Data flow diagram hooks.
+ * GAP-4: useEgocentricFlow now returns edges_in + edges_out separately.
+ * GAP-6: useRequestTrace accepts traceDepth parameter.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { API_BASE_URL } from '@/lib/api';
+import { useState, useEffect, useCallback } from "react";
+import { API_BASE_URL } from "@/lib/api";
 
 export interface FlowNode {
-  id: number;
+  component_id: number | null;
+  id?: number;
   name: string;
-  location: string;
+  location: string | null;
   file_role: string | null;
+  summary?: string | null;
+  is_external?: boolean;
 }
 
 export interface FlowEdge {
@@ -21,33 +22,62 @@ export interface FlowEdge {
   source_component_id: number;
   target_component_id: number | null;
   edge_type: string;
-  data_summary: string;
-  metadata: Record<string, any> | null;
-  target_ref: string | null;
+  source_function?: string | null;
+  target_function?: string | null;
+  data_in_description?: string | null;
+  data_out_description?: string | null;
+  human_label?: string | null;
+  external_target_name?: string | null;
+  step_index?: number | null;
+  data_summary?: string | null;
+  created_at?: string | null;
 }
 
-export interface FlowDiagram {
-  component_id?: number;
-  root_component_id?: number;
+export interface EgocentricData {
+  component_id: number;
+  file_role: string | null;
+  edges_in: FlowEdge[];
+  edges_out: FlowEdge[];
+  nodes: FlowNode[];
+  mermaid_technical: string;
+  mermaid_simple: string;
+  total_edges: number;
+  edges_built_at: string | null;
+}
+
+export interface TraceData {
+  start_component_id: number;
+  depth: number;
   nodes: FlowNode[];
   edges: FlowEdge[];
-  mermaid: string;
-  mode: string;
-  depth_reached?: number;
+  mermaid_technical: string;
+  mermaid_simple: string;
+  total_nodes: number;
+  total_edges: number;
+  edges_built_at: string | null;
 }
 
 async function fetchJson(url: string): Promise<any> {
-  const res = await fetch(url, { credentials: 'include' });
+  const res = await fetch(url, { credentials: "include" });
   if (res.status === 403) {
     const body = await res.json().catch(() => ({}));
-    throw { type: 'PREMIUM_REQUIRED', detail: body?.detail };
+    const err: any = new Error("premium_required");
+    err.type = "PREMIUM_REQUIRED";
+    err.detail = body?.detail;
+    throw err;
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const err: any = new Error(`HTTP ${res.status}`);
+    throw err;
+  }
   return res.json();
 }
 
-export function useEgocentricFlow(componentId: number | null, mode: 'technical' | 'simple' = 'technical') {
-  const [data, setData] = useState<FlowDiagram | null>(null);
+export function useEgocentricFlow(
+  componentId: number | null,
+  mode: "technical" | "simple" = "technical",
+) {
+  const [data, setData] = useState<EgocentricData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -57,7 +87,7 @@ export function useEgocentricFlow(componentId: number | null, mode: 'technical' 
     setError(null);
     try {
       const result = await fetchJson(
-        `${API_BASE_URL}/code-components/${componentId}/data-flow/egocentric?mode=${mode}`
+        `${API_BASE_URL}/code-components/${componentId}/data-flow/egocentric`,
       );
       setData(result);
     } catch (e) {
@@ -65,7 +95,7 @@ export function useEgocentricFlow(componentId: number | null, mode: 'technical' 
     } finally {
       setLoading(false);
     }
-  }, [componentId, mode]);
+  }, [componentId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -74,10 +104,10 @@ export function useEgocentricFlow(componentId: number | null, mode: 'technical' 
 
 export function useRequestTrace(
   componentId: number | null,
-  mode: 'technical' | 'simple' = 'technical',
+  mode: "technical" | "simple" = "technical",
   maxDepth: number = 5,
 ) {
-  const [data, setData] = useState<FlowDiagram | null>(null);
+  const [data, setData] = useState<TraceData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<any>(null);
 
@@ -87,7 +117,7 @@ export function useRequestTrace(
     setError(null);
     try {
       const result = await fetchJson(
-        `${API_BASE_URL}/code-components/${componentId}/data-flow/request-trace?mode=${mode}&max_depth=${maxDepth}`
+        `${API_BASE_URL}/code-components/${componentId}/data-flow/request-trace?max_depth=${maxDepth}`,
       );
       setData(result);
     } catch (e) {
@@ -95,14 +125,16 @@ export function useRequestTrace(
     } finally {
       setLoading(false);
     }
-  }, [componentId, mode, maxDepth]);
+  }, [componentId, maxDepth]);
 
   useEffect(() => { load(); }, [load]);
 
   return { data, loading, error, reload: load };
 }
 
-export type TaskState = 'PENDING' | 'STARTED' | 'PROGRESS' | 'SUCCESS' | 'FAILURE' | 'RETRY' | 'REVOKED';
+export type TaskState =
+  | "PENDING" | "STARTED" | "PROGRESS"
+  | "SUCCESS" | "FAILURE" | "RETRY" | "REVOKED";
 
 export interface TaskStatus {
   task_id: string;
@@ -128,7 +160,7 @@ export function useTaskStatus(taskId: string | null, intervalMs = 2000) {
         if (!stopped && !result.ready) {
           setTimeout(poll, intervalMs);
         } else {
-          setLoading(false);
+          if (!stopped) setLoading(false);
         }
       } catch {
         if (!stopped) setLoading(false);

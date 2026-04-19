@@ -56,6 +56,7 @@ const FEATURES = [
   { icon: Key, title: "API Keys", desc: "Create API keys for CI/CD pipelines and external integrations with scope control.", href: "/settings", color: "gray" },
   { icon: GitBranch, title: "Visual Architecture", desc: "5-level knowledge graph: organization → system → domain → file. Drill-down exploration.", href: "/dashboard/brain", color: "indigo" },
   { icon: CheckSquare, title: "Validation Panel", desc: "Detect mismatches between docs and code. Approval workflows with multi-level review.", href: "/dashboard/validation-panel", color: "teal" },
+  { icon: GitBranch, title: "Data Flow Diagrams", desc: "Interactive Mermaid diagrams showing every service call, DB read/write, and event per component. Premium feature.", href: "/dashboard/data-flow-journey", color: "violet" },
 ];
 
 // --- FAQ ---
@@ -103,6 +104,7 @@ const colorMap: Record<string, string> = {
   gray: "bg-gray-100 text-gray-600",
   indigo: "bg-indigo-100 text-indigo-600",
   teal: "bg-teal-100 text-teal-600",
+  violet: "bg-violet-100 text-violet-600",
 };
 
 type TabId = "commands" | "getting-started" | "features" | "faq" | "changelog" | "support";

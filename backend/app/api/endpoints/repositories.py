@@ -859,17 +859,42 @@ def trigger_data_flow_backfill(
     current_user: models.User = Depends(deps.get_admin_user),
 ) -> Any:
     """Kick off an async backfill of data-flow edges for every analyzed
-    component in a repository. Admin/CXO only. Returns Celery task_id."""
+    component in a repository. Admin/CXO only. Returns Celery task_id.
+    GAP-10: 422 if no analyzed components exist.
+    """
+    from app.models.code_component import CodeComponent as _CC
+    from app.crud.crud_code_data_flow_edge import ANALYSIS_STATUS_COMPLETE
+
     repo = crud.repository.get(db, id=repo_id)
     if not repo or repo.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Repository not found")
+
+    analyzed_count = (
+        db.query(_CC)
+        .filter(
+            _CC.repository_id == repo_id,
+            _CC.tenant_id == tenant_id,
+            _CC.analysis_status.in_(ANALYSIS_STATUS_COMPLETE),
+            _CC.structured_analysis.isnot(None),
+        )
+        .count()
+    )
+    if analyzed_count == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No analyzed components found in this repository. "
+                "Run analysis first before backfilling data-flow edges."
+            ),
+        )
 
     from app.tasks.data_flow_tasks import backfill_data_flow_edges
     task = backfill_data_flow_edges.delay(repo_id, tenant_id)
     return {
         "task_id": task.id,
         "repository_id": repo_id,
-        "message": "Data flow backfill queued. Poll /tasks/{task_id}/status for progress.",
+        "component_count": analyzed_count,
+        "message": f"Backfill queued for {analyzed_count} components. Poll /tasks/{task.id}/status for progress.",
     }
 
 
@@ -888,9 +913,11 @@ def get_repo_data_flow_stats(
     if not repo or repo.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Repository not found")
 
-    edge_count = crud_edge.count_by_repository(
+    # GAP-5: breakdown dict instead of int
+    breakdown = crud_edge.count_by_repository(
         db, repository_id=repo_id, tenant_id=tenant_id,
     )
+    total_edges = sum(breakdown.values())
     analyzed_count = (
         db.query(CodeComponent)
         .filter(
@@ -903,6 +930,7 @@ def get_repo_data_flow_stats(
     return {
         "repository_id": repo_id,
         "analyzed_components": analyzed_count,
-        "edge_count": edge_count,
-        "ready": edge_count > 0,
+        "total_edges": total_edges,
+        "edge_type_breakdown": breakdown,
+        "ready": total_edges > 0,
     }

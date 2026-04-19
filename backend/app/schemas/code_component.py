@@ -82,3 +82,74 @@ class CodeComponentWithProgress(CodeComponent):
     repo_total_files: Optional[int] = None
     repo_analysis_status: Optional[str] = None
 
+
+# =========================================================================
+# Phase 3 (P3.7 / GAP-2): Data Flow response schemas
+# =========================================================================
+
+class DataFlowNodeSchema(BaseModel):
+    """A node in the data flow graph — maps to a CodeComponent (or external)."""
+    component_id: Optional[int] = None
+    name: str
+    location: Optional[str] = None
+    file_role: Optional[str] = None
+    summary: Optional[str] = None
+    is_external: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class DataFlowEdgeSchema(BaseModel):
+    """A directed edge between two components in the data flow graph."""
+    id: Optional[int] = None
+    source_component_id: int
+    target_component_id: Optional[int] = None
+    edge_type: str
+    # Per-spec individual columns (GAP-3)
+    source_function: Optional[str] = None
+    target_function: Optional[str] = None
+    data_in_description: Optional[str] = None
+    data_out_description: Optional[str] = None
+    human_label: Optional[str] = None
+    external_target_name: Optional[str] = None
+    step_index: Optional[int] = None
+    # Short Mermaid caption
+    data_summary: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EgocentricFlowResponse(BaseModel):
+    """Response for GET /code-components/{id}/data-flow/egocentric."""
+    component_id: int
+    file_role: Optional[str] = None
+    edges_in: list[DataFlowEdgeSchema]
+    edges_out: list[DataFlowEdgeSchema]
+    nodes: list[DataFlowNodeSchema]
+    mermaid_technical: str
+    mermaid_simple: str
+    total_edges: int
+    edges_built_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RequestTraceResponse(BaseModel):
+    """Response for GET /code-components/{id}/data-flow/request-trace."""
+    start_component_id: int
+    depth: int
+    nodes: list[DataFlowNodeSchema]
+    edges: list[DataFlowEdgeSchema]
+    mermaid_technical: str
+    mermaid_simple: str
+    total_nodes: int
+    total_edges: int
+    edges_built_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
