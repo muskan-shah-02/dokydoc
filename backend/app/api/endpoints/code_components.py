@@ -383,3 +383,111 @@ def retry_failed_component(
     # Return the updated component
     db.refresh(component)
     return component
+
+
+# =========================================================================
+# Phase 3 (P3.7): Request Data Flow Diagram endpoints
+# All premium-gated via deps.get_premium_tenant (403 on free tier).
+# =========================================================================
+
+@router.get("/{component_id}/data-flow/egocentric")
+def get_egocentric_data_flow(
+    component_id: int,
+    mode: str = Query("technical", pattern="^(technical|simple)$"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_premium_tenant),
+) -> Any:
+    """Return all inbound + outbound edges for a single component,
+    plus a rendered Mermaid diagram of just its 1-hop neighbourhood."""
+    from app.crud.crud_code_data_flow_edge import code_data_flow_edge as crud_edge
+    from app.services.data_flow_service import data_flow_service
+
+    component = crud.code_component.get(db, id=component_id)
+    if not component or component.tenant_id != tenant_id:
+        raise NotFoundException("Code component not found")
+
+    edges = crud_edge.get_egocentric(
+        db, component_id=component_id, tenant_id=tenant_id,
+    )
+    edge_dicts = [data_flow_service._edge_to_dict(e) for e in edges]
+
+    # Assemble 1-hop node set
+    neighbor_ids = {component_id}
+    for e in edges:
+        if e.target_component_id:
+            neighbor_ids.add(e.target_component_id)
+        neighbor_ids.add(e.source_component_id)
+
+    from app.models.code_component import CodeComponent
+    components = (
+        db.query(CodeComponent)
+        .filter(
+            CodeComponent.id.in_(neighbor_ids),
+            CodeComponent.tenant_id == tenant_id,
+        )
+        .all()
+    )
+    nodes = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "location": c.location,
+            "file_role": data_flow_service._resolve_file_role(c.structured_analysis or {}),
+        }
+        for c in components
+    ]
+    mermaid = data_flow_service.render_mermaid(
+        nodes=nodes, edges=edge_dicts, mode=mode,
+    )
+    return {
+        "component_id": component_id,
+        "nodes": nodes,
+        "edges": edge_dicts,
+        "mermaid": mermaid,
+        "mode": mode,
+    }
+
+
+@router.get("/{component_id}/data-flow/request-trace")
+def get_request_trace(
+    component_id: int,
+    max_depth: int = Query(5, ge=1, le=10),
+    mode: str = Query("technical", pattern="^(technical|simple)$"),
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_premium_tenant),
+) -> Any:
+    """BFS forward from an ENDPOINT component showing the full request
+    path through services, CRUD, DB, cache, and external APIs."""
+    from app.services.data_flow_service import data_flow_service
+
+    component = crud.code_component.get(db, id=component_id)
+    if not component or component.tenant_id != tenant_id:
+        raise NotFoundException("Code component not found")
+
+    trace = data_flow_service.get_request_trace(
+        db, component_id=component_id, tenant_id=tenant_id, max_depth=max_depth,
+    )
+    trace["mermaid"] = data_flow_service.render_mermaid(
+        nodes=trace["nodes"], edges=trace["edges"], mode=mode,
+    )
+    trace["mode"] = mode
+    return trace
+
+
+@router.post("/{component_id}/data-flow/rebuild", status_code=status.HTTP_202_ACCEPTED)
+def rebuild_component_flow(
+    component_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_premium_tenant),
+) -> Any:
+    """Trigger an async rebuild of a single component's outbound edges."""
+    component = crud.code_component.get(db, id=component_id)
+    if not component or component.tenant_id != tenant_id:
+        raise NotFoundException("Code component not found")
+
+    from app.tasks.data_flow_tasks import rebuild_component_data_flow
+    task = rebuild_component_data_flow.delay(component_id, tenant_id)
+    return {"task_id": task.id, "component_id": component_id}

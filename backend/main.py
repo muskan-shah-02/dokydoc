@@ -29,6 +29,7 @@ from app.api.endpoints import (
     training_examples,  # Phase 1: Data Flywheel
 )
 from app.api.endpoints import compliance  # Phase 6: Compliance Library
+from app.api.endpoints import celery_tasks  # Phase 3: Task status polling (P3.12)
 from app.middleware.rate_limiter import limiter, custom_rate_limit_handler
 from app.middleware.tenant_context import TenantContextMiddleware
 from app.middleware.audit_middleware import AuditMiddleware
@@ -462,6 +463,13 @@ app.include_router(
     compliance.router,
     prefix=f"/api/{settings.API_VERSION}",
     tags=["Compliance Library"]
+)
+
+# Phase 3: Task status polling (P3.12)
+app.include_router(
+    celery_tasks.router,
+    prefix=f"/api/{settings.API_VERSION}/tasks",
+    tags=["Tasks"]
 )
 
 # --- Startup Event (Legacy support) ---

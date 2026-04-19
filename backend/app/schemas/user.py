@@ -45,6 +45,8 @@ class UserInDB(UserBase):
 # Properties to return to the client. It inherits 'roles' from UserBase.
 class User(UserBase):
     id: int
+    # Phase 3 (P3.13): tenant tier exposed to frontend for premium gating
+    tenant_tier: Optional[str] = None
 
     class Config:
         from_attributes = True

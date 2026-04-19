@@ -270,6 +270,8 @@ export interface User {
   tenant_id: number;
   is_active: boolean;
   created_at: string;
+  // Phase 3 (P3.13): tenant tier for premium-feature gating
+  tenant_tier?: string | null;
 }
 
 export interface Tenant {

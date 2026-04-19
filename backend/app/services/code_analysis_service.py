@@ -635,6 +635,22 @@ class CodeAnalysisService(LoggerMixin):
             except Exception as e:
                 self.logger.warning(f"Graph version save failed (non-fatal): {e}")
 
+            # Phase 3 (P3.5): Build data-flow edges from structured_analysis.
+            # Deterministic — no extra LLM cost. Non-fatal on failure.
+            try:
+                from app.services.data_flow_service import data_flow_service
+                db.refresh(component)
+                written = data_flow_service.build_flow_for_component(
+                    db=db, component=component,
+                )
+                self.logger.info(
+                    f"[P3.5] Built {written} data-flow edges for component {component.id}"
+                )
+            except Exception as flow_err:
+                self.logger.warning(
+                    f"[P3.5] Data flow edge build failed (non-fatal): {flow_err}"
+                )
+
             # P4-07: Trigger cross-graph mapping after code analysis completes.
             # New code concepts have been extracted → BOE should re-check for
             # matches against the document ontology to keep mappings current.

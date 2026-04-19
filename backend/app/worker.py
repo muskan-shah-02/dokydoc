@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.tasks.tenant_tasks",         # P5-04: Industry auto-detection + profile generation
         "app.tasks.analytics_tasks",      # P5C-08: Nightly compliance snapshots
         "app.tasks.test_generation_tasks", # P5C-05: Test suite generation
+        "app.tasks.data_flow_tasks",      # Phase 3: Request data flow edge backfill
     ]
 )
 

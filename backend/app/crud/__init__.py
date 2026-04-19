@@ -48,3 +48,6 @@ from .crud_requirement_atom import requirement_atom
 
 # Phase 1: Data Flywheel
 from .crud_training_example import training_example
+
+# Phase 3: Request Data Flow Graph
+from .crud_code_data_flow_edge import code_data_flow_edge

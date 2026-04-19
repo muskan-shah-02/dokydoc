@@ -845,3 +845,64 @@ def get_single_repo_stats(
         "models_count": len(set(models_found)),
         "total_ai_cost_inr": float(cost_sum) if cost_sum else 0,
     }
+
+
+# =========================================================================
+# Phase 3 (P3.7): Data Flow backfill endpoint for a repository
+# =========================================================================
+
+@router.post("/{repo_id}/data-flow/backfill", status_code=status.HTTP_202_ACCEPTED)
+def trigger_data_flow_backfill(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_admin_user),
+) -> Any:
+    """Kick off an async backfill of data-flow edges for every analyzed
+    component in a repository. Admin/CXO only. Returns Celery task_id."""
+    repo = crud.repository.get(db, id=repo_id)
+    if not repo or repo.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    from app.tasks.data_flow_tasks import backfill_data_flow_edges
+    task = backfill_data_flow_edges.delay(repo_id, tenant_id)
+    return {
+        "task_id": task.id,
+        "repository_id": repo_id,
+        "message": "Data flow backfill queued. Poll /tasks/{task_id}/status for progress.",
+    }
+
+
+@router.get("/{repo_id}/data-flow/stats")
+def get_repo_data_flow_stats(
+    repo_id: int,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """Return edge count and a readiness indicator for the repository."""
+    from app.crud.crud_code_data_flow_edge import code_data_flow_edge as crud_edge
+    from app.models.code_component import CodeComponent
+
+    repo = crud.repository.get(db, id=repo_id)
+    if not repo or repo.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    edge_count = crud_edge.count_by_repository(
+        db, repository_id=repo_id, tenant_id=tenant_id,
+    )
+    analyzed_count = (
+        db.query(CodeComponent)
+        .filter(
+            CodeComponent.repository_id == repo_id,
+            CodeComponent.tenant_id == tenant_id,
+            CodeComponent.analysis_status.in_(("completed", "complete")),
+        )
+        .count()
+    )
+    return {
+        "repository_id": repo_id,
+        "analyzed_components": analyzed_count,
+        "edge_count": edge_count,
+        "ready": edge_count > 0,
+    }

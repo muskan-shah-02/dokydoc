@@ -50,6 +50,10 @@ import { FileAnalysisView } from "@/components/analysis/FileAnalysisView";
 import { OntologyGraph } from "@/components/ontology/OntologyGraph";
 import { GraphVersionPanel } from "@/components/ontology/GraphVersionPanel";
 import { BranchPreviewGraph } from "@/components/ontology/BranchPreviewGraph";
+// Phase 3 (P3.8): Data Flow Diagram
+import { DataFlowDiagram } from "@/components/data-flow/DataFlowDiagram";
+import { BackfillProgressCard } from "@/components/data-flow/BackfillProgressCard";
+import { useAuth } from "@/contexts/AuthContext";
 import { api, API_BASE_URL } from "@/lib/api";
 
 interface CodeComponentDetail {
@@ -71,6 +75,8 @@ export default function CodeComponentDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = params.id;
+  // Phase 3: read tenant_tier for Data Flow premium gating
+  const { user } = useAuth();
 
   const [component, setComponent] = useState<CodeComponentDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -477,6 +483,9 @@ export default function CodeComponentDetailPage() {
           <TabsTrigger value="graph" className="data-[state=active]:bg-purple-50 data-[state=active]:text-purple-700 h-10 px-6">
             <Network className="w-4 h-4 mr-2" /> Knowledge Graph
           </TabsTrigger>
+          <TabsTrigger value="dataflow" className="data-[state=active]:bg-violet-50 data-[state=active]:text-violet-700 h-10 px-6">
+            <GitBranch className="w-4 h-4 mr-2" /> Data Flow
+          </TabsTrigger>
           {component.component_type === "Repository" && (
             <>
               <TabsTrigger value="domains" className="data-[state=active]:bg-green-50 data-[state=active]:text-green-700 h-10 px-6">
@@ -581,6 +590,20 @@ export default function CodeComponentDetailPage() {
             isOpen={versionPanelOpen}
             onClose={() => setVersionPanelOpen(false)}
           />
+        </TabsContent>
+
+        {/* Phase 3 (P3.8): Data Flow Diagram tab */}
+        <TabsContent value="dataflow" className="space-y-4">
+          <DataFlowDiagram
+            componentId={Number(id)}
+            fileRole={component.structured_analysis?.file_role ?? null}
+            tenantTier={user?.tenant_tier}
+          />
+          {/* Backfill card — visible to CXO/Admin for Repository components */}
+          {component.component_type === "Repository" &&
+            user?.roles?.some((r) => ["CXO", "Admin"].includes(r)) && (
+            <BackfillProgressCard repositoryId={Number(id)} />
+          )}
         </TabsContent>
 
         {component.component_type === "Repository" && (

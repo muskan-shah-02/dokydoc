@@ -339,3 +339,42 @@ def require_tenant_admin(current_user: User = Depends(get_current_user)):
 
     logger.debug(f"User {current_user.email} is tenant admin")
     return current_user
+
+
+# Phase 3 (P3.9/P3.15): Premium tier gating helper.
+# Used by data-flow endpoints to 403 free-tier tenants.
+PREMIUM_TIERS = {"professional", "pro", "enterprise"}
+
+
+def get_premium_tenant(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """Ensure the caller's tenant is on a paid tier."""
+    from app.models.tenant import Tenant
+
+    tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+    tier = (tenant.tier if tenant else "free") or "free"
+    if tier.lower() not in PREMIUM_TIERS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "PREMIUM_REQUIRED",
+                "message": "Request Data Flow diagrams require a Pro or Enterprise plan.",
+                "current_tier": tier,
+            },
+        )
+    return current_user
+
+
+def get_admin_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Allow superusers or CXO/Admin roles. Used by the backfill endpoint."""
+    roles = [str(r) for r in (current_user.roles or [])]
+    if current_user.is_superuser or any(r in ("CXO", "Admin") for r in roles):
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access required",
+    )

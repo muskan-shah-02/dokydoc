@@ -750,7 +750,7 @@ CONCEPTS TO RECONCILE:
             # ============================================================
 
             PromptType.ENHANCED_SEMANTIC_ANALYSIS.value: {
-                "version": "2.0",
+                "version": "2.1",
                 "description": "Enhanced code analysis with business rules, API contracts, data models, and security pattern extraction",
                 "prompt": """
 You are an expert software architect performing deep semantic analysis of a source file.
@@ -796,6 +796,24 @@ Perform a comprehensive analysis extracting ALL of the following:
    - Look for: request parameters flowing through processing, database reads feeding transforms,
      API responses being assembled, config values driving behavior
    - Example: "User input → validate() → transform() → db.save() → response"
+
+8. **FILE ROLE** (Phase 3) — Single primary role this file plays in the system
+   - One of: ENDPOINT, SERVICE, SCHEMA, MODEL, CRUD, MIDDLEWARE, UTILITY, CONFIG, TEST, MIGRATION
+   - ENDPOINT = FastAPI/Flask route handler; SERVICE = business orchestration;
+     SCHEMA = Pydantic/Marshmallow DTO; MODEL = SQLAlchemy ORM table;
+     CRUD = direct DB access; MIDDLEWARE = request filter/interceptor
+
+9. **MODEL DEFINITION** (Phase 3) — Only when file_role == MODEL
+   - Extract: table_name + list of columns (name, type, nullable, fk target if any)
+
+10. **BACKED_BY_MODEL** (Phase 3) — Only when file_role == SCHEMA
+    - Which MODEL file/table this schema represents (e.g. "User" for UserCreate)
+
+11. **OUTBOUND CALLS** (Phase 3) — Explicit cross-file function calls made BY this file
+    - Only for ENDPOINT, SERVICE, and CRUD files
+    - For each call: caller_function, target_module, target_function, data_in, data_out
+    - Example for endpoint: caller="register_user", target_module="services.auth_service",
+      target_function="create_user", data_in="UserCreate", data_out="User"
 
 STRICT RESPONSE FORMAT:
 Return ONLY valid JSON:
@@ -881,7 +899,24 @@ Return ONLY valid JSON:
             "architectural_style": "Overall style",
             "key_concepts": ["Programming concepts used"]
         }},
-        "quality_assessment": "Brief quality assessment"
+        "quality_assessment": "Brief quality assessment",
+        "file_role": "ENDPOINT|SERVICE|SCHEMA|MODEL|CRUD|MIDDLEWARE|UTILITY|CONFIG|TEST|MIGRATION",
+        "model_definition": {{
+            "table_name": "Only when file_role == MODEL",
+            "columns": [
+                {{"name": "id", "type": "Integer", "nullable": false, "fk_target": null}}
+            ]
+        }},
+        "backed_by_model": "Only when file_role == SCHEMA (model/table name)",
+        "outbound_calls": [
+            {{
+                "caller_function": "Name of function in THIS file that makes the call",
+                "target_module": "Dotted import path of the callee module (e.g. services.auth_service)",
+                "target_function": "Function/method being called",
+                "data_in": "Type/schema passed in",
+                "data_out": "Type/schema returned"
+            }}
+        ]
     }}
 }}
 
@@ -892,7 +927,10 @@ CRITICAL:
 - For security_patterns: Note GAPS as well as implemented patterns
 - For component_interactions: Extract ALL function-to-function calls, class inheritance, and delegation patterns within this file
 - For data_flows: Trace how data enters, transforms, and exits — this is crucial for understanding business logic
-- If a section is not applicable to this file type, return an empty array []
+- For file_role: pick EXACTLY ONE value; default to UTILITY if unclear
+- For outbound_calls: include ONLY cross-file calls (not calls within this same file)
+- model_definition and backed_by_model are OPTIONAL — set to null unless file_role matches
+- If a section is not applicable to this file type, return an empty array [] or null
 
 CODE TO ANALYZE:
 """,
@@ -914,7 +952,11 @@ CODE TO ANALYZE:
                                 "dependencies": {"type": "array"},
                                 "exports": {"type": "array"},
                                 "patterns_and_architecture": {"type": "object"},
-                                "quality_assessment": {"type": "string"}
+                                "quality_assessment": {"type": "string"},
+                                "file_role": {"type": ["string", "null"]},
+                                "model_definition": {"type": ["object", "null"]},
+                                "backed_by_model": {"type": ["string", "null"]},
+                                "outbound_calls": {"type": "array"}
                             }
                         }
                     },

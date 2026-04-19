@@ -34,6 +34,7 @@ from app.models.mismatch_clarification import MismatchClarification  # noqa  P5C
 from app.models.uat_checklist_item import UATChecklistItem  # noqa  P5C-04
 from app.models.ci_webhook_config import CIWebhookConfig  # noqa  P5C-06
 from app.models.compliance_score_snapshot import ComplianceScoreSnapshot  # noqa  P5C-08
+from app.models.code_data_flow_edge import CodeDataFlowEdge  # noqa  Phase 3: Data Flow Graph
 
 # Keep old fake DB for backward compatibility
 FAKE_USERS_DB = {}

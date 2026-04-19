@@ -1,7 +1,7 @@
 """
 P5C-08: Celery beat tasks for analytics and compliance snapshot generation.
 """
-from app.core.celery_app import celery_app
+from app.worker import celery_app
 from app.core.logging import get_logger
 
 logger = get_logger("analytics_tasks")

@@ -223,11 +223,29 @@ def refresh_access_token(
 
 @router.get("/users/me", response_model=schemas.user.User)
 def read_users_me(
-    current_user: schemas.user.User = Depends(deps.get_current_user)
+    db: Session = Depends(deps.get_db),
+    current_user=Depends(deps.get_current_user),
 ) -> Any:
     """
     Fetch the current logged in user.
+    Phase 3 (P3.13): attaches tenant_tier for premium-feature gating on the client.
     """
     logger = login_endpoints.logger
     logger.info(f"Fetching user profile for: {current_user.email}")
-    return current_user
+
+    tenant_tier: str | None = None
+    try:
+        from app.models.tenant import Tenant
+        tenant = db.query(Tenant).filter(Tenant.id == current_user.tenant_id).first()
+        if tenant:
+            tenant_tier = tenant.tier
+    except Exception as e:
+        logger.warning(f"Could not resolve tenant tier for user {current_user.id}: {e}")
+
+    return schemas.user.User(
+        id=current_user.id,
+        email=current_user.email,
+        is_active=current_user.is_active,
+        roles=current_user.roles or [],
+        tenant_tier=tenant_tier,
+    )

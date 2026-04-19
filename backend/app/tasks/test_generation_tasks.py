@@ -2,7 +2,7 @@
 P5C-05: Celery task for async test suite generation.
 Stores result in Redis with 1-hour TTL.
 """
-from app.core.celery_app import celery_app
+from app.worker import celery_app
 from app.core.logging import get_logger
 
 logger = get_logger("test_generation_tasks")
