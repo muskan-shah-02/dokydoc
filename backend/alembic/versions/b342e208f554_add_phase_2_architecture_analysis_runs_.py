@@ -52,38 +52,43 @@ def upgrade() -> None:
         END $$;
     """)
     
-    # Step 2: Create the analysis_runs table first
-    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
-    op.create_table('analysis_runs',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('document_id', sa.Integer(), nullable=False),
-        sa.Column('triggered_by_user_id', sa.Integer(), nullable=False),
-        sa.Column('status', postgresql.ENUM('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', name='analysisrunstatus', create_type=False), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=False),
-        sa.Column('started_at', sa.DateTime(), nullable=True),
-        sa.Column('completed_at', sa.DateTime(), nullable=True),
-        sa.Column('total_segments', sa.Integer(), nullable=True),
-        sa.Column('completed_segments', sa.Integer(), nullable=False),
-        sa.Column('failed_segments', sa.Integer(), nullable=False),
-        sa.Column('error_message', sa.Text(), nullable=True),
-        sa.Column('error_details', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column('learning_mode', sa.Boolean(), nullable=False),
-        sa.Column('run_metadata', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.ForeignKeyConstraint(['document_id'], ['documents.id'], ),
-        sa.ForeignKeyConstraint(['triggered_by_user_id'], ['users.id'], ),
-        sa.PrimaryKeyConstraint('id')
-    )
+    # Step 2: Create the analysis_runs table.
+    # tenant_id is included here because c8f2a1d9e321 skipped analysis_runs
+    # (the table didn't exist yet when that migration ran on a fresh DB).
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_runs (
+            id                   SERIAL NOT NULL,
+            document_id          INTEGER NOT NULL,
+            triggered_by_user_id INTEGER NOT NULL,
+            status               analysisrunstatus NOT NULL,
+            created_at           TIMESTAMP NOT NULL,
+            started_at           TIMESTAMP,
+            completed_at         TIMESTAMP,
+            total_segments       INTEGER,
+            completed_segments   INTEGER NOT NULL DEFAULT 0,
+            failed_segments      INTEGER NOT NULL DEFAULT 0,
+            error_message        TEXT,
+            error_details        JSONB,
+            learning_mode        BOOLEAN NOT NULL DEFAULT false,
+            run_metadata         JSONB,
+            tenant_id            INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (id),
+            FOREIGN KEY(document_id) REFERENCES documents (id),
+            FOREIGN KEY(triggered_by_user_id) REFERENCES users (id)
+        )
+    """)
+    op.execute("ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS tenant_id INTEGER NOT NULL DEFAULT 1")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_analysis_runs_tenant_id ON analysis_runs (tenant_id)")
 
-    # Step 2: Add nullable columns to existing tables
-    # SPRINT 2 Phase 8: Use create_type=False to avoid duplicate enum creation
-    op.add_column('analysisresult', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED', 'SKIPPED', name='analysisresultstatus', create_type=False), nullable=True))
-    op.add_column('analysisresult', sa.Column('error_message', sa.Text(), nullable=True))
-    op.add_column('analysisresult', sa.Column('processing_time_ms', sa.Integer(), nullable=True))
+    # Step 3: Add nullable columns to existing tables (IF NOT EXISTS for idempotency).
+    op.execute("ALTER TABLE analysisresult ADD COLUMN IF NOT EXISTS status analysisresultstatus")
+    op.execute("ALTER TABLE analysisresult ADD COLUMN IF NOT EXISTS error_message TEXT")
+    op.execute("ALTER TABLE analysisresult ADD COLUMN IF NOT EXISTS processing_time_ms INTEGER")
 
-    op.add_column('document_segments', sa.Column('status', postgresql.ENUM('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'SKIPPED', name='segmentstatus', create_type=False), nullable=True))
-    op.add_column('document_segments', sa.Column('retry_count', sa.Integer(), nullable=True))
-    op.add_column('document_segments', sa.Column('last_error', sa.String(), nullable=True))
-    op.add_column('document_segments', sa.Column('analysis_run_id', sa.Integer(), nullable=True))
+    op.execute("ALTER TABLE document_segments ADD COLUMN IF NOT EXISTS status segmentstatus")
+    op.execute("ALTER TABLE document_segments ADD COLUMN IF NOT EXISTS retry_count INTEGER")
+    op.execute("ALTER TABLE document_segments ADD COLUMN IF NOT EXISTS last_error VARCHAR")
+    op.execute("ALTER TABLE document_segments ADD COLUMN IF NOT EXISTS analysis_run_id INTEGER")
     
     # Step 3: Smart Data Analysis and Population
     

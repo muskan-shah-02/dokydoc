@@ -4,15 +4,22 @@ Revision ID: c8f2a1d9e321
 Revises: None
 Create Date: 2026-01-14 10:00:00.000000
 
-This migration:
-1. Creates all core application tables (IF NOT EXISTS — safe on existing DBs)
-2. Adds tenant_id to all tables for multi-tenancy support
-3. Adds cost tracking fields to documents table
-4. Creates tenant_billing table
+Creates the original core tables (IF NOT EXISTS) with their pre-Alembic
+baseline columns, then adds tenant_id and cost tracking on top.
 
-Using IF NOT EXISTS guards throughout makes this idempotent for both
-fresh databases and existing ones that had tables pre-created via
-Base.metadata.create_all().
+Columns added by later migrations are deliberately excluded here to
+avoid DuplicateColumn conflicts:
+  - code_components: repository_id (s3a1), cost columns (s3a4/s3a5),
+    analysis_started_at/completed_at (s3a6)
+  - mismatches: direction/requirement_atom_id (s10a1), enterprise
+    fields (s16b1)
+  - document_segments: status/retry_count/last_error/analysis_run_id
+    (b342e208f554)
+  - analysisresult: status/error_message/processing_time_ms (b342e208f554)
+  - documents: last_atom_diff (s16a1), file_suggestion_summary (s17c1)
+  - ontology_concepts: source_type (s3b1), source_component_id (s4a3),
+    source_document_id (s4a4)
+  - analysis_runs: created by b342e208f554 (tenant_id added there)
 """
 from typing import Sequence, Union
 
@@ -28,47 +35,129 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # ── Step 0: Create base tables for fresh installs ────────────────────────
-    # Each statement uses IF NOT EXISTS so it is a no-op on existing databases.
-    # FK constraints to tables created in later migrations (repositories,
-    # requirement_atoms, document_versions) are intentionally omitted here;
-    # those columns are plain integers and the FK constraints are added later.
+    # Minimal baseline schema only — subsequent migrations add the rest.
 
     op.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id          SERIAL PRIMARY KEY,
-            email       VARCHAR NOT NULL,
+            id              SERIAL PRIMARY KEY,
+            email           VARCHAR NOT NULL,
             hashed_password VARCHAR NOT NULL,
-            is_active   BOOLEAN NOT NULL DEFAULT true,
-            is_superuser BOOLEAN NOT NULL DEFAULT false,
-            roles       VARCHAR[] NOT NULL DEFAULT '{}',
-            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            is_active       BOOLEAN NOT NULL DEFAULT true,
+            is_superuser    BOOLEAN NOT NULL DEFAULT false,
+            roles           VARCHAR[] NOT NULL DEFAULT '{}',
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
             CONSTRAINT uq_users_email UNIQUE (email)
         )
     """)
     op.execute("CREATE INDEX IF NOT EXISTS ix_users_email ON users (email)")
 
+    # documents: excludes last_atom_diff (s16a1), file_suggestion_summary (s17c1),
+    # and cost columns (added below by this migration itself).
     op.execute("""
         CREATE TABLE IF NOT EXISTS documents (
-            id              SERIAL PRIMARY KEY,
-            filename        VARCHAR NOT NULL,
-            document_type   VARCHAR,
-            version         VARCHAR DEFAULT '1.0',
-            owner_id        INTEGER,
-            storage_path    VARCHAR,
-            raw_text        TEXT NOT NULL DEFAULT '',
+            id                  SERIAL PRIMARY KEY,
+            filename            VARCHAR NOT NULL,
+            document_type       VARCHAR,
+            version             VARCHAR DEFAULT '1.0',
+            owner_id            INTEGER,
+            storage_path        VARCHAR,
+            raw_text            TEXT NOT NULL DEFAULT '',
             composition_analysis JSONB,
-            status          VARCHAR DEFAULT 'uploaded',
-            progress        INTEGER DEFAULT 0,
-            error_message   TEXT,
-            file_size_kb    INTEGER,
-            content         TEXT,
-            last_atom_diff  JSONB,
+            status              VARCHAR DEFAULT 'uploaded',
+            progress            INTEGER DEFAULT 0,
+            error_message       TEXT,
+            file_size_kb        INTEGER,
+            content             TEXT,
+            created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    op.execute("CREATE INDEX IF NOT EXISTS ix_documents_filename ON documents (filename)")
+
+    # code_components: excludes repository_id (s3a1/s3a3), cost columns (s3a4/s3a5),
+    # analysis_started_at/completed_at (s3a6).
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS code_components (
+            id                      SERIAL PRIMARY KEY,
+            name                    VARCHAR NOT NULL,
+            component_type          VARCHAR NOT NULL,
+            location                VARCHAR NOT NULL,
+            version                 VARCHAR NOT NULL,
+            summary                 TEXT,
+            structured_analysis     JSONB,
+            analysis_delta          JSONB,
+            previous_analysis_hash  VARCHAR(64),
+            analysis_status         VARCHAR NOT NULL DEFAULT 'pending',
+            owner_id                INTEGER,
+            created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_id ON code_components (id)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_name ON code_components (name)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_analysis_status ON code_components (analysis_status)")
+
+    # mismatches: excludes direction/requirement_atom_id (s10a1) and enterprise
+    # fields (s16b1).
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS mismatches (
+            id                  SERIAL PRIMARY KEY,
+            mismatch_type       VARCHAR NOT NULL,
+            description         TEXT NOT NULL,
+            severity            VARCHAR NOT NULL,
+            status              VARCHAR NOT NULL DEFAULT 'open',
+            details             JSONB,
+            confidence          VARCHAR,
+            user_notes          TEXT,
+            document_id         INTEGER,
+            code_component_id   INTEGER,
+            owner_id            INTEGER,
+            created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    op.execute("CREATE INDEX IF NOT EXISTS ix_mismatches_id ON mismatches (id)")
+
+    # document_segments: excludes status/retry_count/last_error/analysis_run_id
+    # (all added by b342e208f554).
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS document_segments (
+            id              SERIAL PRIMARY KEY,
+            segment_type    VARCHAR NOT NULL,
+            start_char_index INTEGER NOT NULL,
+            end_char_index  INTEGER NOT NULL,
+            document_id     INTEGER,
             created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_documents_filename ON documents (filename)")
+
+    # analysisresult: excludes status/error_message/processing_time_ms
+    # (all added by b342e208f554). structured_data starts NOT NULL; b342e208f554
+    # makes it nullable.
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS analysisresult (
+            id              SERIAL PRIMARY KEY,
+            structured_data JSONB NOT NULL DEFAULT '{}',
+            segment_id      INTEGER,
+            document_id     INTEGER,
+            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS document_code_links (
+            id                  SERIAL PRIMARY KEY,
+            document_id         INTEGER,
+            code_component_id   INTEGER,
+            created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT _document_code_uc UNIQUE (document_id, code_component_id)
+        )
+    """)
+    op.execute("CREATE INDEX IF NOT EXISTS ix_document_code_links_id ON document_code_links (id)")
 
     op.execute("""
         CREATE TABLE IF NOT EXISTS initiatives (
@@ -84,107 +173,6 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS ix_initiatives_name ON initiatives (name)")
 
     op.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_runs (
-            id                  SERIAL PRIMARY KEY,
-            document_id         INTEGER,
-            triggered_by_user_id INTEGER,
-            status              VARCHAR NOT NULL DEFAULT 'pending',
-            created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
-            started_at          TIMESTAMP,
-            completed_at        TIMESTAMP,
-            total_segments      INTEGER,
-            completed_segments  INTEGER NOT NULL DEFAULT 0,
-            failed_segments     INTEGER NOT NULL DEFAULT 0,
-            error_message       TEXT,
-            error_details       JSONB,
-            learning_mode       BOOLEAN NOT NULL DEFAULT false,
-            run_metadata        JSONB
-        )
-    """)
-
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS document_segments (
-            id              SERIAL PRIMARY KEY,
-            segment_type    VARCHAR NOT NULL,
-            start_char_index INTEGER NOT NULL,
-            end_char_index  INTEGER NOT NULL,
-            document_id     INTEGER,
-            status          VARCHAR NOT NULL DEFAULT 'pending',
-            retry_count     INTEGER NOT NULL DEFAULT 0,
-            last_error      VARCHAR,
-            analysis_run_id INTEGER,
-            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """)
-
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS analysisresult (
-            id              SERIAL PRIMARY KEY,
-            structured_data JSONB,
-            segment_id      INTEGER,
-            document_id     INTEGER,
-            status          VARCHAR NOT NULL DEFAULT 'pending',
-            error_message   TEXT,
-            processing_time_ms INTEGER,
-            created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """)
-
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS consolidated_analyses (
-            id          SERIAL PRIMARY KEY,
-            document_id INTEGER,
-            data        JSONB NOT NULL DEFAULT '{}',
-            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """)
-
-    # code_components references repositories (created in a later migration);
-    # repository_id is created as a plain integer column here.
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS code_components (
-            id                      SERIAL PRIMARY KEY,
-            name                    VARCHAR NOT NULL,
-            component_type          VARCHAR NOT NULL,
-            location                VARCHAR NOT NULL,
-            version                 VARCHAR NOT NULL,
-            summary                 TEXT,
-            structured_analysis     JSONB,
-            analysis_delta          JSONB,
-            previous_analysis_hash  VARCHAR(64),
-            analysis_status         VARCHAR NOT NULL DEFAULT 'pending',
-            owner_id                INTEGER,
-            repository_id           INTEGER,
-            ai_cost_inr             NUMERIC(10,4) NOT NULL DEFAULT 0.0,
-            token_count_input       INTEGER NOT NULL DEFAULT 0,
-            token_count_output      INTEGER NOT NULL DEFAULT 0,
-            cost_breakdown          JSONB,
-            analysis_started_at     TIMESTAMP,
-            analysis_completed_at   TIMESTAMP,
-            created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_id ON code_components (id)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_name ON code_components (name)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_code_components_analysis_status ON code_components (analysis_status)")
-
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS document_code_links (
-            id                  SERIAL PRIMARY KEY,
-            document_id         INTEGER,
-            code_component_id   INTEGER,
-            created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
-            CONSTRAINT _document_code_uc UNIQUE (document_id, code_component_id)
-        )
-    """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_document_code_links_id ON document_code_links (id)")
-
-    op.execute("""
         CREATE TABLE IF NOT EXISTS initiative_assets (
             id              SERIAL PRIMARY KEY,
             initiative_id   INTEGER,
@@ -196,6 +184,8 @@ def upgrade() -> None:
         )
     """)
 
+    # ontology_concepts: excludes source_type (s3b1), source_component_id (s4a3),
+    # source_document_id (s4a4).
     op.execute("""
         CREATE TABLE IF NOT EXISTS ontology_concepts (
             id                  SERIAL PRIMARY KEY,
@@ -204,9 +194,6 @@ def upgrade() -> None:
             concept_type        VARCHAR(100) NOT NULL,
             description         TEXT,
             confidence_score    FLOAT,
-            source_type         VARCHAR(20) NOT NULL DEFAULT 'document',
-            source_component_id INTEGER,
-            source_document_id  INTEGER,
             is_active           BOOLEAN NOT NULL DEFAULT true,
             created_at          TIMESTAMPTZ DEFAULT NOW(),
             updated_at          TIMESTAMPTZ DEFAULT NOW()
@@ -229,43 +216,26 @@ def upgrade() -> None:
     """)
     op.execute("CREATE INDEX IF NOT EXISTS ix_ontology_relationships_id ON ontology_relationships (id)")
 
-    # mismatches references requirement_atoms and document_versions (later migrations);
-    # those FK columns are plain integers here.
     op.execute("""
-        CREATE TABLE IF NOT EXISTS mismatches (
-            id                      SERIAL PRIMARY KEY,
-            mismatch_type           VARCHAR NOT NULL,
-            description             TEXT NOT NULL,
-            severity                VARCHAR NOT NULL,
-            status                  VARCHAR NOT NULL DEFAULT 'open',
-            details                 JSONB,
-            confidence              VARCHAR,
-            user_notes              TEXT,
-            direction               VARCHAR DEFAULT 'forward',
-            requirement_atom_id     INTEGER,
-            document_id             INTEGER,
-            code_component_id       INTEGER,
-            owner_id                INTEGER,
-            resolution_note         TEXT,
-            status_changed_by_id    INTEGER,
-            status_changed_at       TIMESTAMP,
-            jira_issue_key          VARCHAR(50),
-            jira_issue_url          VARCHAR(500),
-            document_version_id     INTEGER,
-            created_commit_hash     VARCHAR(40),
-            resolved_commit_hash    VARCHAR(40),
-            created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
-            updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
+        CREATE TABLE IF NOT EXISTS consolidated_analyses (
+            id          SERIAL PRIMARY KEY,
+            document_id INTEGER,
+            data        JSONB NOT NULL DEFAULT '{}',
+            created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
         )
     """)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_mismatches_id ON mismatches (id)")
+
+    # analysis_runs is NOT pre-created here; b342e208f554 creates it with
+    # the correct ENUM column type AND adds tenant_id.
 
     # ── Step 1: Add tenant_id to all tables (IF NOT EXISTS) ─────────────────
+    # analysis_runs is excluded — b342e208f554 handles it when it creates that table.
     tables_to_update = [
         'users', 'documents', 'code_components', 'mismatches',
         'document_segments', 'analysisresult', 'document_code_links',
         'initiatives', 'initiative_assets', 'ontology_concepts',
-        'ontology_relationships', 'analysis_runs', 'consolidated_analyses',
+        'ontology_relationships', 'consolidated_analyses',
     ]
     for table in tables_to_update:
         op.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS tenant_id INTEGER NOT NULL DEFAULT 1")
@@ -295,8 +265,6 @@ def upgrade() -> None:
         )
     """)
     op.execute("CREATE INDEX IF NOT EXISTS ix_tenant_billing_tenant_id ON tenant_billing (tenant_id)")
-
-    # Seed default billing record for tenant 1 (idempotent)
     op.execute("""
         INSERT INTO tenant_billing (tenant_id, billing_type, balance_inr,
             low_balance_threshold, current_month_cost, last_30_days_cost,
@@ -316,10 +284,10 @@ def downgrade() -> None:
     op.execute("ALTER TABLE documents DROP COLUMN IF EXISTS ai_cost_inr")
 
     tables_to_revert = [
-        'consolidated_analyses', 'analysis_runs', 'ontology_relationships',
-        'ontology_concepts', 'initiative_assets', 'initiatives',
-        'document_code_links', 'analysisresult', 'document_segments',
-        'mismatches', 'code_components', 'documents', 'users',
+        'consolidated_analyses', 'ontology_relationships', 'ontology_concepts',
+        'initiative_assets', 'initiatives', 'document_code_links',
+        'analysisresult', 'document_segments', 'mismatches',
+        'code_components', 'documents', 'users',
     ]
     for table in tables_to_revert:
         op.execute(f"DROP INDEX IF EXISTS ix_{table}_tenant_id")
