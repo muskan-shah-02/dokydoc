@@ -76,7 +76,7 @@ def upgrade() -> None:
     op.execute("CREATE INDEX IF NOT EXISTS ix_documents_filename ON documents (filename)")
 
     # code_components: excludes repository_id (s3a1/s3a3), cost columns (s3a4/s3a5),
-    # analysis_started_at/completed_at (s3a6).
+    # analysis_started_at/completed_at (s3a6), analysis_delta/previous_analysis_hash (s3d5).
     op.execute("""
         CREATE TABLE IF NOT EXISTS code_components (
             id                      SERIAL PRIMARY KEY,
@@ -86,8 +86,6 @@ def upgrade() -> None:
             version                 VARCHAR NOT NULL,
             summary                 TEXT,
             structured_analysis     JSONB,
-            analysis_delta          JSONB,
-            previous_analysis_hash  VARCHAR(64),
             analysis_status         VARCHAR NOT NULL DEFAULT 'pending',
             owner_id                INTEGER,
             created_at              TIMESTAMP NOT NULL DEFAULT NOW(),

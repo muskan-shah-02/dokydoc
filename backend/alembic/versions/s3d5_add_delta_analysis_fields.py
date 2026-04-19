@@ -20,18 +20,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Add delta analysis JSON field — stores added/removed/modified diff
-    op.add_column(
-        'code_components',
-        sa.Column('analysis_delta', sa.JSON(), nullable=True)
-    )
-    # Add hash of previous analysis — used to detect whether re-analysis changed anything
-    op.add_column(
-        'code_components',
-        sa.Column('previous_analysis_hash', sa.String(64), nullable=True)
-    )
+    op.execute("ALTER TABLE code_components ADD COLUMN IF NOT EXISTS analysis_delta JSONB")
+    op.execute("ALTER TABLE code_components ADD COLUMN IF NOT EXISTS previous_analysis_hash VARCHAR(64)")
 
 
 def downgrade() -> None:
-    op.drop_column('code_components', 'previous_analysis_hash')
-    op.drop_column('code_components', 'analysis_delta')
+    op.execute("ALTER TABLE code_components DROP COLUMN IF EXISTS previous_analysis_hash")
+    op.execute("ALTER TABLE code_components DROP COLUMN IF EXISTS analysis_delta")
