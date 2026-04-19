@@ -21,7 +21,7 @@ def upgrade():
         sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
         sa.Column('document_id', sa.Integer,
                   sa.ForeignKey('documents.id', ondelete='CASCADE'),
-                  nullable=False, index=True),
+                  nullable=False),
         sa.Column('suggested_filename', sa.String(500), nullable=False),
         sa.Column('reason', sa.Text, nullable=False),
         sa.Column('atom_ids', ARRAY(sa.Integer), nullable=False, server_default='{}'),

@@ -19,7 +19,7 @@ def upgrade() -> None:
     op.create_table(
         "notification_preferences",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("tenant_id", sa.Integer(), nullable=False, index=True),
+        sa.Column("tenant_id", sa.Integer(), nullable=False),
         sa.Column(
             "user_id",
             sa.Integer(),

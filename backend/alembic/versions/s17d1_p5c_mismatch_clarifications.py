@@ -20,7 +20,7 @@ def upgrade():
         sa.Column('tenant_id', sa.Integer, nullable=False, index=True),
         sa.Column('mismatch_id', sa.Integer,
                   sa.ForeignKey('mismatches.id', ondelete='CASCADE'),
-                  nullable=False, index=True),
+                  nullable=False),
         sa.Column('requested_by_user_id', sa.Integer,
                   sa.ForeignKey('users.id'), nullable=False),
         sa.Column('assignee_user_id', sa.Integer,
