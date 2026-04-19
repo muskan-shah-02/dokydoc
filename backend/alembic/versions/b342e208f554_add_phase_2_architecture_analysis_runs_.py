@@ -101,7 +101,7 @@ def upgrade() -> None:
         SELECT DISTINCT 
             d.id as document_id,
             d.owner_id as triggered_by_user_id,
-            'COMPLETED' as status,
+            'COMPLETED'::analysisrunstatus as status,
             d.created_at as created_at,
             d.updated_at as completed_at,
             COALESCE(segment_counts.completed, 0) as completed_segments,
