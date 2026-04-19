@@ -19,8 +19,8 @@ def upgrade() -> None:
     op.create_table(
         "document_versions",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("document_id", sa.Integer(), sa.ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True),
-        sa.Column("tenant_id", sa.Integer(), nullable=False, index=True),
+        sa.Column("document_id", sa.Integer(), sa.ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("tenant_id", sa.Integer(), nullable=False),
         sa.Column("version_number", sa.Integer(), nullable=False),
         sa.Column("content_text", sa.Text(), nullable=False, server_default=""),
         sa.Column("content_hash", sa.String(64), nullable=False),
