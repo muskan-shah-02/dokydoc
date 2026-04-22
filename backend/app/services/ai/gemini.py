@@ -165,7 +165,7 @@ class GeminiService(LoggerMixin):
                     user_id=user_id,
                     feature_type="code_analysis" if "code" in operation or "analysis" in operation else "document_analysis",
                     operation=operation,
-                    model_used="gemini-2.5-flash",
+                    model_used=settings.GEMINI_MODEL,
                     input_tokens=tokens.get("input_tokens", 0),
                     output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
                     cost_usd=cost_usd,

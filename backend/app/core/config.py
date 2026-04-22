@@ -45,20 +45,31 @@ class Settings(BaseSettings):
 
     # --- AI Service Settings: Gemini ---
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
-    GEMINI_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_MODEL")
-    GEMINI_VISION_MODEL: str = Field(default="gemini-2.5-flash", env="GEMINI_VISION_MODEL")
+    GEMINI_MODEL: str = Field(default="gemini-2.0-flash", env="GEMINI_MODEL")           # Paid lane default
+    GEMINI_FREE_MODEL: str = Field(default="gemini-2.0-flash-lite", env="GEMINI_FREE_MODEL")  # Free lane (no recharge)
+    GEMINI_VISION_MODEL: str = Field(default="gemini-2.0-flash", env="GEMINI_VISION_MODEL")
     GEMINI_MAX_RETRIES: int = Field(default=3, env="GEMINI_MAX_RETRIES")
     GEMINI_TIMEOUT: int = Field(default=60, env="GEMINI_TIMEOUT")
 
     # --- AI Service Settings: Claude/Anthropic (ADHOC-07) ---
     ANTHROPIC_API_KEY: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
-    ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-5-20250929", env="ANTHROPIC_MODEL")
+    ANTHROPIC_MODEL: str = Field(default="claude-sonnet-4-6", env="ANTHROPIC_MODEL")
+    ANTHROPIC_HAIKU_MODEL: str = Field(default="claude-haiku-4-5-20251001", env="ANTHROPIC_HAIKU_MODEL")
     ANTHROPIC_MAX_TOKENS: int = Field(default=4096, env="ANTHROPIC_MAX_TOKENS")
     ANTHROPIC_TIMEOUT: int = Field(default=120, env="ANTHROPIC_TIMEOUT")
 
     # --- AI Provider Routing (ADHOC-08) ---
     # "gemini" = Gemini only (default), "dual" = Claude for code + Gemini for docs
     AI_PROVIDER_MODE: str = Field(default="gemini", env="AI_PROVIDER_MODE")
+
+    # --- Phase 9: Billing & Wallet ---
+    MARKUP_PERCENT: float = Field(default=15.0, env="MARKUP_PERCENT")          # 15% flat markup on raw AI cost
+    SIGNUP_FREE_CREDIT_INR: float = Field(default=100.0, env="SIGNUP_FREE_CREDIT_INR")
+    LOW_WALLET_THRESHOLD_INR: float = Field(default=100.0, env="LOW_WALLET_THRESHOLD_INR")
+    # Razorpay (Track B — enabled after GSTIN approval)
+    RAZORPAY_ENABLED: bool = Field(default=False, env="RAZORPAY_ENABLED")
+    RAZORPAY_KEY_ID: Optional[str] = Field(default=None, env="RAZORPAY_KEY_ID")
+    RAZORPAY_KEY_SECRET: Optional[str] = Field(default=None, env="RAZORPAY_KEY_SECRET")
 
     # --- Git Webhook Settings (ADHOC-09) ---
     WEBHOOK_SECRET: Optional[str] = Field(default=None, env="WEBHOOK_SECRET")
