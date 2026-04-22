@@ -2,10 +2,15 @@
 Billing and cost tracking API endpoints.
 Sprint 1: BE-COST-03 (Billing API)
 Sprint 2: Billing Analytics Dashboard with full transparency
+Phase 9: Wallet system, cost preview, enterprise contact, model selector
 """
+from decimal import Decimal
 from typing import List, Optional
 from datetime import date
+import csv
+import io
 from fastapi import APIRouter, HTTPException, Depends, Request, Response, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -28,6 +33,21 @@ from app.schemas.usage_log import (
     UserBillingAnalyticsResponse,
     AllUsersAnalyticsResponse,
 )
+from app.schemas.wallet_transaction import (
+    WalletBalanceResponse,
+    WalletTransactionResponse,
+    TopUpRequest,
+    SetPreferredModelRequest,
+)
+from app.schemas.enterprise_contact import (
+    EnterpriseContactCreate,
+    EnterpriseContactResponse,
+    CostPreviewRequest,
+    CostPreviewResponse,
+)
+from app.models.enterprise_contact_request import EnterpriseContactRequest
+from app.services.wallet_service import wallet_service, InsufficientWalletBalance
+from app.services.cost_service import cost_service, SUPPORTED_MODELS
 
 logger = get_logger("api.billing")
 
@@ -295,68 +315,16 @@ def get_billing_usage(
     return usage
 
 
-@router.get("/pricing")
-def get_pricing_info():
-    """
-    Get complete pricing information for transparency.
-
-    SPRINT 2: Returns all pricing factors, formulas, and current rates
-    for display on billing dashboards.
-
-    No authentication required - pricing is public information.
-
-    Returns:
-        {
-            "model": "gemini-2.5-flash",
-            "rates_usd": {
-                "input_per_1m_tokens": 0.30,
-                "output_per_1m_tokens": 2.50,
-                ...
-            },
-            "rates_inr": {...},
-            "exchange_rate": {...},
-            "formula": {...},
-            "cost_factors": [...]
-        }
-    """
-    from app.services.cost_service import cost_service
-
-    pricing_info = cost_service.get_pricing_info()
-
-    logger.info(
-        f"Pricing info requested: model={pricing_info['model']}, "
-        f"input=${pricing_info['rates_usd']['input_per_1m_tokens']}/1M, "
-        f"output=${pricing_info['rates_usd']['output_per_1m_tokens']}/1M"
-    )
-
-    return pricing_info
-
-
 @router.get("/estimate")
 def estimate_document_cost(
     doc_size_kb: float = 10.0,
     passes: int = 3,
-    current_user: User = Depends(deps.get_current_user)
+    model: Optional[str] = None,
+    current_user: User = Depends(deps.get_current_user),
 ):
-    """
-    Estimate cost for processing a document.
-
-    Args:
-        doc_size_kb: Document size in KB (default: 10)
-        passes: Number of analysis passes (default: 3)
-
-    Returns:
-        Cost estimate with detailed breakdown
-    """
-    from app.services.cost_service import cost_service
-
-    estimate = cost_service.estimate_document_cost(doc_size_kb, passes)
-
-    logger.info(
-        f"Cost estimate requested: {doc_size_kb}KB doc, {passes} passes = ₹{estimate['cost_inr']:.2f}"
-    )
-
-    return estimate
+    """Quick GET cost estimate (unauthenticated model; prefer POST /cost-preview for full detail)."""
+    estimate = cost_service.estimate_document_cost(doc_size_kb, passes, model=model)
+    return estimate.to_dict()
 
 
 # =============================================================================
@@ -897,3 +865,257 @@ def get_user_document_usage(
     return crud.usage_log.get_user_documents(
         db, tenant_id=tenant_id, user_id=user_id, start=start, end=end, limit=limit
     )
+
+
+# =============================================================================
+# PHASE 9: WALLET ENDPOINTS
+# =============================================================================
+
+@router.get("/wallet/balance", response_model=WalletBalanceResponse)
+def get_wallet_balance(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+):
+    """Return current wallet balance including free signup credit."""
+    result = wallet_service.get_balance(db, tenant_id=tenant_id)
+    return WalletBalanceResponse(**result)
+
+
+@router.get("/wallet/transactions", response_model=List[WalletTransactionResponse])
+def get_wallet_transactions(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return paginated wallet transaction history for the tenant."""
+    txns = wallet_service.get_transactions(db, tenant_id=tenant_id, limit=limit, offset=offset)
+    return [WalletTransactionResponse.model_validate(t) for t in txns]
+
+
+@router.post("/wallet/topup", response_model=WalletTransactionResponse)
+def topup_wallet(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: TopUpRequest,
+):
+    """
+    Credit prepaid balance.
+
+    Track A (no Razorpay): call directly with amount_inr.
+    Track B (Razorpay): include razorpay_payment_id + razorpay_order_id after payment verification.
+    """
+    txn = wallet_service.credit_wallet(
+        db,
+        tenant_id=tenant_id,
+        amount_inr=Decimal(str(body.amount_inr)),
+        razorpay_payment_id=body.razorpay_payment_id,
+        razorpay_order_id=body.razorpay_order_id,
+        description=f"Top-up ₹{body.amount_inr:.2f}",
+        user_id=current_user.id,
+    )
+    db.commit()
+    logger.info(f"tenant={tenant_id} topped up ₹{body.amount_inr}")
+    return WalletTransactionResponse.model_validate(txn)
+
+
+@router.put("/wallet/preferred-model")
+def set_preferred_model(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: SetPreferredModelRequest,
+):
+    """Set the tenant's default AI model for new analyses."""
+    from app.services.cost_service import PRICING_REGISTRY
+    if body.model_id not in PRICING_REGISTRY:
+        raise HTTPException(status_code=422, detail=f"Unknown model_id: {body.model_id!r}")
+
+    db.execute(
+        __import__("sqlalchemy").text(
+            "UPDATE tenants SET preferred_model = :m WHERE id = :id"
+        ),
+        {"m": body.model_id, "id": tenant_id},
+    )
+    db.commit()
+    return {"preferred_model": body.model_id}
+
+
+# =============================================================================
+# PHASE 9: COST PREVIEW
+# =============================================================================
+
+@router.post("/cost-preview", response_model=CostPreviewResponse)
+def cost_preview(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    body: CostPreviewRequest,
+):
+    """
+    Estimate cost before running analysis. Shows raw + markup breakdown.
+
+    Used by the CostPreviewModal so users know what they'll spend before
+    clicking "Analyze".
+    """
+    breakdown = cost_service.estimate_document_cost(
+        doc_size_kb=body.doc_size_kb,
+        passes=body.passes,
+        model=body.model_id,
+    )
+
+    wallet = wallet_service.get_balance(db, tenant_id=tenant_id)
+    total_available = wallet["total_available_inr"]
+
+    return CostPreviewResponse(
+        model_id=breakdown.model_id,
+        doc_size_kb=body.doc_size_kb,
+        passes=body.passes,
+        input_tokens=breakdown.input_tokens,
+        output_tokens=breakdown.output_tokens,
+        thinking_tokens=breakdown.thinking_tokens,
+        raw_cost_inr=float(breakdown.raw_cost_inr),
+        markup_percent=float(breakdown.markup_percent),
+        markup_inr=float(breakdown.markup_inr),
+        total_cost_inr=float(breakdown.total_cost_inr),
+        wallet_balance_inr=total_available,
+        can_afford=total_available >= float(breakdown.total_cost_inr),
+    )
+
+
+# =============================================================================
+# PHASE 9: MODELS CATALOG
+# =============================================================================
+
+@router.get("/models")
+def list_supported_models():
+    """Return all supported AI models with pricing and description. No auth required."""
+    return {
+        "models": SUPPORTED_MODELS,
+        "markup_percent": float(__import__("app.services.cost_service", fromlist=["MARKUP_PERCENT"]).MARKUP_PERCENT),
+    }
+
+
+@router.get("/pricing")
+def get_pricing_info():
+    """
+    Get complete pricing information for transparency.
+
+    Returns pricing registry with current exchange rate and markup.
+    No authentication required — pricing is public information.
+    """
+    return cost_service.get_pricing_info()
+
+
+# =============================================================================
+# PHASE 9: USAGE EXPORT
+# =============================================================================
+
+@router.get("/export")
+def export_usage_csv(
+    *,
+    tenant_id: int = Depends(deps.get_tenant_id),
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+    time_range: TimeRangeEnum = Query(default=TimeRangeEnum.THIS_MONTH),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+):
+    """
+    Export usage logs as CSV for accounting/finance teams.
+
+    Includes raw_cost_inr, markup_inr, total_cost_inr per log line.
+    """
+    start, end = crud.usage_log.get_date_range(time_range, start_date, end_date)
+    logs = crud.usage_log.get_by_tenant(
+        db,
+        tenant_id=tenant_id,
+        time_range=time_range,
+        start_date=start_date,
+        end_date=end_date,
+        limit=10_000,
+        offset=0,
+    )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "id", "date", "feature", "operation", "model",
+        "input_tokens", "output_tokens", "thinking_tokens", "cached_tokens",
+        "raw_cost_inr", "markup_inr", "markup_percent", "total_cost_inr",
+        "document_id",
+    ])
+    for log in logs:
+        raw = float(log.raw_cost_inr or log.cost_inr or 0)
+        markup = float(log.markup_inr or 0)
+        markup_pct = float(log.markup_percent or 15.0)
+        total = raw + markup
+        writer.writerow([
+            log.id,
+            log.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            log.feature_type,
+            log.operation,
+            log.model_used,
+            log.input_tokens,
+            log.output_tokens,
+            getattr(log, "thinking_tokens", 0) or 0,
+            log.cached_tokens,
+            f"{raw:.4f}",
+            f"{markup:.4f}",
+            f"{markup_pct:.2f}",
+            f"{total:.4f}",
+            log.document_id or "",
+        ])
+
+    buf.seek(0)
+    filename = f"dokydoc_usage_{start}_{end}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# =============================================================================
+# PHASE 9: ENTERPRISE CONTACT
+# =============================================================================
+
+@router.post("/enterprise-contact", response_model=EnterpriseContactResponse, status_code=201)
+def submit_enterprise_contact(
+    *,
+    db: Session = Depends(deps.get_db),
+    body: EnterpriseContactCreate,
+    # Optional — works for unauthenticated public users too
+    tenant_id: Optional[int] = None,
+    current_user: Optional[User] = None,
+):
+    """
+    Submit an enterprise contact request.
+
+    No authentication required — public endpoint for the pricing/contact page.
+    Logged-in users get their tenant_id attached automatically.
+    """
+    contact = EnterpriseContactRequest(
+        company_name=body.company_name,
+        contact_name=body.contact_name,
+        email=body.email,
+        phone=body.phone,
+        team_size=body.team_size,
+        use_case=body.use_case,
+        message=body.message,
+        tenant_id=tenant_id,
+        submitted_by_user_id=getattr(current_user, "id", None),
+    )
+    db.add(contact)
+    db.commit()
+    db.refresh(contact)
+    logger.info(f"Enterprise contact from {body.email} (company={body.company_name!r})")
+    return EnterpriseContactResponse.model_validate(contact)

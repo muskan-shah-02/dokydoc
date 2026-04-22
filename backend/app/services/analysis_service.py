@@ -8,13 +8,14 @@ from app.services.document_parser import MultiModalDocumentParser
 from app.services.ai.gemini import gemini_service
 from app.services.ai.prompt_manager import prompt_manager, PromptType
 from app.services.analysis_run_service import AnalysisRunService
-from app.services.cost_service import cost_service  # ✅ SPRINT 1 PHASE 2 FIX
-from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException  # ✅ SPRINT 2 BILLING FIX
+from app.services.cost_service import cost_service, CostBreakdown
+from app.services.ai.model_selector import model_selector
+from app.services.billing_enforcement_service import billing_enforcement_service, InsufficientBalanceException, MonthlyLimitExceededException
 from app.core.logging import LoggerMixin
 from app.core.exceptions import AIAnalysisException, DocumentProcessingException
 from app.models import SegmentStatus, AnalysisResultStatus
-from app.models.usage_log import FeatureType, OperationType  # ✅ SPRINT 2: Usage logging
-from app.schemas.usage_log import UsageLogCreate  # ✅ SPRINT 2: Usage logging
+from app.models.usage_log import FeatureType, OperationType
+from app.schemas.usage_log import UsageLogCreate
 
 # Configuration: Context window for segment analysis (characters)
 # Provides surrounding text to AI for better understanding
@@ -147,18 +148,19 @@ class DocumentAnalysisEngine(LoggerMixin):
         tenant_id: int,
         document_id: int,
         operation: str,
-        input_tokens: int,
-        output_tokens: int,
-        cost_usd: float,
-        cost_inr: float,
+        breakdown: CostBreakdown,
         processing_time: Optional[float] = None,
         user_id: Optional[int] = None,
     ):
-        """
-        Log AI usage to usage_logs table for billing analytics.
-        SPRINT 2: Enables feature-based cost breakdown and transparency.
-        """
+        """Log AI usage to usage_logs with Phase 9 markup transparency fields."""
         try:
+            extra = {
+                "document_id": document_id,
+                "raw_cost_inr": float(breakdown.raw_cost_inr),
+                "markup_inr": float(breakdown.markup_inr),
+                "markup_percent": float(breakdown.markup_percent),
+                "thinking_tokens": breakdown.thinking_tokens,
+            }
             crud.usage_log.log_usage(
                 db=db,
                 tenant_id=tenant_id,
@@ -166,17 +168,20 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document_id=document_id,
                 feature_type=FeatureType.DOCUMENT_ANALYSIS.value,
                 operation=operation,
-                model_used="gemini-2.5-flash",
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_usd=cost_usd,
-                cost_inr=cost_inr,
+                model_used=breakdown.model_id,
+                input_tokens=breakdown.input_tokens,
+                output_tokens=breakdown.output_tokens,
+                cost_usd=float(breakdown.raw_cost_usd),
+                cost_inr=float(breakdown.total_cost_inr),
                 processing_time_seconds=processing_time,
-                extra_data={"document_id": document_id},
+                extra_data=extra,
             )
-            self.logger.debug(f"📊 Logged usage: {operation}, ₹{cost_inr:.4f}")
+            self.logger.debug(
+                f"Logged usage: {operation} | model={breakdown.model_id} | "
+                f"raw=₹{float(breakdown.raw_cost_inr):.4f} markup=₹{float(breakdown.markup_inr):.4f} "
+                f"total=₹{float(breakdown.total_cost_inr):.4f}"
+            )
         except Exception as e:
-            # Don't fail the analysis if logging fails
             self.logger.warning(f"Failed to log usage for {operation}: {e}")
 
     # --- NEW: Helper to check for stop signal ---
@@ -283,18 +288,15 @@ class DocumentAnalysisEngine(LoggerMixin):
                 document.composition_analysis = composition_analysis
                 db.commit()
 
-                # Log Pass 1 usage for analytics (output_tokens includes thinking tokens)
+                # Log Pass 1 usage for analytics
                 pass_1_data = self._cost_tracker.get(document_id, {}).get('pass_1_composition', {})
-                if pass_1_data:
+                if pass_1_data and 'breakdown' in pass_1_data:
                     self._log_usage(
                         db=db,
                         tenant_id=document.tenant_id,
                         document_id=document_id,
                         operation=OperationType.PASS_1_COMPOSITION.value,
-                        input_tokens=pass_1_data.get('input_tokens', 0),
-                        output_tokens=pass_1_data.get('output_tokens', 0) + pass_1_data.get('thinking_tokens', 0),
-                        cost_usd=pass_1_data.get('cost_inr', 0) / 84,
-                        cost_inr=pass_1_data.get('cost_inr', 0),
+                        breakdown=pass_1_data['breakdown'],
                         processing_time=pass_1_duration,
                     )
 
@@ -311,18 +313,15 @@ class DocumentAnalysisEngine(LoggerMixin):
                 )
                 pass_2_duration = time.time() - start_time
 
-                # Log Pass 2 usage for analytics (output_tokens includes thinking tokens)
+                # Log Pass 2 usage for analytics
                 pass_2_data = self._cost_tracker.get(document_id, {}).get('pass_2_segmentation', {})
-                if pass_2_data:
+                if pass_2_data and 'breakdown' in pass_2_data:
                     self._log_usage(
                         db=db,
                         tenant_id=document.tenant_id,
                         document_id=document_id,
                         operation=OperationType.PASS_2_SEGMENTING.value,
-                        input_tokens=pass_2_data.get('input_tokens', 0),
-                        output_tokens=pass_2_data.get('output_tokens', 0) + pass_2_data.get('thinking_tokens', 0),
-                        cost_usd=pass_2_data.get('cost_inr', 0) / 84,
-                        cost_inr=pass_2_data.get('cost_inr', 0),
+                        breakdown=pass_2_data['breakdown'],
                         processing_time=pass_2_duration,
                     )
 
@@ -337,18 +336,15 @@ class DocumentAnalysisEngine(LoggerMixin):
                 await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
                 pass_3_duration = time.time() - start_time
 
-                # Log Pass 3 usage for analytics (output_tokens includes thinking tokens)
+                # Log Pass 3 usage for analytics
                 pass_3_data = self._cost_tracker.get(document_id, {}).get('pass_3_extraction', {})
-                if pass_3_data:
+                if pass_3_data and 'breakdown' in pass_3_data:
                     self._log_usage(
                         db=db,
                         tenant_id=document.tenant_id,
                         document_id=document_id,
                         operation=OperationType.PASS_3_EXTRACTION.value,
-                        input_tokens=pass_3_data.get('input_tokens', 0),
-                        output_tokens=pass_3_data.get('output_tokens', 0) + pass_3_data.get('thinking_tokens', 0),
-                        cost_usd=pass_3_data.get('cost_inr', 0) / 84,
-                        cost_inr=pass_3_data.get('cost_inr', 0),
+                        breakdown=pass_3_data['breakdown'],
                         processing_time=pass_3_duration,
                     )
                 
@@ -361,21 +357,24 @@ class DocumentAnalysisEngine(LoggerMixin):
                     await self._feed_to_business_ontology(db, document_id)
 
                 # ✅ SPRINT 1 PHASE 2: Calculate REAL costs from tracked token usage
-                cost_breakdown = self._cost_tracker.get(document_id, {})
-                total_cost_inr = sum(pass_data.get('cost_inr', 0) for pass_data in cost_breakdown.values())
-                total_input_tokens = sum(pass_data.get('input_tokens', 0) for pass_data in cost_breakdown.values())
-                total_output_tokens = sum(pass_data.get('output_tokens', 0) for pass_data in cost_breakdown.values())
+                raw_tracker = self._cost_tracker.get(document_id, {})
+                total_cost_inr = sum(pass_data.get('cost_inr', 0) for pass_data in raw_tracker.values())
+                total_input_tokens = sum(pass_data.get('input_tokens', 0) for pass_data in raw_tracker.values())
+                total_output_tokens = sum(pass_data.get('output_tokens', 0) for pass_data in raw_tracker.values())
                 total_tokens = total_input_tokens + total_output_tokens
                 total_calls = self._api_call_counter.get(document_id, 0)
 
-                self.logger.info(f"📊 ANALYSIS COMPLETE for document {document_id}")
-                self.logger.info(f"💰 TOTAL GEMINI API CALLS: {total_calls}")
-                self.logger.info(f"📊 TOTAL TOKENS: {total_tokens:,} ({total_input_tokens:,} input + {total_output_tokens:,} output)")
-                self.logger.info(f"💵 ACTUAL COST: ₹{total_cost_inr:.4f} INR (~${total_cost_inr/84:.4f} USD)")
-                self.logger.info(f"📋 Cost Breakdown by Pass:")
+                # Build JSON-serializable cost breakdown (exclude CostBreakdown objects)
+                cost_breakdown = {
+                    pass_name: {k: v for k, v in pass_data.items() if k != 'breakdown'}
+                    for pass_name, pass_data in raw_tracker.items()
+                }
+
+                self.logger.info(f"ANALYSIS COMPLETE for document {document_id}")
+                self.logger.info(f"Total API calls: {total_calls} | tokens: {total_tokens:,} | cost: ₹{total_cost_inr:.4f}")
                 for pass_name, pass_data in cost_breakdown.items():
                     self.logger.info(
-                        f"   - {pass_name}: ₹{pass_data.get('cost_inr', 0):.4f} "
+                        f"  {pass_name}: ₹{pass_data.get('cost_inr', 0):.4f} "
                         f"({pass_data.get('input_tokens', 0):,} in + {pass_data.get('output_tokens', 0):,} out)"
                     )
 
@@ -388,10 +387,10 @@ class DocumentAnalysisEngine(LoggerMixin):
                         obj_in={
                             "status": "completed",
                             "progress": 100,
-                            "ai_cost_inr": total_cost_inr,  # ✅ Real cost tracking
+                            "ai_cost_inr": total_cost_inr,
                             "token_count_input": total_input_tokens,
                             "token_count_output": total_output_tokens,
-                            "cost_breakdown": cost_breakdown  # ✅ Detailed breakdown
+                            "cost_breakdown": cost_breakdown
                         }
                     )
 
@@ -430,7 +429,8 @@ class DocumentAnalysisEngine(LoggerMixin):
             )
 
             self._cost_tracker[document_id]['pass_1_composition'] = {
-                'cost_inr': cost_data['cost_inr'],
+                'breakdown': cost_data,
+                'cost_inr': cost_data.cost_inr,
                 'input_tokens': tokens['input_tokens'],
                 'output_tokens': tokens['output_tokens'],
                 'thinking_tokens': tokens['thinking_tokens'],
@@ -476,7 +476,8 @@ class DocumentAnalysisEngine(LoggerMixin):
                 thinking_tokens=tokens['thinking_tokens'],
             )
             self._cost_tracker[document_id]['pass_2_segmentation'] = {
-                'cost_inr': cost_data['cost_inr'],
+                'breakdown': cost_data,
+                'cost_inr': cost_data.cost_inr,
                 'input_tokens': tokens['input_tokens'],
                 'output_tokens': tokens['output_tokens'],
                 'thinking_tokens': tokens['thinking_tokens'],
@@ -599,7 +600,7 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                         output_tokens=tokens['output_tokens'],
                         thinking_tokens=tokens['thinking_tokens'],
                     )
-                    pass_3_cost_inr += cost_data['cost_inr']
+                    pass_3_cost_inr += cost_data.cost_inr
                     pass_3_input_tokens += tokens['input_tokens']
                     pass_3_output_tokens += tokens['output_tokens']
                     pass_3_thinking_tokens += tokens['thinking_tokens']
@@ -644,8 +645,14 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                     continue
 
             # Save accumulated Pass 3 costs (includes thinking tokens)
+            pass_3_breakdown = cost_service.calculate_cost_from_actual_tokens(
+                input_tokens=pass_3_input_tokens,
+                output_tokens=pass_3_output_tokens,
+                thinking_tokens=pass_3_thinking_tokens,
+            )
             self._cost_tracker[document_id]['pass_3_extraction'] = {
-                'cost_inr': pass_3_cost_inr,
+                'breakdown': pass_3_breakdown,
+                'cost_inr': pass_3_breakdown.cost_inr,
                 'input_tokens': pass_3_input_tokens,
                 'output_tokens': pass_3_output_tokens,
                 'thinking_tokens': pass_3_thinking_tokens,

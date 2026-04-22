@@ -98,6 +98,12 @@ class UsageLog(Base):
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0.0)
     cost_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0.0)
 
+    # Phase 9: Markup transparency
+    raw_cost_inr: Mapped[Optional[float]] = mapped_column(Numeric(12, 4), nullable=True)
+    markup_inr: Mapped[Optional[float]] = mapped_column(Numeric(12, 4), nullable=True)
+    markup_percent: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+    thinking_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # Processing time in seconds
     processing_time_seconds: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
 

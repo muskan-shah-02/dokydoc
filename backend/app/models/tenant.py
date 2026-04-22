@@ -44,6 +44,12 @@ class Tenant(Base):
     # Settings (JSON field for flexible configuration)
     settings: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False, server_default='{}')
 
+    # Phase 9: Wallet / prepaid billing
+    wallet_balance_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0.0, server_default='0')
+    wallet_free_credit_inr: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0.0, server_default='0')
+    preferred_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    razorpay_customer_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
     # Audit fields
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

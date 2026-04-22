@@ -17,6 +17,7 @@ import Image from "next/image";
 import { useAuth } from "@/contexts/AuthContext";
 import { useNotifications } from "@/contexts/NotificationContext";
 import { RoleSwitcher } from "./RoleSwitcher";
+import { WalletBalanceBadge } from "@/components/billing/WalletBalanceBadge";
 import {
   User,
   Settings,
@@ -32,6 +33,7 @@ import {
   AlertTriangle,
   Info,
   Sparkles,
+  CreditCard,
 } from "lucide-react";
 
 interface HeaderProps {
@@ -127,6 +129,9 @@ export function Header({ onMenuToggle }: HeaderProps) {
             </span>
           </div>
         )}
+
+        {/* Wallet Balance Badge */}
+        <WalletBalanceBadge />
 
         {/* AskyDoc Quick Access */}
         <Link
@@ -345,6 +350,15 @@ export function Header({ onMenuToggle }: HeaderProps) {
                   >
                     <User className="h-4 w-4 text-gray-500" />
                     <span>Profile Settings</span>
+                  </Link>
+
+                  <Link
+                    href="/billing"
+                    onClick={() => setUserMenuOpen(false)}
+                    className="flex items-center space-x-3 rounded-md px-3 py-2 text-sm hover:bg-gray-100"
+                  >
+                    <CreditCard className="h-4 w-4 text-gray-500" />
+                    <span>Billing & Wallet</span>
                   </Link>
 
                   <Link

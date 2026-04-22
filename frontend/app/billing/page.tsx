@@ -36,6 +36,25 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ModelSelectorDropdown } from "@/components/billing/ModelSelectorDropdown";
+import { EnterpriseContactForm } from "@/components/billing/EnterpriseContactForm";
+
+interface WalletBalance {
+  balance_inr: number;
+  free_credit_inr: number;
+  total_available_inr: number;
+  low_balance: boolean;
+  preferred_model: string | null;
+}
+
+interface WalletTxn {
+  id: number;
+  txn_type: string;
+  amount_inr: number;
+  balance_after_inr: number;
+  description: string | null;
+  created_at: string;
+}
 
 interface BillingData {
   balance: number;
@@ -76,11 +95,18 @@ export default function BillingPage() {
   const [balanceAmount, setBalanceAmount] = useState("");
   const [addBalanceLoading, setAddBalanceLoading] = useState(false);
 
+  // Phase 9 wallet state
+  const [wallet, setWallet] = useState<WalletBalance | null>(null);
+  const [walletTxns, setWalletTxns] = useState<WalletTxn[]>([]);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [preferredModel, setPreferredModel] = useState<string | null>(null);
+
   const isPrepaid = tenant?.billing_type === "prepaid";
 
   // Load billing data
   useEffect(() => {
     loadBillingData();
+    loadWallet();
   }, []);
 
   const loadBillingData = async () => {
@@ -105,6 +131,51 @@ export default function BillingPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const loadWallet = async () => {
+    try {
+      const [bal, txns] = await Promise.all([
+        api.get("/billing/wallet/balance"),
+        api.get("/billing/wallet/transactions?limit=20"),
+      ]);
+      setWallet(bal as WalletBalance);
+      setWalletTxns(txns as WalletTxn[]);
+      setPreferredModel((bal as WalletBalance).preferred_model);
+    } catch (_) {}
+  };
+
+  const handleExportCSV = async () => {
+    setExportLoading(true);
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1"}/billing/export`,
+        {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+            "X-Tenant-ID": String(tenant?.id ?? ""),
+          },
+        }
+      );
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dokydoc_usage_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (_) {
+      alert("Export failed. Please try again.");
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
+  const handleSetPreferredModel = async (modelId: string) => {
+    try {
+      await api.put("/billing/wallet/preferred-model", { model_id: modelId });
+      setPreferredModel(modelId);
+    } catch (_) {}
   };
 
   // Add balance (prepaid only)
@@ -145,12 +216,22 @@ export default function BillingPage() {
             </p>
           </div>
 
-          {isPrepaid && (
-            <Button onClick={() => setAddBalanceOpen(true)}>
-              <Plus className="mr-2 h-4 w-4" />
-              Add Balance
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={handleExportCSV}
+              disabled={exportLoading}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              {exportLoading ? "Exporting…" : "Export CSV"}
             </Button>
-          )}
+            {isPrepaid && (
+              <Button onClick={() => setAddBalanceOpen(true)}>
+                <Plus className="mr-2 h-4 w-4" />
+                Add Balance
+              </Button>
+            )}
+          </div>
         </div>
 
         {isLoading ? (
@@ -312,73 +393,92 @@ export default function BillingPage() {
                 </div>
               </div>
 
-              {/* Recent Transactions */}
+              {/* Phase 9: Wallet Panel */}
               <div className="rounded-lg border bg-white p-6 shadow-sm">
-                <div className="mb-6 flex items-center justify-between">
-                  <h2 className="text-lg font-semibold text-gray-900">
-                    Recent Transactions
-                  </h2>
-                  <Button variant="outline" size="sm">
-                    <Download className="mr-2 h-4 w-4" />
-                    Export
-                  </Button>
-                </div>
+                <h2 className="mb-4 text-lg font-semibold text-gray-900">Wallet</h2>
 
-                {billingData?.transactions && billingData.transactions.length > 0 ? (
+                {wallet ? (
                   <div className="space-y-4">
-                    {billingData.transactions.slice(0, 5).map((transaction) => (
-                      <div
-                        key={transaction.id}
-                        className="flex items-center justify-between border-b pb-4 last:border-0 last:pb-0"
-                      >
-                        <div className="flex items-center space-x-3">
-                          <div
-                            className={`rounded-lg p-2 ${
-                              transaction.type === "credit"
-                                ? "bg-green-100"
-                                : "bg-red-100"
-                            }`}
-                          >
-                            {transaction.type === "credit" ? (
-                              <Plus className="h-4 w-4 text-green-600" />
-                            ) : (
-                              <DollarSign className="h-4 w-4 text-red-600" />
-                            )}
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium text-gray-900">
-                              {transaction.description}
-                            </p>
-                            <p className="text-xs text-gray-500">
-                              {new Date(transaction.created_at).toLocaleDateString()}
-                            </p>
-                          </div>
+                    {/* Balance summary */}
+                    <div className="rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 p-4 space-y-3">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Paid credit</span>
+                        <span className="font-semibold text-gray-800">₹{wallet.balance_inr.toFixed(2)}</span>
+                      </div>
+                      {wallet.free_credit_inr > 0 && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-gray-600">Free credit</span>
+                          <span className="font-semibold text-green-700">₹{wallet.free_credit_inr.toFixed(2)}</span>
                         </div>
-                        <span
-                          className={`font-medium ${
-                            transaction.type === "credit"
-                              ? "text-green-600"
-                              : "text-red-600"
-                          }`}
-                        >
-                          {transaction.type === "credit" ? "+" : "-"}$
-                          {transaction.amount.toFixed(2)}
+                      )}
+                      <div className="border-t pt-2 flex justify-between font-semibold">
+                        <span className="text-gray-700">Total available</span>
+                        <span className={wallet.low_balance ? "text-red-600" : "text-blue-700"}>
+                          ₹{wallet.total_available_inr.toFixed(2)}
                         </span>
                       </div>
-                    ))}
+                    </div>
+
+                    {/* Model preference */}
+                    <div>
+                      <p className="mb-2 text-sm font-medium text-gray-700">Default AI model</p>
+                      <ModelSelectorDropdown
+                        value={preferredModel}
+                        onChange={handleSetPreferredModel}
+                      />
+                    </div>
+
+                    {/* Wallet transactions */}
+                    <div>
+                      <p className="mb-2 text-sm font-medium text-gray-700">Recent transactions</p>
+                      {walletTxns.length > 0 ? (
+                        <div className="space-y-2">
+                          {walletTxns.slice(0, 8).map((txn) => (
+                            <div key={txn.id} className="flex items-center justify-between text-sm">
+                              <div>
+                                <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium mr-2 ${
+                                  txn.txn_type === "debit"
+                                    ? "bg-red-100 text-red-700"
+                                    : "bg-green-100 text-green-700"
+                                }`}>
+                                  {txn.txn_type}
+                                </span>
+                                <span className="text-gray-600">{txn.description}</span>
+                              </div>
+                              <div className="text-right">
+                                <span className={txn.amount_inr < 0 ? "text-red-600" : "text-green-600"}>
+                                  {txn.amount_inr < 0 ? "" : "+"}₹{Math.abs(txn.amount_inr).toFixed(4)}
+                                </span>
+                                <p className="text-xs text-gray-400">
+                                  {new Date(txn.created_at).toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-gray-500">No transactions yet.</p>
+                      )}
+                    </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center py-8 text-center">
-                    <Calendar className="h-12 w-12 text-gray-400" />
-                    <h3 className="mt-4 text-sm font-medium text-gray-900">
-                      No transactions yet
-                    </h3>
-                    <p className="mt-1 text-sm text-gray-600">
-                      Transaction history will appear here
-                    </p>
+                  <div className="flex flex-col items-center justify-center py-8 text-center text-gray-400">
+                    <Calendar className="h-10 w-10 mb-2" />
+                    <p className="text-sm">Loading wallet…</p>
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Enterprise Contact */}
+            <div className="rounded-lg border bg-white p-6 shadow-sm">
+              <div className="mb-6">
+                <h2 className="text-lg font-semibold text-gray-900">Need more? Talk to us</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Custom volume pricing, dedicated infrastructure, SSO, SLAs — reach out and we'll set up a demo.
+                </p>
+              </div>
+              <EnterpriseContactForm />
             </div>
 
             {/* Limits & Usage */}

@@ -38,3 +38,5 @@ from .uat_checklist_item import UATChecklistItem  # P5C-04: UAT Checklist
 from .ci_webhook_config import CIWebhookConfig  # P5C-06: CI Webhook
 from .compliance_score_snapshot import ComplianceScoreSnapshot  # P5C-08: Compliance Trend
 from .code_data_flow_edge import CodeDataFlowEdge  # Phase 3: Request Data Flow Graph
+from .wallet_transaction import WalletTransaction  # Phase 9: Prepaid wallet ledger
+from .enterprise_contact_request import EnterpriseContactRequest  # Phase 9: Enterprise sales pipeline
