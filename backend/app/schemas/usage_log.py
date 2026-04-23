@@ -57,12 +57,16 @@ class UsageLogCreate(BaseModel):
     document_id: Optional[int] = None
     feature_type: str = Field(..., description="Feature type: document_analysis, code_analysis, etc.")
     operation: str = Field(..., description="Specific operation: pass_1_composition, code_review, etc.")
-    model_used: str = Field(default="gemini-2.5-flash")
+    model_used: str = Field(default="gemini-2.0-flash")
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cached_tokens: int = Field(default=0, ge=0)
+    thinking_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
     cost_inr: float = Field(default=0.0, ge=0)
+    raw_cost_inr: Optional[float] = Field(default=None, ge=0)
+    markup_inr: Optional[float] = Field(default=None, ge=0)
+    markup_percent: Optional[float] = Field(default=None, ge=0)
     processing_time_seconds: Optional[float] = None
     extra_data: Optional[dict] = None
 

@@ -125,21 +125,28 @@ class BillingEnforcementService:
 
         # Check based on billing type
         if billing.billing_type == "prepaid":
-            # Prepaid: Check balance
-            result["balance_inr"] = float(billing.balance_inr)
+            # Phase 9: read effective balance from tenants.wallet_* columns (new source of truth)
+            from sqlalchemy import text as sa_text
+            from app.models.tenant import Tenant as TenantModel
+            tenant_row = db.query(TenantModel).filter(TenantModel.id == tenant_id).first()
+            wallet_paid = float(getattr(tenant_row, "wallet_balance_inr", 0) or 0)
+            wallet_free = float(getattr(tenant_row, "wallet_free_credit_inr", 0) or 0)
+            effective_balance = wallet_paid + wallet_free
 
-            if billing.balance_inr < estimated_cost_inr:
+            result["balance_inr"] = effective_balance
+
+            if effective_balance < estimated_cost_inr:
                 self.logger.warning(
-                    f"Insufficient balance for tenant {tenant_id}: "
-                    f"balance=₹{billing.balance_inr}, required=₹{estimated_cost_inr}"
+                    f"Insufficient wallet balance for tenant {tenant_id}: "
+                    f"balance=₹{effective_balance:.2f}, required=₹{estimated_cost_inr}"
                 )
                 raise InsufficientBalanceException(
                     tenant_id=tenant_id,
                     required=estimated_cost_inr,
-                    available=float(billing.balance_inr)
+                    available=effective_balance,
                 )
 
-            self.logger.info(f"Prepaid check passed: balance=₹{billing.balance_inr}")
+            self.logger.info(f"Prepaid check passed: wallet=₹{effective_balance:.2f}")
 
         elif billing.billing_type == "postpaid":
             # Postpaid: Check monthly limit (if set)

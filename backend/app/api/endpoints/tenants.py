@@ -125,6 +125,14 @@ def register_tenant(
         billing = crud.tenant_billing.get_or_create(db, tenant_id=tenant.id)
         logger.info(f"Billing record initialized for tenant {tenant.id}: {billing.billing_type}")
 
+        # 5b. Apply ₹100 wallet signup bonus
+        try:
+            from app.services.wallet_service import wallet_service
+            wallet_service.apply_signup_bonus(db, tenant_id=tenant.id, user_id=admin_user.id)
+            logger.info(f"Signup bonus applied for tenant {tenant.id}")
+        except Exception as bonus_err:
+            logger.warning(f"Signup bonus failed (non-fatal): {bonus_err}")
+
         # 6. Generate access tokens for immediate login
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(

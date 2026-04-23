@@ -11,6 +11,7 @@ import csv
 import io
 from fastapi import APIRouter, HTTPException, Depends, Request, Response, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -47,7 +48,7 @@ from app.schemas.enterprise_contact import (
 )
 from app.models.enterprise_contact_request import EnterpriseContactRequest
 from app.services.wallet_service import wallet_service, InsufficientWalletBalance
-from app.services.cost_service import cost_service, SUPPORTED_MODELS
+from app.services.cost_service import cost_service, SUPPORTED_MODELS, MARKUP_PERCENT, PRICING_REGISTRY
 
 logger = get_logger("api.billing")
 
@@ -934,14 +935,11 @@ def set_preferred_model(
     body: SetPreferredModelRequest,
 ):
     """Set the tenant's default AI model for new analyses."""
-    from app.services.cost_service import PRICING_REGISTRY
     if body.model_id not in PRICING_REGISTRY:
         raise HTTPException(status_code=422, detail=f"Unknown model_id: {body.model_id!r}")
 
     db.execute(
-        __import__("sqlalchemy").text(
-            "UPDATE tenants SET preferred_model = :m WHERE id = :id"
-        ),
+        sa_text("UPDATE tenants SET preferred_model = :m WHERE id = :id"),
         {"m": body.model_id, "id": tenant_id},
     )
     db.commit()
@@ -1000,7 +998,7 @@ def list_supported_models():
     """Return all supported AI models with pricing and description. No auth required."""
     return {
         "models": SUPPORTED_MODELS,
-        "markup_percent": float(__import__("app.services.cost_service", fromlist=["MARKUP_PERCENT"]).MARKUP_PERCENT),
+        "markup_percent": float(MARKUP_PERCENT),
     }
 
 
@@ -1094,8 +1092,8 @@ def submit_enterprise_contact(
     db: Session = Depends(deps.get_db),
     body: EnterpriseContactCreate,
     # Optional — works for unauthenticated public users too
-    tenant_id: Optional[int] = None,
-    current_user: Optional[User] = None,
+    tenant_id: Optional[int] = Depends(deps.get_optional_tenant_id),
+    current_user: Optional[User] = Depends(deps.get_optional_current_user),
 ):
     """
     Submit an enterprise contact request.

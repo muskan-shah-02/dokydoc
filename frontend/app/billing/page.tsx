@@ -153,7 +153,7 @@ export default function BillingPage() {
         {
           headers: {
             Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
-            "X-Tenant-ID": String(tenant?.id ?? ""),
+            ...(tenant?.id != null ? { "X-Tenant-ID": String(tenant.id) } : {}),
           },
         }
       );

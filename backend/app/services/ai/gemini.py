@@ -69,6 +69,7 @@ class GeminiService(LoggerMixin):
         tenant_id: int = None,
         user_id: int = None,
         operation: str = None,
+        model_id: str = None,
         **kwargs
     ) -> genai.types.GenerateContentResponse:
         """
@@ -89,7 +90,8 @@ class GeminiService(LoggerMixin):
             self.logger.info(f"🤖 GEMINI API CALL - Prompt length: {prompt_length} chars")
             self.logger.debug(f"Prompt preview: {prompt[:200]}...")
 
-            response = await self.model.generate_content_async(prompt, **kwargs)
+            model_client = genai.GenerativeModel(model_id) if model_id else self.model
+            response = await model_client.generate_content_async(prompt, **kwargs)
 
             # Extract ALL token counts including thinking tokens
             tokens = self.extract_token_usage(response)
@@ -108,6 +110,7 @@ class GeminiService(LoggerMixin):
                     user_id=user_id,
                     operation=operation or "gemini_api_call",
                     tokens=tokens,
+                    model_id=model_id or settings.GEMINI_MODEL,
                 )
 
             return response
@@ -121,6 +124,7 @@ class GeminiService(LoggerMixin):
         user_id: int = None,
         operation: str = "gemini_api_call",
         tokens: dict = None,
+        model_id: str = None,
     ):
         """
         Centralized cost logging — called after EVERY Gemini API call.
@@ -137,9 +141,10 @@ class GeminiService(LoggerMixin):
                 input_tokens=tokens.get("input_tokens", 0),
                 output_tokens=tokens.get("output_tokens", 0),
                 thinking_tokens=tokens.get("thinking_tokens", 0),
+                model=model_id,
             )
-            cost_inr = cost_data.get("cost_inr", 0)
-            cost_usd = cost_data.get("cost_usd", 0)
+            cost_inr = cost_data.cost_inr
+            cost_usd = float(cost_data.raw_cost_usd)
 
             if cost_inr <= 0:
                 return
@@ -165,12 +170,16 @@ class GeminiService(LoggerMixin):
                     user_id=user_id,
                     feature_type="code_analysis" if "code" in operation or "analysis" in operation else "document_analysis",
                     operation=operation,
-                    model_used=settings.GEMINI_MODEL,
+                    model_used=model_id or settings.GEMINI_MODEL,
                     input_tokens=tokens.get("input_tokens", 0),
-                    output_tokens=tokens.get("output_tokens", 0) + tokens.get("thinking_tokens", 0),
+                    output_tokens=tokens.get("output_tokens", 0),
+                    thinking_tokens=tokens.get("thinking_tokens", 0),
                     cost_usd=cost_usd,
                     cost_inr=cost_inr,
-                    extra_data={"thinking_tokens": tokens.get("thinking_tokens", 0), "auto_logged": True},
+                    raw_cost_inr=float(cost_data.raw_cost_inr),
+                    markup_inr=float(cost_data.markup_inr),
+                    markup_percent=float(cost_data.markup_percent),
+                    extra_data={"auto_logged": True},
                 )
 
                 billing_db.commit()
@@ -1115,7 +1124,7 @@ async def call_gemini_for_validation(
             thinking_tokens=tokens["thinking_tokens"],
         )
         logger.info(
-            f"Validation API cost: ₹{cost_data['cost_inr']:.4f} "
+            f"Validation API cost: ₹{cost_data.cost_inr:.4f} "
             f"({tokens['input_tokens']} in + {tokens['output_tokens']} out + {tokens['thinking_tokens']} thinking)"
         )
 

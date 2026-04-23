@@ -378,3 +378,20 @@ def get_admin_user(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Admin access required",
     )
+
+
+def get_optional_tenant_id(request: Request) -> Optional[int]:
+    """Return tenant_id from request state, or None if unauthenticated."""
+    return getattr(request.state, "tenant_id", None)
+
+
+def get_optional_current_user(
+    db: Session = Depends(get_db),
+    token: Optional[str] = Depends(oauth2_scheme),
+    request: Request = None,
+) -> Optional[User]:
+    """Return the current user, or None if unauthenticated (never raises)."""
+    try:
+        return get_current_user(db=db, token=token, request=request)
+    except (HTTPException, Exception):
+        return None

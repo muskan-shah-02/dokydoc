@@ -40,10 +40,12 @@ export function CostPreviewModal({
   const [selectedModel, setSelectedModel] = useState<string>(initialModel ?? "gemini-2.0-flash");
   const [preview, setPreview] = useState<CostPreview | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     setLoading(true);
+    setError(null);
     api
       .post("/billing/cost-preview", {
         doc_size_kb: docSizeKb,
@@ -51,7 +53,10 @@ export function CostPreviewModal({
         model_id: selectedModel,
       })
       .then((data) => setPreview(data as CostPreview))
-      .catch(() => {})
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load cost preview");
+        setPreview(null);
+      })
       .finally(() => setLoading(false));
   }, [isOpen, selectedModel, docSizeKb, passes]);
 
@@ -85,6 +90,11 @@ export function CostPreviewModal({
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+            </div>
+          ) : error ? (
+            <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>{error}</span>
             </div>
           ) : preview ? (
             <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-3">

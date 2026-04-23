@@ -41,8 +41,12 @@ class CRUDUsageLog:
             input_tokens=obj_in.input_tokens,
             output_tokens=obj_in.output_tokens,
             cached_tokens=obj_in.cached_tokens,
+            thinking_tokens=obj_in.thinking_tokens,
             cost_usd=obj_in.cost_usd,
             cost_inr=obj_in.cost_inr,
+            raw_cost_inr=obj_in.raw_cost_inr,
+            markup_inr=obj_in.markup_inr,
+            markup_percent=obj_in.markup_percent,
             processing_time_seconds=obj_in.processing_time_seconds,
             extra_data=obj_in.extra_data,
             created_at=datetime.now(),
@@ -65,8 +69,12 @@ class CRUDUsageLog:
         cost_inr: float,
         user_id: Optional[int] = None,
         document_id: Optional[int] = None,
-        model_used: str = "gemini-2.5-flash",
+        model_used: str = "gemini-2.0-flash",
         cached_tokens: int = 0,
+        thinking_tokens: int = 0,
+        raw_cost_inr: Optional[float] = None,
+        markup_inr: Optional[float] = None,
+        markup_percent: Optional[float] = None,
         processing_time_seconds: Optional[float] = None,
         extra_data: Optional[dict] = None,
     ) -> UsageLog:
@@ -84,8 +92,12 @@ class CRUDUsageLog:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
+            thinking_tokens=thinking_tokens,
             cost_usd=cost_usd,
             cost_inr=cost_inr,
+            raw_cost_inr=raw_cost_inr,
+            markup_inr=markup_inr,
+            markup_percent=markup_percent,
             processing_time_seconds=processing_time_seconds,
             extra_data=extra_data,
         )
@@ -226,8 +238,8 @@ class CRUDUsageLog:
                     output_tokens=total_output,
                     thinking_tokens=0,
                 )
-                total_cost_inr = computed.get("cost_inr", 0)
-                total_cost_usd = computed.get("cost_usd", 0)
+                total_cost_inr = computed.cost_inr
+                total_cost_usd = float(computed.raw_cost_usd)
             except Exception:
                 pass
 
@@ -282,8 +294,8 @@ class CRUDUsageLog:
                     computed = cost_service.calculate_cost_from_actual_tokens(
                         input_tokens=input_t, output_tokens=output_t, thinking_tokens=0,
                     )
-                    cost_inr = computed.get("cost_inr", 0)
-                    cost_usd = computed.get("cost_usd", 0)
+                    cost_inr = computed.cost_inr
+                    cost_usd = float(computed.raw_cost_usd)
                 except Exception:
                     pass
 

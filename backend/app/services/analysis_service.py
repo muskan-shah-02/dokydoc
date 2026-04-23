@@ -154,13 +154,6 @@ class DocumentAnalysisEngine(LoggerMixin):
     ):
         """Log AI usage to usage_logs with Phase 9 markup transparency fields."""
         try:
-            extra = {
-                "document_id": document_id,
-                "raw_cost_inr": float(breakdown.raw_cost_inr),
-                "markup_inr": float(breakdown.markup_inr),
-                "markup_percent": float(breakdown.markup_percent),
-                "thinking_tokens": breakdown.thinking_tokens,
-            }
             crud.usage_log.log_usage(
                 db=db,
                 tenant_id=tenant_id,
@@ -171,10 +164,13 @@ class DocumentAnalysisEngine(LoggerMixin):
                 model_used=breakdown.model_id,
                 input_tokens=breakdown.input_tokens,
                 output_tokens=breakdown.output_tokens,
+                thinking_tokens=breakdown.thinking_tokens,
                 cost_usd=float(breakdown.raw_cost_usd),
                 cost_inr=float(breakdown.total_cost_inr),
+                raw_cost_inr=float(breakdown.raw_cost_inr),
+                markup_inr=float(breakdown.markup_inr),
+                markup_percent=float(breakdown.markup_percent),
                 processing_time_seconds=processing_time,
-                extra_data=extra,
             )
             self.logger.debug(
                 f"Logged usage: {operation} | model={breakdown.model_id} | "
@@ -272,6 +268,12 @@ class DocumentAnalysisEngine(LoggerMixin):
                 )
                 return False
 
+            # Resolve which AI model to use for this analysis run
+            from app.models.tenant import Tenant as TenantModel
+            tenant_obj = db.query(TenantModel).filter(TenantModel.id == document.tenant_id).first()
+            resolved_model = model_selector.resolve(tenant=tenant_obj)
+            self.logger.info(f"🤖 Model resolved for tenant {document.tenant_id}: {resolved_model}")
+
             try:
                 # --- CHECK 1: Before Pass 1 ---
                 if self._check_stop_signal(db, document_id, document.tenant_id): return False
@@ -281,7 +283,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 # CAE-04 FIX: Update progress before each pass for smooth UI feedback
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 30, "status": "pass_1_composition"})
                 start_time = time.time()
-                composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id)
+                composition_analysis = await self._pass_1_composition_classification(document.raw_text, document_id, model_id=resolved_model)
                 pass_1_duration = time.time() - start_time
 
                 # Save composition analysis to document
@@ -309,7 +311,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 45, "status": "pass_2_segmentation"})
                 start_time = time.time()
                 segments_created = await self._pass_2_content_segmentation(
-                    db, document_id, document.raw_text, composition_analysis, document.tenant_id, analysis_run_id
+                    db, document_id, document.raw_text, composition_analysis, document.tenant_id, analysis_run_id, model_id=resolved_model
                 )
                 pass_2_duration = time.time() - start_time
 
@@ -333,7 +335,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 # CAE-04 FIX: Update progress before Pass 3
                 crud.document.update(db=db, db_obj=document, obj_in={"progress": 55, "status": "pass_3_extraction"})
                 start_time = time.time()
-                await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id)
+                await self._pass_3_structured_extraction(db, document_id, document.tenant_id, analysis_run_id, model_id=resolved_model)
                 pass_3_duration = time.time() - start_time
 
                 # Log Pass 3 usage for analytics
@@ -394,6 +396,20 @@ class DocumentAnalysisEngine(LoggerMixin):
                         }
                     )
 
+                    # Debit wallet for the actual cost incurred
+                    if total_cost_inr > 0:
+                        try:
+                            from decimal import Decimal
+                            from app.services.wallet_service import wallet_service
+                            wallet_service.debit_wallet(
+                                db=db,
+                                tenant_id=document.tenant_id,
+                                amount_inr=Decimal(str(round(total_cost_inr, 6))),
+                                description=f"Document analysis: {document_id}",
+                            )
+                        except Exception as debit_err:
+                            self.logger.warning(f"Wallet debit failed for doc {document_id}: {debit_err}")
+
                 return True
                 
             except Exception as e:
@@ -409,7 +425,7 @@ class DocumentAnalysisEngine(LoggerMixin):
             self._cost_tracker.pop(document_id, None)  # ✅ Cleanup cost tracker
             self.logger.debug(f"Released analysis lock for document {document_id}")
     
-    async def _pass_1_composition_classification(self, raw_text: str, document_id: int) -> Dict:
+    async def _pass_1_composition_classification(self, raw_text: str, document_id: int, model_id: str = None) -> Dict:
         """Pass 1: Analyzes document composition."""
         try:
             prompt = prompt_manager.get_prompt(PromptType.DOCUMENT_COMPOSITION)
@@ -418,7 +434,7 @@ class DocumentAnalysisEngine(LoggerMixin):
             self.logger.info("🔍 PASS 1: Starting composition analysis - 1 Gemini API call")
             self._increment_api_calls(document_id)
 
-            response = await gemini_service.generate_content(full_prompt)
+            response = await gemini_service.generate_content(full_prompt, model_id=model_id)
 
             # Extract ALL token counts including thinking tokens
             tokens = gemini_service.extract_token_usage(response)
@@ -426,6 +442,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 input_tokens=tokens['input_tokens'],
                 output_tokens=tokens['output_tokens'],
                 thinking_tokens=tokens['thinking_tokens'],
+                model=model_id,
             )
 
             self._cost_tracker[document_id]['pass_1_composition'] = {
@@ -449,7 +466,7 @@ class DocumentAnalysisEngine(LoggerMixin):
             raise AIAnalysisException("Composition classification failed", model="gemini", details={"error": str(e)})
     
     async def _pass_2_content_segmentation(
-        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, tenant_id: int, analysis_run_id: int = None
+        self, db: Session, document_id: int, raw_text: str, composition_analysis: Dict, tenant_id: int, analysis_run_id: int = None, model_id: str = None
     ) -> bool:
         """Pass 2: Creates document segments."""
         try:
@@ -459,14 +476,14 @@ class DocumentAnalysisEngine(LoggerMixin):
             for segment in existing_segments:
                 crud.analysis_result.delete_by_segment(db=db, segment_id=segment.id, tenant_id=tenant_id)
             crud.document_segment.delete_by_document(db=db, document_id=document_id, tenant_id=tenant_id)
-            
+
             prompt = prompt_manager.get_prompt(PromptType.CONTENT_SEGMENTATION)
             full_prompt = f"{prompt}\n\nCOMPOSITION ANALYSIS:\n{json.dumps(composition_analysis, indent=2)}\n\nDOCUMENT TEXT:\n{raw_text}"
 
             self.logger.info("🔍 PASS 2: Starting content segmentation - 1 Gemini API call")
             self._increment_api_calls(document_id)
 
-            response = await gemini_service.generate_content(full_prompt)
+            response = await gemini_service.generate_content(full_prompt, model_id=model_id)
 
             # Extract ALL token counts including thinking tokens
             tokens = gemini_service.extract_token_usage(response)
@@ -474,6 +491,7 @@ class DocumentAnalysisEngine(LoggerMixin):
                 input_tokens=tokens['input_tokens'],
                 output_tokens=tokens['output_tokens'],
                 thinking_tokens=tokens['thinking_tokens'],
+                model=model_id,
             )
             self._cost_tracker[document_id]['pass_2_segmentation'] = {
                 'breakdown': cost_data,
@@ -521,7 +539,7 @@ class DocumentAnalysisEngine(LoggerMixin):
             self.logger.error(f"Error in Pass 2: {e}")
             raise DocumentProcessingException("Content segmentation failed", document_id=document_id, details={"error": str(e)})
     
-    async def _pass_3_structured_extraction(self, db: Session, document_id: int, tenant_id: int, analysis_run_id: int = None) -> bool:
+    async def _pass_3_structured_extraction(self, db: Session, document_id: int, tenant_id: int, analysis_run_id: int = None, model_id: str = None) -> bool:
         """Pass 3: Performs structured extraction on each document segment."""
         try:
             run_service = AnalysisRunService() if analysis_run_id else None
@@ -591,7 +609,7 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                     self.logger.info(f"🤖 Analyzing segment {segment.id} ({i+1}/{len(segments)})")
                     self._increment_api_calls(document_id)
 
-                    response = await gemini_service.generate_content(full_prompt)
+                    response = await gemini_service.generate_content(full_prompt, model_id=model_id)
 
                     # Extract ALL token counts including thinking tokens
                     tokens = gemini_service.extract_token_usage(response)
@@ -599,6 +617,7 @@ INSTRUCTIONS: Focus your analysis on the PRIMARY SEGMENT, but use the surroundin
                         input_tokens=tokens['input_tokens'],
                         output_tokens=tokens['output_tokens'],
                         thinking_tokens=tokens['thinking_tokens'],
+                        model=model_id,
                     )
                     pass_3_cost_inr += cost_data.cost_inr
                     pass_3_input_tokens += tokens['input_tokens']

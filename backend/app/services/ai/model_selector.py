@@ -27,12 +27,17 @@ PAID_MODELS = {
     "claude-haiku-4-5-20251001",
 }
 
-FREE_MODEL = settings.GEMINI_FREE_MODEL   # gemini-2.0-flash-lite
-DEFAULT_PAID_MODEL = settings.GEMINI_MODEL  # gemini-2.0-flash
-
 
 class ModelSelector:
     """Resolve which AI model to use for a given analysis request."""
+
+    @property
+    def _free_model(self) -> str:
+        return settings.GEMINI_FREE_MODEL
+
+    @property
+    def _default_paid_model(self) -> str:
+        return settings.GEMINI_MODEL
 
     def resolve(
         self,
@@ -50,7 +55,7 @@ class ModelSelector:
         """
         if force_free:
             logger.debug("force_free=True → using free model")
-            return FREE_MODEL
+            return self._free_model
 
         if tenant is not None:
             balance = float(getattr(tenant, "wallet_balance_inr", 0) or 0)
@@ -60,9 +65,9 @@ class ModelSelector:
             if balance <= 0 and free_credit > 0:
                 logger.info(
                     f"tenant={tenant.id} on free credit only "
-                    f"(balance=₹{balance:.2f}, free=₹{free_credit:.2f}) → {FREE_MODEL}"
+                    f"(balance=₹{balance:.2f}, free=₹{free_credit:.2f}) → {self._free_model}"
                 )
-                return FREE_MODEL
+                return self._free_model
 
         # Honour caller request (paid model) if wallet has funds or no wallet check needed
         if requested_model and requested_model in PAID_MODELS:
@@ -76,8 +81,8 @@ class ModelSelector:
                 logger.debug(f"Using tenant preferred model: {pref}")
                 return pref
 
-        logger.debug(f"Using server default model: {DEFAULT_PAID_MODEL}")
-        return DEFAULT_PAID_MODEL
+        logger.debug(f"Using server default model: {self._default_paid_model}")
+        return self._default_paid_model
 
 
 model_selector = ModelSelector()
