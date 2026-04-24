@@ -75,6 +75,20 @@ def run_migrations_online() -> None:
     connectable = create_engine(database_url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
+        # Pre-create alembic_version with a wider column so long revision IDs
+        # (e.g. s8a4_add_notification_preferences, 33 chars) don't overflow
+        # Alembic's default VARCHAR(32).
+        connection.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS alembic_version ("
+            "version_num VARCHAR(255) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE alembic_version "
+            "ALTER COLUMN version_num TYPE VARCHAR(255)"
+        )
+        connection.commit()
+
         context.configure(
             connection=connection, target_metadata=target_metadata
         )
