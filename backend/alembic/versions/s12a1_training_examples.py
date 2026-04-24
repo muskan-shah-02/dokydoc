@@ -17,14 +17,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Create enum type first
-    op.execute("""
-        DO $$ BEGIN
-            CREATE TYPE feedback_source_enum AS ENUM ('accept', 'reject', 'edit', 'auto');
-        EXCEPTION
-            WHEN duplicate_object THEN null;
-        END $$;
-    """)
+    # Drop any orphaned enum type left by a previous failed run of this migration.
+    # We use String+CheckConstraint instead of a native PG enum to avoid
+    # SQLAlchemy's _on_table_create event firing CreateEnumType unconditionally.
+    op.execute("DROP TYPE IF EXISTS feedback_source_enum")
 
     op.create_table(
         'training_examples',
@@ -38,11 +34,7 @@ def upgrade() -> None:
         sa.Column('human_label', sa.Text(), nullable=True),
         sa.Column(
             'feedback_source',
-            sa.Enum(
-                'accept', 'reject', 'edit', 'auto',
-                name='feedback_source_enum',
-                create_type=False,
-            ),
+            sa.String(16),
             nullable=False,
             server_default='auto',
         ),
@@ -52,6 +44,10 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint('id'),
+        sa.CheckConstraint(
+            "feedback_source IN ('accept', 'reject', 'edit', 'auto')",
+            name='ck_training_examples_feedback_source',
+        ),
     )
 
     op.create_index('idx_training_examples_tenant_task', 'training_examples', ['tenant_id', 'task_type'])
@@ -64,4 +60,3 @@ def downgrade() -> None:
     op.drop_index('idx_training_examples_feedback_source', table_name='training_examples')
     op.drop_index('idx_training_examples_tenant_task', table_name='training_examples')
     op.drop_table('training_examples')
-    op.execute("DROP TYPE IF EXISTS feedback_source_enum;")
