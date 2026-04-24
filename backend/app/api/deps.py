@@ -395,3 +395,15 @@ def get_optional_current_user(
         return get_current_user(db=db, token=token, request=request)
     except (HTTPException, Exception):
         return None
+
+
+def get_current_active_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Return the current user, ensuring the account is active."""
+    if not getattr(current_user, "is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Inactive user account.",
+        )
+    return current_user
