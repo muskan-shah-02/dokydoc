@@ -13,6 +13,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # tenants.settings was originally created as `json`. jsonb_path_ops only
+    # works on `jsonb`, so convert the column type first. The USING cast is
+    # safe because every existing value is valid JSON.
+    op.execute(
+        "ALTER TABLE tenants "
+        "ALTER COLUMN settings TYPE jsonb USING settings::jsonb"
+    )
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_tenants_settings_gin "
         "ON tenants USING GIN (settings jsonb_path_ops)"
@@ -21,3 +28,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ix_tenants_settings_gin")
+    op.execute(
+        "ALTER TABLE tenants "
+        "ALTER COLUMN settings TYPE json USING settings::json"
+    )
