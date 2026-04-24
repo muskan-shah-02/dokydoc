@@ -3,6 +3,10 @@
 Revision ID: s11a1
 Revises: s10a1_requirement_atoms
 Create Date: 2026-04-05
+
+Note: CONCURRENTLY was removed because it cannot run inside Alembic's
+transaction wrapper. For production DBs with heavy write traffic, build
+these indexes manually outside Alembic with CONCURRENTLY.
 """
 from alembic import op
 
@@ -11,9 +15,6 @@ down_revision = 's10a1_requirement_atoms'
 branch_labels = None
 depends_on = None
 
-# CREATE INDEX CONCURRENTLY must run outside a transaction block.
-# Setting transaction_per_migration=True in env.py would still wrap the
-# version pointer update in a transaction, so we use AUTOCOMMIT here instead.
 _INDEXES = [
     ("idx_mismatches_tenant_doc_status",
      "ON mismatches (tenant_id, document_id, status)"),
@@ -37,16 +38,10 @@ _INDEXES = [
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
-    conn.execution_options(isolation_level="AUTOCOMMIT")
     for name, definition in _INDEXES:
-        conn.exec_driver_sql(
-            f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} {definition}"
-        )
+        op.execute(f"CREATE INDEX IF NOT EXISTS {name} {definition}")
 
 
 def downgrade() -> None:
-    conn = op.get_bind()
-    conn.execution_options(isolation_level="AUTOCOMMIT")
     for name, _ in _INDEXES:
-        conn.exec_driver_sql(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+        op.execute(f"DROP INDEX IF EXISTS {name}")

@@ -13,15 +13,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
-    conn.execution_options(isolation_level="AUTOCOMMIT")
-    conn.exec_driver_sql(
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_tenants_settings_gin "
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_tenants_settings_gin "
         "ON tenants USING GIN (settings jsonb_path_ops)"
     )
 
 
 def downgrade() -> None:
-    conn = op.get_bind()
-    conn.execution_options(isolation_level="AUTOCOMMIT")
-    conn.exec_driver_sql("DROP INDEX CONCURRENTLY IF EXISTS ix_tenants_settings_gin")
+    op.execute("DROP INDEX IF EXISTS ix_tenants_settings_gin")
