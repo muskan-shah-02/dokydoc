@@ -36,7 +36,16 @@ def upgrade() -> None:
         sa.Column('ai_confidence', sa.Float(), nullable=True),
         sa.Column('model_name', sa.String(128), nullable=True),
         sa.Column('human_label', sa.Text(), nullable=True),
-        sa.Column('feedback_source', sa.Enum('accept', 'reject', 'edit', 'auto', name='feedback_source_enum'), nullable=False, server_default='auto'),
+        sa.Column(
+            'feedback_source',
+            sa.Enum(
+                'accept', 'reject', 'edit', 'auto',
+                name='feedback_source_enum',
+                create_type=False,
+            ),
+            nullable=False,
+            server_default='auto',
+        ),
         sa.Column('feedback_at', sa.DateTime(), nullable=True),
         sa.Column('reviewer_id', sa.Integer(), sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True),
         sa.Column('source_mismatch_id', sa.Integer(), sa.ForeignKey('mismatches.id', ondelete='SET NULL'), nullable=True),
