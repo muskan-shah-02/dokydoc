@@ -35,7 +35,8 @@ COPY . .
 # Create necessary directories and set permissions
 RUN mkdir -p /app/uploads /app/logs /app/temp \
     && chown -R appuser:appuser /app \
-    && chmod -R 755 /app
+    && chmod -R 755 /app \
+    && chmod +x /app/entrypoint.sh
 
 # Switch to non-root user
 USER appuser
@@ -47,7 +48,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # Development stage
