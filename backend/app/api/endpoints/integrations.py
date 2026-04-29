@@ -38,7 +38,7 @@ from typing import Any, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
