@@ -91,6 +91,9 @@ def upgrade() -> None:
         ON CONFLICT (id) DO NOTHING
     """)
 
+    # Advance the sequence past the explicitly-inserted id=1 so nextval doesn't collide.
+    op.execute("SELECT setval('tenants_id_seq', (SELECT MAX(id) FROM tenants))")
+
     print("✅ Default tenant inserted (id=1)")
 
     # =================================================================

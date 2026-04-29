@@ -7,6 +7,7 @@ from typing import Any, Dict
 from fastapi import Body
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
@@ -189,12 +190,23 @@ def register_tenant(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+    except IntegrityError as e:
+        logger.error(f"Tenant registration integrity error: {e}")
+        db.rollback()
+        err_str = str(e.orig).lower()
+        if "subdomain" in err_str:
+            detail = f"Subdomain '{tenant_in.subdomain}' is already taken. Please choose a different one."
+        elif "email" in err_str or "users_email" in err_str:
+            detail = "That email address is already registered."
+        else:
+            detail = "A registration conflict occurred. Please try again with different details."
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
     except Exception as e:
         logger.error(f"Unexpected error during tenant registration: {e}")
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during registration. Please try again."
+            detail="An unexpected error occurred during registration. Please try again."
         )
 
 
