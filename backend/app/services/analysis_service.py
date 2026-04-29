@@ -3,7 +3,7 @@ import time
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 
-from app import crud, schemas
+from app import crud, schemas, models
 from app.services.document_parser import MultiModalDocumentParser
 from app.services.ai.gemini import gemini_service
 from app.services.ai.prompt_manager import prompt_manager, PromptType
