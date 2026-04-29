@@ -56,7 +56,7 @@ export function PremiumGateCard({
         </div>
         <Button
           className="bg-violet-600 hover:bg-violet-700 text-white gap-2"
-          onClick={() => window.open("/dashboard/billing", "_self")}
+          onClick={() => window.open("/settings/billing", "_self")}
         >
           <Zap className="w-4 h-4" /> Upgrade to Pro
         </Button>

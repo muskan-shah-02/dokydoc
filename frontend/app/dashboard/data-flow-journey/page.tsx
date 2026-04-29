@@ -108,7 +108,7 @@ const JOURNEY_STEPS: JourneyStep[] = [
     color: "purple",
     personas: ["developer", "ba", "cxo"],
     badge: "Premium",
-    action: { label: "View Plans", href: "/dashboard/billing" },
+    action: { label: "View Plans", href: "/settings/billing" },
   },
   {
     number: 4,
@@ -430,7 +430,7 @@ export default function DataFlowJourneyPage() {
               Data Flow is a Professional / Enterprise feature.
             </span>
             <Link
-              href="/dashboard/billing"
+              href="/settings/billing"
               className="text-sm text-purple-800 font-semibold underline hover:text-purple-900"
             >
               Upgrade
